@@ -1,0 +1,39 @@
+## Core
+requests>=2.31.0
+aiohttp>=3.9.0
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+numpy>=1.26.0
+scipy>=1.11.0
+
+## WebSocket (live adapter layer)
+websockets>=12.0
+
+## Weather data
+open-meteo-requests>=1.0.0
+requests-cache>=1.1.0
+retry-requests>=2.0.0
+metpy>=1.6.0
+
+## Kalshi API
+kalshi-python>=2.0.0
+
+## Polymarket
+py-clob-client>=0.12.0
+
+## Data storage & persistence
+pandas>=2.1.0
+sqlite-utils>=3.35.0
+
+## Backtesting
+vectorbt>=0.26.0
+
+## Scheduling
+apscheduler>=3.10.0
+
+## Logging
+structlog>=23.2.0
+
+## Testing
+pytest>=7.4.0
+pytest-asyncio>=0.21.0

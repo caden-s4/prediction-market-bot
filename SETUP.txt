@@ -1,0 +1,339 @@
+================================================================================
+  PREDICTION MARKET BOT – API KEY & CREDENTIAL SETUP GUIDE
+================================================================================
+
+Every credential the bot needs lives in ONE file: prediction_market_bot/.env
+The bot reads this file automatically at startup via python-dotenv.
+No credential is ever hardcoded in source code.
+
+--------------------------------------------------------------------------------
+STEP 0 – CREATE THE .env FILE
+--------------------------------------------------------------------------------
+
+From the prediction_market_bot/ directory, copy the example template:
+
+    cp .env.example .env
+
+Open .env in any text editor. You will fill in the values described below.
+The file stays local to your machine and should never be committed to git
+(it is already listed in .gitignore).
+
+
+================================================================================
+SECTION 1 – KALSHI
+================================================================================
+
+Kalshi is a CFTC-regulated US prediction exchange.
+Website: https://kalshi.com
+
+--- 1a. Create an account ---
+
+1. Go to https://kalshi.com and sign up.
+2. Complete identity verification (required by US regulations).
+3. Deposit funds into your account.
+
+--- 1b. Generate API credentials ---
+
+1. Log in to Kalshi and go to:
+       Account → Settings → API Keys   (or visit /settings/api-keys directly)
+2. Click "Create New API Key".
+3. Give it a label (e.g. "weather-bot").
+4. Copy the two values shown:
+       API Key    – a long alphanumeric string (your public identifier)
+       API Secret – a base64-encoded secret (shown ONCE – save it immediately)
+
+--- 1c. Choose environment ---
+
+Kalshi offers a demo (paper trading) environment and a live production environment.
+
+   Demo URL:  https://demo-api.kalshi.co/trade-api/v2
+   Prod URL:  https://trading-api.kalshi.com/trade-api/v2
+
+Set KALSHI_ENV=demo while testing. Switch to KALSHI_ENV=prod only when you are
+ready to trade with real money.
+
+--- 1d. Add to .env ---
+
+Open prediction_market_bot/.env and set:
+
+    KALSHI_API_KEY=<paste your API Key here>
+    KALSHI_API_SECRET=<paste your API Secret here>
+    KALSHI_ENV=demo
+
+
+================================================================================
+SECTION 2 – POLYMARKET
+================================================================================
+
+Polymarket is a decentralised prediction market running on the Polygon blockchain.
+Website: https://polymarket.com
+
+Polymarket authentication is more involved than Kalshi because it requires a
+blockchain wallet in addition to an API key.
+
+--- 2a. Create and fund a Polygon wallet ---
+
+You need an Ethereum-compatible wallet that supports the Polygon (MATIC) network.
+MetaMask is the most common choice.
+
+1. Install MetaMask: https://metamask.io
+2. Create a new wallet and save the 12-word seed phrase somewhere safe.
+3. In MetaMask, add the Polygon network:
+       Network name: Polygon Mainnet
+       RPC URL:      https://polygon-rpc.com
+       Chain ID:     137
+       Symbol:       MATIC
+       Explorer:     https://polygonscan.com
+4. Fund the wallet with USDC on Polygon. You can bridge USDC from Ethereum
+   using the official Polygon bridge (https://wallet.polygon.technology) or
+   buy MATIC directly on a CEX and withdraw to Polygon.
+
+Your wallet address (starts with 0x...) is your POLYMARKET_FUNDER_ADDRESS.
+Your wallet private key is your POLYMARKET_PRIVATE_KEY. Export it from MetaMask:
+   MetaMask → three dots → Account details → Show private key
+
+   !! TREAT THE PRIVATE KEY LIKE A PASSWORD – NEVER SHARE IT !!
+
+--- 2b. Register on Polymarket and generate CLOB API credentials ---
+
+Polymarket uses a two-layer auth system:
+   L1 auth – your wallet private key (signs blockchain transactions)
+   L2 auth – a Polymarket CLOB API key (signs REST requests)
+
+To generate the CLOB API key:
+
+1. Go to https://polymarket.com and connect your MetaMask wallet.
+2. The CLOB API credentials are derived from your wallet. Use the official
+   py-clob-client library to generate them:
+
+       pip install py-clob-client
+       python - <<'EOF'
+       from py_clob_client.client import ClobClient
+       client = ClobClient(
+           host="https://clob.polymarket.com",
+           chain_id=137,
+           key="<YOUR_WALLET_PRIVATE_KEY>",
+       )
+       creds = client.create_or_derive_api_creds()
+       print("API_KEY:       ", creds.api_key)
+       print("API_SECRET:    ", creds.api_secret)
+       print("API_PASSPHRASE:", creds.api_passphrase)
+       EOF
+
+   This prints three values. Copy all three.
+
+--- 2c. Add to .env ---
+
+Open prediction_market_bot/.env and set:
+
+    POLYMARKET_API_KEY=<paste api_key from step 2b>
+    POLYMARKET_API_SECRET=<paste api_secret from step 2b>
+    POLYMARKET_API_PASSPHRASE=<paste api_passphrase from step 2b>
+    POLYMARKET_PRIVATE_KEY=<paste your wallet private key (0x...)>
+    POLYMARKET_FUNDER_ADDRESS=<paste your wallet address (0x...)>
+
+
+================================================================================
+SECTION 3 – ECMWF (OPTIONAL)
+================================================================================
+
+The bot uses the ECMWF weather model via Open-Meteo, which is FREE and requires
+no API key. This section only applies if you want to switch to the commercial
+ECMWF API directly for higher-resolution or proprietary data.
+
+For most users: leave ECMWF_API_KEY blank in .env. The bot will automatically
+use the Open-Meteo free tier which includes ECMWF IFS data.
+
+If you do want a direct ECMWF API key:
+1. Register at https://api.ecmwf.int
+2. Go to your profile and create an API key.
+3. Add to .env:
+
+    ECMWF_API_KEY=<your ECMWF API key>
+    ECMWF_API_URL=https://api.ecmwf.int/v1
+
+Open-Meteo (used by default, no key needed): https://open-meteo.com/en/docs
+NOAA GFS, NAM, HRRR via Open-Meteo: also free, no key required.
+
+
+================================================================================
+SECTION 4 – BOT TUNING PARAMETERS
+================================================================================
+
+These are set in .env and control the bot's risk management. Defaults are
+conservative starting points – adjust only after you understand what each does.
+
+    MIN_EDGE_THRESHOLD=0.05
+        Minimum net edge (after tx costs) required to trade.
+        0.05 = 5 percentage points. Lower = more trades but more noise.
+        Do not go below 0.03 unless your calibration data justifies it.
+
+    KELLY_FRACTION=0.25
+        Multiplier applied to the full Kelly position size.
+        0.25 = quarter-Kelly. Range: 0.1 (very conservative) to 0.5 (moderate).
+        Never use 1.0 (full Kelly) unless your probability model is perfect.
+
+    MAX_POSITION_FRACTION=0.08
+        Hard cap: no single trade can exceed this fraction of bankroll.
+        0.08 = 8%. Protects against any single bet being catastrophic.
+
+    MAX_TOTAL_EXPOSURE=0.25
+        Hard cap: total open positions cannot exceed this fraction of bankroll.
+        0.25 = 25%. Keeps most of the bankroll liquid.
+
+    BANKROLL_USD=1000.0
+        Your starting bankroll in USD. The bot uses this to size positions.
+        Update this to match your actual deposited capital.
+
+    POLL_INTERVAL_SECONDS=300
+        How often the bot runs its full pipeline loop (in seconds).
+        300 = every 5 minutes. HRRR updates hourly, so 300s is a good balance.
+        Lower = more API calls; do not go below 60.
+
+    DRY_RUN=true
+        true  = paper trading, no real orders placed (safe to test).
+        false = live trading with real money.
+        ALWAYS test with DRY_RUN=true first. Switch to false only when satisfied.
+
+
+================================================================================
+SECTION 5 – COMPLETE .env EXAMPLE WITH YOUR VALUES
+================================================================================
+
+After following the steps above, your .env file should look like this
+(with real values in place of the placeholders):
+
+    # Kalshi
+    KALSHI_API_KEY=abc123xyz...
+    KALSHI_API_SECRET=SGVsbG8gV29ybGQ=...
+    KALSHI_ENV=demo
+
+    # Polymarket
+    POLYMARKET_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    POLYMARKET_API_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    POLYMARKET_API_PASSPHRASE=somePassphrase123
+    POLYMARKET_PRIVATE_KEY=0xabc123...your64hexchars...
+    POLYMARKET_FUNDER_ADDRESS=0xYourWalletAddress...
+
+    # ECMWF (leave blank to use free Open-Meteo)
+    ECMWF_API_KEY=
+    ECMWF_API_URL=https://api.ecmwf.int/v1
+
+    # Bot settings
+    MIN_EDGE_THRESHOLD=0.05
+    KELLY_FRACTION=0.25
+    MAX_POSITION_FRACTION=0.08
+    MAX_TOTAL_EXPOSURE=0.25
+    BANKROLL_USD=1000.0
+    POLL_INTERVAL_SECONDS=300
+    DRY_RUN=true
+
+
+================================================================================
+SECTION 6 – INSTALL DEPENDENCIES & FIRST RUN
+================================================================================
+
+1. Install Python 3.11+ if you have not already: https://python.org/downloads
+
+2. From the prediction_market_bot/ directory, install dependencies:
+
+       pip install -r requirements.txt
+
+3. Run a single dry-run cycle to verify everything is wired up:
+
+       python main.py --once --log-level DEBUG
+
+   You should see log lines like:
+       INFO  Bot initialised | dry_run=True bankroll=$1000.00 ...
+       INFO  Scanned N markets
+       INFO  Stage1: market=... loc=(...) horizon=...h → ConsensusForecast(...)
+       INFO  Stage3: market=... dir=YES net=0.08 passes=True
+       INFO  [DRY RUN] Would place YES order on Kalshi: ...
+
+4. If it runs without errors and you see market scanning activity, switch to
+   the live loop:
+
+       python main.py --log-level INFO
+
+5. To enable live trading, edit .env:
+
+       DRY_RUN=false
+
+   Then restart the bot. Orders will now be placed for real.
+
+
+================================================================================
+SECTION 7 – WHERE EACH VARIABLE IS USED IN CODE
+================================================================================
+
+If you want to trace exactly where each credential flows in the source code:
+
+   KALSHI_API_KEY / KALSHI_API_SECRET
+       → config.py KalshiConfig.from_env()
+       → data/markets/kalshi.py KalshiClient.__init__()
+       → KalshiClient._sign() – used in every authenticated API call
+
+   KALSHI_ENV
+       → config.py KalshiConfig.__post_init__() – sets base_url to prod or demo
+
+   POLYMARKET_PRIVATE_KEY
+       → config.py PolymarketConfig.from_env()
+       → data/markets/polymarket.py PolymarketClient._init_clob_client()
+       → passed to py_clob_client.ClobClient(key=...) for on-chain signing
+
+   POLYMARKET_API_KEY / API_SECRET / API_PASSPHRASE
+       → config.py PolymarketConfig.from_env()
+       → data/markets/polymarket.py PolymarketClient._init_clob_client()
+       → passed to py_clob_client.ApiCreds(...) for REST request signing
+
+   POLYMARKET_FUNDER_ADDRESS
+       → config.py PolymarketConfig.from_env()
+       → data/markets/polymarket.py PolymarketClient._init_clob_client()
+       → passed to ClobClient(funder=...) to identify the funding wallet
+
+   ECMWF_API_KEY
+       → data/weather/ecmwf.py ECMWFClient (for commercial API access only)
+       → leave blank to use free Open-Meteo tier
+
+   MIN_EDGE_THRESHOLD
+       → config.py BotConfig
+       → bot.py Stage3Edge(min_edge_threshold=...)
+       → bot.py Stage5Timing(base_edge_threshold=...)
+       → meta/calibration.py get_edge_threshold_adjustment() base
+
+   KELLY_FRACTION / MAX_POSITION_FRACTION / MAX_TOTAL_EXPOSURE
+       → config.py BotConfig
+       → bot.py Stage4Risk(kelly_fraction=..., max_position_fraction=...,
+                           max_total_exposure=...)
+
+   BANKROLL_USD
+       → config.py BotConfig
+       → bot.py Portfolio(starting_bankroll=...) (overridden by saved state)
+       → utils/storage.py data/state.json persists bankroll between restarts
+
+   POLL_INTERVAL_SECONDS
+       → config.py BotConfig
+       → bot.py Bot.run_forever() – time.sleep() between pipeline cycles
+
+   DRY_RUN
+       → config.py BotConfig
+       → execution/executor.py Executor – if True, skips real order placement
+       → data/markets/kalshi.py KalshiClient.place_order() – logs instead
+       → data/markets/polymarket.py PolymarketClient.place_order() – logs instead
+
+
+================================================================================
+SECTION 8 – SECURITY CHECKLIST
+================================================================================
+
+Before running the bot with real money, verify:
+
+  [ ] .env is listed in .gitignore (it is by default – do not remove it)
+  [ ] You have never committed .env to git (check: git log --all -- .env)
+  [ ] Your Polymarket private key is stored ONLY in .env on your machine
+  [ ] You started with DRY_RUN=true and verified logs show correct behavior
+  [ ] Your Kalshi account is using the demo environment first (KALSHI_ENV=demo)
+  [ ] Your starting BANKROLL_USD matches what you actually deposited
+  [ ] You understand the bot can lose money – never trade more than you can lose
+
+================================================================================
