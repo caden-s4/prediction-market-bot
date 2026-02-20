@@ -34,6 +34,7 @@ def _get(key: str, default: str = "") -> str:
 
 @dataclass(frozen=True)
 class KalshiConfig:
+    enabled: bool           # Set KALSHI_ENABLED=false to disable entirely
     api_key: str
     api_secret: str
     env: str  # "prod" | "demo"
@@ -50,9 +51,11 @@ class KalshiConfig:
 
     @classmethod
     def from_env(cls) -> "KalshiConfig":
+        enabled = _get("KALSHI_ENABLED", "true").lower() != "false"
         return cls(
-            api_key=_require("KALSHI_API_KEY"),
-            api_secret=_require("KALSHI_API_SECRET"),
+            enabled=enabled,
+            api_key=_require("KALSHI_API_KEY") if enabled else _get("KALSHI_API_KEY", ""),
+            api_secret=_require("KALSHI_API_SECRET") if enabled else _get("KALSHI_API_SECRET", ""),
             env=_get("KALSHI_ENV", "demo"),
         )
 
@@ -61,6 +64,7 @@ class KalshiConfig:
 
 @dataclass(frozen=True)
 class PolymarketConfig:
+    enabled: bool           # Set POLYMARKET_ENABLED=false to disable entirely
     api_key: str
     api_secret: str
     api_passphrase: str
@@ -71,12 +75,14 @@ class PolymarketConfig:
 
     @classmethod
     def from_env(cls) -> "PolymarketConfig":
+        enabled = _get("POLYMARKET_ENABLED", "true").lower() != "false"
         return cls(
-            api_key=_require("POLYMARKET_API_KEY"),
-            api_secret=_require("POLYMARKET_API_SECRET"),
-            api_passphrase=_require("POLYMARKET_API_PASSPHRASE"),
-            private_key=_require("POLYMARKET_PRIVATE_KEY"),
-            funder_address=_require("POLYMARKET_FUNDER_ADDRESS"),
+            enabled=enabled,
+            api_key=_require("POLYMARKET_API_KEY") if enabled else _get("POLYMARKET_API_KEY", ""),
+            api_secret=_require("POLYMARKET_API_SECRET") if enabled else _get("POLYMARKET_API_SECRET", ""),
+            api_passphrase=_require("POLYMARKET_API_PASSPHRASE") if enabled else _get("POLYMARKET_API_PASSPHRASE", ""),
+            private_key=_require("POLYMARKET_PRIVATE_KEY") if enabled else _get("POLYMARKET_PRIVATE_KEY", ""),
+            funder_address=_require("POLYMARKET_FUNDER_ADDRESS") if enabled else _get("POLYMARKET_FUNDER_ADDRESS", ""),
         )
 
 
