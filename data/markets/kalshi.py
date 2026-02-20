@@ -186,10 +186,6 @@ class KalshiClient(BaseMarketClient):
             "status": "open",
             "limit": min(limit, 200),
         }
-        # Kalshi supports series_ticker prefix filtering
-        if category == "weather" or (tags and "weather" in tags):
-            params["series_ticker"] = "KXWEATHER"
-
         try:
             data = self._get("/markets", params=params)
         except Exception as exc:
@@ -204,14 +200,20 @@ class KalshiClient(BaseMarketClient):
         return markets
 
     def get_weather_markets(self, limit: int = 200) -> List[Market]:
-        """Fetch only weather-series markets from Kalshi."""
+        """Fetch weather-series markets from Kalshi.
+
+        Kalshi weather markets span multiple series (KXHIGHS, KXLOWS, KXPRECIP,
+        KXSNOW, KXRAIN, KXTEMP, KXWIND, KXHURR, etc.).  Rather than hard-coding
+        a single series_ticker that may not exist, we fetch all open markets and
+        rely on _parse_market's ticker-regex + keyword matching to keep only the
+        weather-relevant ones.
+        """
         params: Dict[str, Any] = {
             "status": "open",
             "limit": min(limit, 200),
         }
         try:
-            # Kalshi weather series tickers all start with KXWEATHER*
-            data = self._get("/markets", params={**params, "series_ticker": "KXWEATHER"})
+            data = self._get("/markets", params=params)
             markets = [self._parse_market(m) for m in data.get("markets", [])]
             return [m for m in markets if m is not None]
         except Exception as exc:
