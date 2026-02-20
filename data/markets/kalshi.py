@@ -227,7 +227,9 @@ class KalshiClient(BaseMarketClient):
         results: List[Market] = []
         seen: set = set()
 
-        for series in _WEATHER_SERIES_TICKERS:
+        for i, series in enumerate(_WEATHER_SERIES_TICKERS):
+            if i > 0:
+                time.sleep(0.6)  # stay under Kalshi rate limit (~1 req/s)
             try:
                 params: Dict[str, Any] = {
                     "status": "open",
