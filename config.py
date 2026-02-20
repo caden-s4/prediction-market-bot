@@ -44,7 +44,7 @@ class KalshiConfig:
         object.__setattr__(
             self,
             "base_url",
-            "https://trading-api.kalshi.com/trade-api/v2"
+            "https://api.elections.kalshi.com/trade-api/v2"
             if self.env == "prod"
             else "https://demo-api.kalshi.co/trade-api/v2",
         )

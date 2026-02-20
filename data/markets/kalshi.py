@@ -2,7 +2,7 @@
 data.markets.kalshi – Kalshi REST API v2 client.
 
 Kalshi is a regulated US prediction market exchange.
-Docs: https://trading-api.kalshi.com/trade-api/v2
+Docs: https://api.elections.kalshi.com/trade-api/v2
 
 Authentication: HMAC-SHA256 signed requests using API key + secret.
 Weather markets on Kalshi are well categorised (series ticker prefix "KXWEATHER").
@@ -117,7 +117,7 @@ class KalshiClient(BaseMarketClient):
         self,
         api_key: str,
         api_secret: str,
-        base_url: str = "https://trading-api.kalshi.com/trade-api/v2",
+        base_url: str = "https://api.elections.kalshi.com/trade-api/v2",
     ) -> None:
         from urllib.parse import urlparse
         self._api_key = api_key
