@@ -134,11 +134,13 @@ class KalshiClient(BaseMarketClient):
         """
         Generate Kalshi HMAC-SHA256 signature headers.
         Timestamp is in milliseconds.
+        path must be the bare path (no query string).
+        The API secret from Kalshi is base64-encoded; decode it before use.
         """
         ts_ms = str(int(time.time() * 1000))
         message = ts_ms + method.upper() + path + body
         signature = hmac.new(
-            self._api_secret.encode("utf-8"),
+            base64.b64decode(self._api_secret),
             message.encode("utf-8"),
             hashlib.sha256,
         ).digest()
@@ -150,9 +152,7 @@ class KalshiClient(BaseMarketClient):
         }
 
     def _get(self, path: str, params: Optional[Dict] = None) -> Any:
-        query = ("?" + urlencode(params)) if params else ""
-        full_path = path + query
-        headers = self._sign("GET", full_path)
+        headers = self._sign("GET", path)
         url = self._base_url + path
         resp = self._session.get(url, params=params, headers=headers, timeout=15)
         logger.debug("Kalshi GET %s → HTTP %d", url, resp.status_code)

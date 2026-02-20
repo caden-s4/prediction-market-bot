@@ -82,7 +82,7 @@ class KalshiWSAdapter(BaseMarketAdapter):
         path = "/trade-api/ws/v2"
         message = ts_ms + "GET" + path
         sig = hmac.new(
-            self._api_secret.encode("utf-8"),
+            base64.b64decode(self._api_secret),
             message.encode("utf-8"),
             hashlib.sha256,
         ).digest()
