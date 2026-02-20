@@ -155,8 +155,11 @@ class KalshiClient(BaseMarketClient):
         headers = self._sign("GET", full_path)
         url = self._base_url + path
         resp = self._session.get(url, params=params, headers=headers, timeout=15)
+        logger.debug("Kalshi GET %s → HTTP %d", url, resp.status_code)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        logger.debug("Kalshi response keys: %s", list(data.keys()) if isinstance(data, dict) else type(data).__name__)
+        return data
 
     def _post(self, path: str, body: Dict) -> Any:
         import json
@@ -214,7 +217,11 @@ class KalshiClient(BaseMarketClient):
         }
         try:
             data = self._get("/markets", params=params)
-            markets = [self._parse_market(m) for m in data.get("markets", [])]
+            raw = data.get("markets", [])
+            logger.debug("Kalshi raw market count before filtering: %d", len(raw))
+            if raw:
+                logger.debug("Kalshi sample tickers: %s", [m.get("ticker") for m in raw[:5]])
+            markets = [self._parse_market(m) for m in raw]
             return [m for m in markets if m is not None]
         except Exception as exc:
             logger.error("Kalshi get_weather_markets failed: %s", exc)
