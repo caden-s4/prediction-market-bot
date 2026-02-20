@@ -212,26 +212,46 @@ class KalshiClient(BaseMarketClient):
         """Fetch weather-series markets from Kalshi.
 
         Kalshi weather markets span multiple series (KXHIGHS, KXLOWS, KXPRECIP,
-        KXSNOW, KXRAIN, KXTEMP, KXWIND, KXHURR, etc.).  Rather than hard-coding
-        a single series_ticker that may not exist, we fetch all open markets and
-        rely on _parse_market's ticker-regex + keyword matching to keep only the
-        weather-relevant ones.
+        KXSNOW, KXRAIN, KXTEMP, KXWIND, KXHURR, etc.).  The /markets endpoint
+        returns results in alphabetical ticker order, so weather markets may not
+        appear in the first page.  We paginate via cursor until we have collected
+        enough weather markets or exhausted all open markets (capped at 20 pages).
         """
-        params: Dict[str, Any] = {
-            "status": "open",
-            "limit": min(limit, 200),
-        }
+        PAGE_SIZE = 200
+        MAX_PAGES = 20
+        results: List[Market] = []
+        cursor: Optional[str] = None
+        total_raw = 0
+
         try:
-            data = self._get("/markets", params=params)
-            raw = data.get("markets", [])
-            logger.debug("Kalshi raw market count before filtering: %d", len(raw))
-            if raw:
-                logger.debug("Kalshi sample tickers: %s", [m.get("ticker") for m in raw[:5]])
-            markets = [self._parse_market(m) for m in raw]
-            return [m for m in markets if m is not None]
+            for page in range(MAX_PAGES):
+                params: Dict[str, Any] = {"status": "open", "limit": PAGE_SIZE}
+                if cursor:
+                    params["cursor"] = cursor
+                data = self._get("/markets", params=params)
+                raw = data.get("markets", [])
+                total_raw += len(raw)
+                logger.debug(
+                    "Kalshi page %d: %d markets (total scanned=%d)",
+                    page + 1, len(raw), total_raw,
+                )
+                for item in raw:
+                    m = self._parse_market(item)
+                    if m:
+                        results.append(m)
+
+                cursor = data.get("cursor") or ""
+                if not cursor or len(raw) < PAGE_SIZE:
+                    break
+
+            logger.debug(
+                "Kalshi pagination done: scanned %d markets, found %d weather",
+                total_raw, len(results),
+            )
+            return results
         except Exception as exc:
             logger.error("Kalshi get_weather_markets failed: %s", exc)
-            return []
+            return results
 
     def _parse_market(self, item: dict) -> Optional[Market]:
         try:
