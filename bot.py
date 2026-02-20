@@ -65,22 +65,36 @@ class Bot:
         self._bot_cfg = config.bot
 
         # ── Market clients ────────────────────────────────────────────────
-        self._kalshi = KalshiClient(
-            api_key=config.kalshi.api_key,
-            api_secret=config.kalshi.api_secret,
-            base_url=config.kalshi.base_url,
-        )
-        self._polymarket = PolymarketClient(
-            api_key=config.polymarket.api_key,
-            api_secret=config.polymarket.api_secret,
-            api_passphrase=config.polymarket.api_passphrase,
-            private_key=config.polymarket.private_key,
-            funder_address=config.polymarket.funder_address,
-        )
-        self._clients: Dict[str, BaseMarketClient] = {
-            "kalshi": self._kalshi,
-            "polymarket": self._polymarket,
-        }
+        self._kalshi: Optional[KalshiClient] = None
+        self._polymarket: Optional[PolymarketClient] = None
+        self._clients: Dict[str, BaseMarketClient] = {}
+
+        if config.kalshi.enabled:
+            self._kalshi = KalshiClient(
+                api_key=config.kalshi.api_key,
+                api_secret=config.kalshi.api_secret,
+                base_url=config.kalshi.base_url,
+            )
+            self._clients["kalshi"] = self._kalshi
+        else:
+            logger.info("Kalshi access DISABLED (KALSHI_ENABLED=false)")
+
+        if config.polymarket.enabled:
+            self._polymarket = PolymarketClient(
+                api_key=config.polymarket.api_key,
+                api_secret=config.polymarket.api_secret,
+                api_passphrase=config.polymarket.api_passphrase,
+                private_key=config.polymarket.private_key,
+                funder_address=config.polymarket.funder_address,
+            )
+            self._clients["polymarket"] = self._polymarket
+        else:
+            logger.info("Polymarket access DISABLED (POLYMARKET_ENABLED=false)")
+
+        if not self._clients:
+            raise RuntimeError(
+                "No platforms enabled. Set KALSHI_ENABLED=true and/or POLYMARKET_ENABLED=true in .env"
+            )
 
         # ── Market scanner ────────────────────────────────────────────────
         self._scanner = scanner or build_default_scanner(

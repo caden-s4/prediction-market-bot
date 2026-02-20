@@ -203,6 +203,10 @@ SECTION 5 – COMPLETE .env EXAMPLE WITH YOUR VALUES
 After following the steps above, your .env file should look like this
 (with real values in place of the placeholders):
 
+    # Platform toggles (set to false to disable without needing credentials)
+    KALSHI_ENABLED=true
+    POLYMARKET_ENABLED=true
+
     # Kalshi
     KALSHI_API_KEY=abc123xyz...
     KALSHI_API_SECRET=SGVsbG8gV29ybGQ=...
@@ -323,7 +327,210 @@ If you want to trace exactly where each credential flows in the source code:
 
 
 ================================================================================
-SECTION 8 – SECURITY CHECKLIST
+SECTION 8 – PLATFORM TOGGLE QUICK-REFERENCE
+================================================================================
+
+Two .env variables let you enable or disable each exchange independently.
+No code changes needed – just edit .env and restart the bot.
+
+    KALSHI_ENABLED=true    (default)  – Kalshi REST + WebSocket fully active
+    KALSHI_ENABLED=false              – Kalshi skipped; credentials not required
+
+    POLYMARKET_ENABLED=true  (default) – Polymarket REST + WebSocket fully active
+    POLYMARKET_ENABLED=false           – Polymarket skipped; credentials not required
+
+Common use cases:
+
+    Only Kalshi:
+        KALSHI_ENABLED=true
+        POLYMARKET_ENABLED=false
+
+    Only Polymarket:
+        KALSHI_ENABLED=false
+        POLYMARKET_ENABLED=true
+
+    Both (default):
+        KALSHI_ENABLED=true
+        POLYMARKET_ENABLED=true
+
+Note: at least one platform must be enabled. The bot will refuse to start
+if both are set to false.
+
+
+================================================================================
+SECTION 9 – BACKTESTING GUIDE
+================================================================================
+
+The backtesting system replays recorded WebSocket order-book data through the
+same signal and risk stack used in live trading.  No exchange connection is
+needed for backtesting.
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│  Workflow: Record → Replay → Analyse → Tune → Go Live                    │
+└──────────────────────────────────────────────────────────────────────────┘
+
+--- 9a. Record live order-book data ---
+
+The BookRecorder (backtest/recorder.py) automatically captures every WebSocket
+book update when you run live_trading.py.  No extra steps needed – recording
+starts as soon as the adapters connect.
+
+Recordings are stored at:
+    prediction_market_bot/data/recordings/<YYYY-MM-DD>/<platform>_<market_id>.jsonl.gz
+
+Each compressed file contains one JSON object per line:
+    {"ts": "2025-01-15T14:30:00Z", "platform": "kalshi",
+     "market_id": "KXWEATHER-NYC-15JAN-T35",
+     "bids": [[0.45,150],[0.44,300]], "asks": [[0.46,200]]}
+
+Record for at least 24–48 hours to capture meaningful market dynamics.
+Longer recordings give more reliable backtest results.
+
+To start recording immediately (without live trading):
+    python live_trading.py --dry-run
+
+--- 9b. List available recordings ---
+
+From the prediction_market_bot/ directory, in a Python shell:
+
+    from backtest.recorder import BookRecorder
+    files = BookRecorder.list_recordings()
+    for f in files:
+        print(f)
+
+Or from the command line:
+    ls -lh data/recordings/**/*.jsonl.gz
+
+--- 9c. Run a backtest ---
+
+Create a small script (e.g. run_backtest.py) in prediction_market_bot/:
+
+    from backtest.recorder import BookRecorder
+    from backtest.runner import BacktestRunner
+    from signals.engine import SignalEngine
+    from signals.cross_exchange import CrossExchangeSignal
+    from signals.book_imbalance import BookImbalanceSignal
+    from risk.manager import RiskManager
+
+    # Build the same signal + risk stack you use live
+    signal_engine = SignalEngine(
+        cross_exchange=CrossExchangeSignal(min_spread=0.015),
+        book_imbalance=BookImbalanceSignal(bullish_threshold=0.65,
+                                           bearish_threshold=0.35),
+    )
+    risk_manager = RiskManager(
+        bankroll_usd=1000.0,
+        kelly_fraction=0.25,
+        max_position_fraction=0.08,
+        max_total_exposure=0.25,
+        min_edge_threshold=0.05,
+        max_daily_loss_usd=0,
+    )
+
+    runner = BacktestRunner(
+        signal_engine=signal_engine,
+        risk_manager=risk_manager,
+        initial_bankroll=1000.0,
+        max_hold_minutes=60.0,  # exit position after 60 min if no reversal
+        fee_polymarket=0.02,    # 2% taker fee
+        fee_kalshi=0.07,        # 7% taker fee
+    )
+
+    files = BookRecorder.list_recordings()
+    report = runner.run(recording_files=files)
+    print(report.summary())
+
+Run it:
+    python run_backtest.py
+
+--- 9d. Interpret the results ---
+
+The BacktestReport.summary() output looks like this:
+
+    === Backtest Report ===
+      n_trades                       47
+      hit_rate                       0.5745
+      total_pnl_usd                  38.2100
+      mean_pnl_per_trade             0.8130
+      std_pnl                        5.2300
+      sharpe_ratio                   0.1554
+      max_drawdown_pct               0.0821
+      initial_bankroll               1000.0000
+      final_bankroll                 1038.2100
+      total_return_pct               0.0382
+      n_trades_cross_exchange        12
+      mean_pnl_cross_exchange        2.1500
+      n_trades_book_imbalance        35
+      mean_pnl_book_imbalance       -0.1700
+
+Key metrics explained:
+
+    n_trades          Total number of simulated round-trips
+    hit_rate          Fraction of trades that were profitable (>0.55 is good)
+    sharpe_ratio      Risk-adjusted return; >0.5 is acceptable, >1.0 is strong
+    max_drawdown_pct  Worst peak-to-trough loss; keep below 20%
+    total_return_pct  Net return over the replay period
+
+Signal-type breakdown (n_trades_X / mean_pnl_X) shows which signal generator
+is actually adding value.  If book_imbalance has negative mean_pnl, consider
+raising its threshold or disabling it.
+
+--- 9e. Plot results with VectorBT (optional) ---
+
+If you have vectorbt installed (pip install vectorbt), the report includes a
+full Portfolio object for charting:
+
+    report.vbt_portfolio.plot().show()
+
+This shows the equity curve and drawdown periods interactively.
+
+Install vectorbt:
+    pip install vectorbt
+
+Note: vectorbt has heavy dependencies (pandas, numpy, plotly). Skip it if
+you just need the numeric stats.
+
+--- 9f. Tune parameters and re-test ---
+
+Common knobs to tune between backtest runs:
+
+    CrossExchangeSignal(min_spread=?)
+        Raise to 0.03–0.05 if hit rate is low (filters out noise).
+        Lower only if you have very tight bid-ask spreads.
+
+    BookImbalanceSignal(bullish_threshold=?, bearish_threshold=?)
+        Raise bullish_threshold / lower bearish_threshold for fewer but
+        higher-conviction imbalance signals.
+
+    RiskManager(kelly_fraction=?)
+        Start at 0.10–0.25. Higher = larger positions = more variance.
+
+    BacktestRunner(max_hold_minutes=?)
+        Shorter hold times reduce market risk but may miss the full move.
+
+    fee_polymarket / fee_kalshi
+        Use actual fee rates from your account tier. Lower fees for high-volume
+        traders on Polymarket (Gamma API shows your tier).
+
+Recommended iteration cycle:
+    1. Record 48h of data on both exchanges.
+    2. Run backtest with default parameters.
+    3. Identify which signal type is losing money; adjust that signal first.
+    4. Re-run backtest and compare Sharpe and max_drawdown.
+    5. When Sharpe > 0.5 and max_drawdown < 15%, enable DRY_RUN=true live.
+    6. Compare live paper-trade fills to backtest predictions.
+    7. If consistent, switch to DRY_RUN=false with a small bankroll.
+
+--- 9g. File locations ---
+
+    backtest/recorder.py     BookRecorder – attaches to WS adapters, writes JSONL
+    backtest/runner.py       BacktestRunner + BacktestReport – replay and stats
+    backtest/__init__.py     Exports BookRecorder, BacktestRunner
+    data/recordings/         Where recording files are stored (auto-created)
+
+
+================================================================================
+SECTION 10 – SECURITY CHECKLIST
 ================================================================================
 
 Before running the bot with real money, verify:

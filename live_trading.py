@@ -264,18 +264,32 @@ async def run_live(cfg: AppConfig, dry_run: bool, scan_interval: int) -> None:
     from backtest.recorder import BookRecorder
 
     # ── Clients (REST) ─────────────────────────────────────────────────────
-    kalshi_rest = KalshiClient(
-        api_key=cfg.kalshi.api_key,
-        api_secret=cfg.kalshi.api_secret,
-        base_url=cfg.kalshi.base_url,
-    )
-    poly_rest = PolymarketClient(
-        api_key=cfg.polymarket.api_key,
-        api_secret=cfg.polymarket.api_secret,
-        api_passphrase=cfg.polymarket.api_passphrase,
-        private_key=cfg.polymarket.private_key,
-        funder_address=cfg.polymarket.funder_address,
-    )
+    kalshi_rest = None
+    poly_rest = None
+
+    if cfg.kalshi.enabled:
+        kalshi_rest = KalshiClient(
+            api_key=cfg.kalshi.api_key,
+            api_secret=cfg.kalshi.api_secret,
+            base_url=cfg.kalshi.base_url,
+        )
+    else:
+        logger.info("Kalshi DISABLED – skipping Kalshi REST client and WS adapter")
+
+    if cfg.polymarket.enabled:
+        poly_rest = PolymarketClient(
+            api_key=cfg.polymarket.api_key,
+            api_secret=cfg.polymarket.api_secret,
+            api_passphrase=cfg.polymarket.api_passphrase,
+            private_key=cfg.polymarket.private_key,
+            funder_address=cfg.polymarket.funder_address,
+        )
+    else:
+        logger.info("Polymarket DISABLED – skipping Polymarket REST client and WS adapter")
+
+    if kalshi_rest is None and poly_rest is None:
+        logger.error("No platforms enabled. Set KALSHI_ENABLED and/or POLYMARKET_ENABLED to true.")
+        return
 
     # ── Monitoring ─────────────────────────────────────────────────────────
     event_db = EventDB()
@@ -336,47 +350,55 @@ async def run_live(cfg: AppConfig, dry_run: bool, scan_interval: int) -> None:
         kalshi_ids, poly_ids, arb_pairs = [], [], []
 
     # ── WebSocket adapters ─────────────────────────────────────────────────
-    kalshi_adapter = KalshiWSAdapter(
-        api_key=cfg.kalshi.api_key,
-        api_secret=cfg.kalshi.api_secret,
-        env=cfg.kalshi.env,
-    )
-    poly_adapter = PolymarketWSAdapter()
+    kalshi_adapter = None
+    poly_adapter = None
 
-    # Attach recorder to both adapters
-    kalshi_adapter.add_global_callback(recorder.on_book_update)
-    poly_adapter.add_global_callback(recorder.on_book_update)
+    if cfg.kalshi.enabled:
+        kalshi_adapter = KalshiWSAdapter(
+            api_key=cfg.kalshi.api_key,
+            api_secret=cfg.kalshi.api_secret,
+            env=cfg.kalshi.env,
+        )
+        kalshi_adapter.add_global_callback(recorder.on_book_update)
+
+    if cfg.polymarket.enabled:
+        poly_adapter = PolymarketWSAdapter()
+        poly_adapter.add_global_callback(recorder.on_book_update)
 
     # Register signal engine books and arb pairs
-    if kalshi_ids:
+    if kalshi_adapter and kalshi_ids:
         kalshi_adapter.subscribe(kalshi_ids)
         for mid in kalshi_ids:
             book = kalshi_adapter.get_book(mid)
             if book:
                 signal_engine.register_book(book)
 
-    if poly_ids:
+    if poly_adapter and poly_ids:
         poly_adapter.subscribe(poly_ids)
         for mid in poly_ids:
             book = poly_adapter.get_book(mid)
             if book:
                 signal_engine.register_book(book)
 
-    # Register cross-exchange arb pairs
-    for pair in arb_pairs:
-        poly_book = poly_adapter.get_book(pair["poly_market"].market_id)
-        kalshi_book = kalshi_adapter.get_book(pair["kalshi_market"].market_id)
-        if poly_book and kalshi_book:
-            signal_engine.register_arb_pair(
-                poly_book=poly_book,
-                kalshi_book=kalshi_book,
-                poly_market_id=pair["poly_market"].market_id,
-                kalshi_market_id=pair["kalshi_market"].market_id,
-            )
+    # Register cross-exchange arb pairs (only when both adapters active)
+    if kalshi_adapter and poly_adapter:
+        for pair in arb_pairs:
+            poly_book = poly_adapter.get_book(pair["poly_market"].market_id)
+            kalshi_book = kalshi_adapter.get_book(pair["kalshi_market"].market_id)
+            if poly_book and kalshi_book:
+                signal_engine.register_arb_pair(
+                    poly_book=poly_book,
+                    kalshi_book=kalshi_book,
+                    poly_market_id=pair["poly_market"].market_id,
+                    kalshi_market_id=pair["kalshi_market"].market_id,
+                )
 
     logger.info(
-        "Live trading starting | dry_run=%s kalshi=%d poly=%d arb_pairs=%d",
-        dry_run, len(kalshi_ids), len(poly_ids), len(arb_pairs),
+        "Live trading starting | dry_run=%s kalshi=%s kalshi_mkts=%d poly=%s poly_mkts=%d arb_pairs=%d",
+        dry_run,
+        cfg.kalshi.enabled, len(kalshi_ids),
+        cfg.polymarket.enabled, len(poly_ids),
+        len(arb_pairs),
     )
 
     if dry_run:
@@ -384,21 +406,25 @@ async def run_live(cfg: AppConfig, dry_run: bool, scan_interval: int) -> None:
 
     # ── Start all tasks ────────────────────────────────────────────────────
     tasks = [
-        asyncio.create_task(kalshi_adapter.run(), name="kalshi_ws"),
-        asyncio.create_task(poly_adapter.run(),   name="poly_ws"),
         asyncio.create_task(
             snapshot_loop(event_db, risk_manager, alert_manager, interval=60),
             name="snapshot_loop",
         ),
     ]
+    if kalshi_adapter:
+        tasks.append(asyncio.create_task(kalshi_adapter.run(), name="kalshi_ws"))
+    if poly_adapter:
+        tasks.append(asyncio.create_task(poly_adapter.run(), name="poly_ws"))
 
     try:
         await asyncio.gather(*tasks)
     except KeyboardInterrupt:
         logger.info("Shutting down live trading...")
     finally:
-        kalshi_adapter.stop()
-        poly_adapter.stop()
+        if kalshi_adapter:
+            kalshi_adapter.stop()
+        if poly_adapter:
+            poly_adapter.stop()
         recorder.close()
         for task in tasks:
             task.cancel()
