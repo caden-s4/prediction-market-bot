@@ -119,9 +119,12 @@ class KalshiClient(BaseMarketClient):
         api_secret: str,
         base_url: str = "https://trading-api.kalshi.com/trade-api/v2",
     ) -> None:
+        from urllib.parse import urlparse
         self._api_key = api_key
         self._api_secret = api_secret
         self._base_url = base_url.rstrip("/")
+        # Path prefix for signing (e.g. "/trade-api/v2")
+        self._path_prefix = urlparse(self._base_url).path.rstrip("/")
         self._session = requests.Session()
         self._session.headers.update({
             "Content-Type": "application/json",
@@ -152,10 +155,13 @@ class KalshiClient(BaseMarketClient):
         }
 
     def _get(self, path: str, params: Optional[Dict] = None) -> Any:
-        headers = self._sign("GET", path)
+        full_path = self._path_prefix + path
+        headers = self._sign("GET", full_path)
         url = self._base_url + path
         resp = self._session.get(url, params=params, headers=headers, timeout=15)
         logger.debug("Kalshi GET %s → HTTP %d", url, resp.status_code)
+        if not resp.ok:
+            logger.debug("Kalshi error body: %s", resp.text[:500])
         resp.raise_for_status()
         data = resp.json()
         logger.debug("Kalshi response keys: %s", list(data.keys()) if isinstance(data, dict) else type(data).__name__)
@@ -164,14 +170,14 @@ class KalshiClient(BaseMarketClient):
     def _post(self, path: str, body: Dict) -> Any:
         import json
         body_str = json.dumps(body)
-        headers = self._sign("POST", path, body_str)
+        headers = self._sign("POST", self._path_prefix + path, body_str)
         url = self._base_url + path
         resp = self._session.post(url, data=body_str, headers=headers, timeout=15)
         resp.raise_for_status()
         return resp.json()
 
     def _delete(self, path: str) -> Any:
-        headers = self._sign("DELETE", path)
+        headers = self._sign("DELETE", self._path_prefix + path)
         url = self._base_url + path
         resp = self._session.delete(url, headers=headers, timeout=15)
         resp.raise_for_status()
