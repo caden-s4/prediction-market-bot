@@ -35,9 +35,17 @@ from .base import (
 logger = logging.getLogger(__name__)
 
 _WEATHER_SERIES = re.compile(
-    r"^KXWEATHER|^KXPRECIP|^KXSNOW|^KXRAIN|^KXTEMP|^KXWIND|^KXHURR",
+    r"^KXWEATHER|^KXPRECIP|^KXSNOW|^KXRAIN|^KXTEMP|^KXWIND|^KXHURR|^KXHIGHS|^KXLOWS",
     re.IGNORECASE,
 )
+
+# All known Kalshi weather series tickers — queried directly via series_ticker
+# to avoid scanning thousands of unrelated markets.
+_WEATHER_SERIES_TICKERS = [
+    "KXHIGHS", "KXLOWS", "KXTEMP",
+    "KXRAIN", "KXPRECIP", "KXSNOW",
+    "KXWIND", "KXHURR", "KXWEATHER",
+]
 
 _CITY_COORDS: Dict[str, Dict[str, float]] = {
     # Major US metros
@@ -211,47 +219,37 @@ class KalshiClient(BaseMarketClient):
     def get_weather_markets(self, limit: int = 200) -> List[Market]:
         """Fetch weather-series markets from Kalshi.
 
-        Kalshi weather markets span multiple series (KXHIGHS, KXLOWS, KXPRECIP,
-        KXSNOW, KXRAIN, KXTEMP, KXWIND, KXHURR, etc.).  The /markets endpoint
-        returns results in alphabetical ticker order, so weather markets may not
-        appear in the first page.  We paginate via cursor until we have collected
-        enough weather markets or exhausted all open markets (capped at 20 pages).
+        Queries each known weather series ticker directly via the series_ticker
+        filter instead of scanning all markets.  If a series returns nothing it
+        is silently skipped.  Falls back to an empty list when no series yield
+        results (e.g. off-season or series not offered on this API instance).
         """
-        PAGE_SIZE = 200
-        MAX_PAGES = 20
         results: List[Market] = []
-        cursor: Optional[str] = None
-        total_raw = 0
+        seen: set = set()
 
-        try:
-            for page in range(MAX_PAGES):
-                params: Dict[str, Any] = {"status": "open", "limit": PAGE_SIZE}
-                if cursor:
-                    params["cursor"] = cursor
+        for series in _WEATHER_SERIES_TICKERS:
+            try:
+                params: Dict[str, Any] = {
+                    "status": "open",
+                    "series_ticker": series,
+                    "limit": 200,
+                }
                 data = self._get("/markets", params=params)
                 raw = data.get("markets", [])
-                total_raw += len(raw)
-                logger.debug(
-                    "Kalshi page %d: %d markets (total scanned=%d)",
-                    page + 1, len(raw), total_raw,
-                )
+                logger.debug("Kalshi series=%s → %d markets", series, len(raw))
                 for item in raw:
+                    ticker = item.get("ticker", "")
+                    if ticker in seen:
+                        continue
+                    seen.add(ticker)
                     m = self._parse_market(item)
                     if m:
                         results.append(m)
+            except Exception as exc:
+                logger.warning("Kalshi series=%s fetch failed: %s", series, exc)
 
-                cursor = data.get("cursor") or ""
-                if not cursor or len(raw) < PAGE_SIZE:
-                    break
-
-            logger.debug(
-                "Kalshi pagination done: scanned %d markets, found %d weather",
-                total_raw, len(results),
-            )
-            return results
-        except Exception as exc:
-            logger.error("Kalshi get_weather_markets failed: %s", exc)
-            return results
+        logger.debug("Kalshi weather scan complete: %d markets found", len(results))
+        return results
 
     def _parse_market(self, item: dict) -> Optional[Market]:
         try:
