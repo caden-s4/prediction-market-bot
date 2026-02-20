@@ -74,7 +74,7 @@ class KalshiWSAdapter(BaseMarketAdapter):
 
     def _ws_url(self) -> str:
         if self._env == "prod":
-            return "wss://trading-api.kalshi.com/trade-api/ws/v2"
+            return "wss://api.elections.kalshi.com/trade-api/ws/v2"
         return "wss://demo-api.kalshi.co/trade-api/ws/v2"
 
     def _build_auth_headers(self) -> Dict[str, str]:

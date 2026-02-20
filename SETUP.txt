@@ -47,7 +47,7 @@ Website: https://kalshi.com
 Kalshi offers a demo (paper trading) environment and a live production environment.
 
    Demo URL:  https://demo-api.kalshi.co/trade-api/v2
-   Prod URL:  https://trading-api.kalshi.com/trade-api/v2
+   Prod URL:  https://api.elections.kalshi.com/trade-api/v2
 
 Set KALSHI_ENV=demo while testing. Switch to KALSHI_ENV=prod only when you are
 ready to trade with real money.
