@@ -1,0 +1,241 @@
+"""
+data.ground_truth.sports – live sports scores via ESPN API (free, no key needed).
+
+Supports:
+  - NFL, NBA, MLB, NHL, MLS, NCAAF, NCAAB
+  - Soccer (EPL, Champions League via ESPN)
+
+Confidence: 0.95 when a game is FINAL; 0.70 while in-progress.
+
+ESPN's hidden public API endpoints are widely documented and have been stable
+for years. No API key required.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from typing import Optional
+
+import requests
+
+from data.markets.base import Market
+from .base import DataSource, GroundTruthResult, SourceType
+
+logger = logging.getLogger(__name__)
+
+# Map of keyword → ESPN sport/league endpoint path
+_SPORT_MAP = {
+    "nfl": "football/nfl",
+    "nba": "basketball/nba",
+    "mlb": "baseball/mlb",
+    "nhl": "hockey/nhl",
+    "mls": "soccer/usa.1",
+    "ncaa football": "football/college-football",
+    "cfb": "football/college-football",
+    "ncaa basketball": "basketball/mens-college-basketball",
+    "cbb": "basketball/mens-college-basketball",
+    "epl": "soccer/eng.1",
+    "premier league": "soccer/eng.1",
+    "champions league": "soccer/uefa.champions",
+    "la liga": "soccer/esp.1",
+    "bundesliga": "soccer/ger.1",
+    "serie a": "soccer/ita.1",
+}
+
+_ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
+_TIMEOUT = 8  # seconds
+
+
+class SportsDataSource(DataSource):
+    """
+    Fetches live game scores/results from the ESPN public API.
+    """
+
+    def can_handle(self, market: Market) -> bool:
+        text = (market.question + " " + " ".join(market.tags)).lower()
+        return (
+            market.category.lower() in ("sports", "sport")
+            or any(k in text for k in _SPORT_MAP)
+            or any(word in text for word in (
+                "score", "win", "champion", "playoff", "super bowl",
+                "world series", "stanley cup", "finals", "game",
+            ))
+        )
+
+    def fetch(self, market: Market) -> Optional[GroundTruthResult]:
+        try:
+            sport_path = self._detect_sport(market)
+            if not sport_path:
+                logger.debug("SportsSource: no sport detected for %s", market.market_id)
+                return None
+
+            teams = self._extract_teams(market.question)
+            events = self._fetch_events(sport_path)
+            if not events:
+                return None
+
+            match = self._match_event(events, teams, market)
+            if not match:
+                logger.debug("SportsSource: no matching event for %s", market.market_id)
+                return None
+
+            return self._build_result(match, market, sport_path)
+
+        except Exception as exc:
+            logger.warning("SportsSource: error fetching for %s: %s", market.market_id, exc)
+            return None
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _detect_sport(self, market: Market) -> Optional[str]:
+        """Identify which sport/league this market is about."""
+        text = (market.question + " " + " ".join(market.tags)).lower()
+        for keyword, path in _SPORT_MAP.items():
+            if keyword in text:
+                return path
+        # Generic sport category
+        if market.category.lower() in ("sports", "sport"):
+            return "football/nfl"  # fallback to NFL scan first
+        return None
+
+    def _extract_teams(self, question: str) -> list:
+        """Extract team names from the market question."""
+        # Common patterns: "Will the X beat the Y?", "X vs Y", "X to win"
+        patterns = [
+            r"Will (?:the )?(.+?) (?:beat|defeat|win against) (?:the )?(.+?)[?]",
+            r"(.+?) vs\.? (.+?)(?:\?|$| to )",
+            r"(.+?) to win",
+        ]
+        for pat in patterns:
+            m = re.search(pat, question, re.IGNORECASE)
+            if m:
+                return [g.strip() for g in m.groups() if g]
+        # Fall back to splitting on common separators
+        for sep in (" vs ", " v ", " @ ", " at ", " beat "):
+            if sep.lower() in question.lower():
+                parts = question.lower().split(sep.lower(), 1)
+                return [p.strip() for p in parts]
+        return []
+
+    def _fetch_events(self, sport_path: str) -> list:
+        """Fetch scoreboard events from ESPN."""
+        url = f"{_ESPN_BASE}/{sport_path}/scoreboard"
+        try:
+            resp = requests.get(url, timeout=_TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            return data.get("events", [])
+        except Exception as exc:
+            logger.debug("SportsSource: failed fetching %s: %s", url, exc)
+            return []
+
+    def _match_event(self, events: list, teams: list, market: Market) -> Optional[dict]:
+        """Find the event matching the market's teams/title."""
+        market_text = market.question.lower()
+        for event in events:
+            event_name = event.get("name", "").lower()
+            short_name = event.get("shortName", "").lower()
+
+            # Check if any team from the market question appears in the event
+            if teams:
+                matched = sum(
+                    1 for t in teams
+                    if t.lower() in event_name or t.lower() in short_name
+                )
+                if matched >= 1:
+                    return event
+            else:
+                # Fuzzy: check significant words from the question
+                words = [w for w in market_text.split() if len(w) > 4]
+                if any(w in event_name for w in words):
+                    return event
+
+        return None
+
+    def _build_result(
+        self, event: dict, market: Market, sport_path: str
+    ) -> GroundTruthResult:
+        """Parse an ESPN event into a GroundTruthResult."""
+        status = event.get("status", {})
+        status_type = status.get("type", {})
+        state = status_type.get("state", "pre")  # pre | in | post
+        completed = status_type.get("completed", False)
+        description = status_type.get("description", state)
+
+        competitions = event.get("competitions", [{}])
+        comp = competitions[0] if competitions else {}
+        competitors = comp.get("competitors", [])
+
+        # Determine scores
+        scores: dict = {}
+        for c in competitors:
+            name = c.get("team", {}).get("displayName", "")
+            score_str = c.get("score", "0")
+            try:
+                scores[name] = int(score_str)
+            except ValueError:
+                scores[name] = 0
+
+        winner_name = None
+        if completed and competitors:
+            try:
+                winner_name = max(scores, key=lambda k: scores[k])
+            except Exception:
+                pass
+
+        # Derive ground truth probability
+        question_lower = market.question.lower()
+        ground_truth_prob: Optional[float] = None
+        reasoning = ""
+
+        if completed and winner_name:
+            # Game is final – determine if YES or NO based on market question
+            # Pattern: "Will X win?" → YES if X won
+            winner_lower = winner_name.lower()
+            if any(part in winner_lower or winner_lower in part
+                   for part in (question_lower,) if len(part) > 3):
+                ground_truth_prob = 1.0
+                reasoning = f"FINAL: {winner_name} won. Market YES resolved."
+            else:
+                ground_truth_prob = 0.0
+                reasoning = f"FINAL: {winner_name} won. Market YES resolved against."
+            confidence = 0.95
+            source_type = SourceType.HARD
+        elif state == "in":
+            # In-progress: use score differential as probability signal
+            if len(scores) >= 2:
+                vals = sorted(scores.values(), reverse=True)
+                lead = vals[0] - vals[1]
+                # Rough live-game win probability (very simplified)
+                # Lead of 7+ points in final quarter → high probability
+                ground_truth_prob = min(0.5 + lead * 0.03, 0.90)
+                reasoning = f"Live game in progress. Score: {scores}. Lead={lead}."
+            else:
+                ground_truth_prob = 0.5
+                reasoning = "Game in progress, no score data."
+            confidence = 0.70
+            source_type = SourceType.HARD
+        else:
+            # Pre-game – no ground truth yet
+            ground_truth_prob = None
+            confidence = 0.0
+            reasoning = "Game has not started."
+            source_type = SourceType.AGGREGATED
+
+        return GroundTruthResult(
+            ground_truth_prob=ground_truth_prob,
+            confidence=confidence,
+            source_type=source_type,
+            source_name=f"ESPN/{sport_path}",
+            source_url=f"{_ESPN_BASE}/{sport_path}/scoreboard",
+            raw_data={
+                "event_name": event.get("name"),
+                "state": state,
+                "completed": completed,
+                "description": description,
+                "scores": scores,
+                "winner": winner_name,
+            },
+            reasoning=reasoning,
+        )
