@@ -42,8 +42,8 @@ SCAN_CATEGORIES = [
 EXCLUDED_CATEGORIES = {"crypto", "cryptocurrency", "weather"}
 
 # Default scan window. Overridden by config (RESOLUTION_WINDOW_HOURS env var).
-# Strategy spec: 24h for live prod. Set 168+ for Kalshi demo (only long-dated markets).
-RESOLUTION_WINDOW_HOURS = 168
+# Strategy spec: 24h for live prod. Kalshi demo markets are 14-30 days out — use 720.
+RESOLUTION_WINDOW_HOURS = 720
 
 # Minimum order book depth (total $ on best bid + ask) to consider a market
 MIN_DEPTH_USD = 50.0
