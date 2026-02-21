@@ -1,23 +1,27 @@
 """
-main.py – entry point for the prediction market trading bot.
+main.py – entry point for the resolution drift arbitrage bot.
 
-Two bots run simultaneously from this process:
-  Bot 1 – Maker Rebate Harvester (Polymarket 5/15-min crypto markets)
-  Bot 2 – Resolution Drift Arbitrage (non-crypto markets expiring within 24h)
+Scans Polymarket and Kalshi every 5 minutes for non-crypto markets expiring
+within the configured window. Finds mispricings against hard data sources
+(sports APIs, FRED, Federal Register) and fires taker orders on the lagging
+platform.
 
 Usage
 -----
-    python main.py                        # run both bots live (or dry-run)
-    python main.py --once                 # single resolution bot cycle, then exit
-    python main.py --maker-only           # run only the maker bot
-    python main.py --resolution-only      # run only the resolution bot
-    python main.py --log-level DEBUG      # verbose output
+    python main.py                   # run continuously (dry-run by default)
+    python main.py --once            # single scan cycle, then exit
+    python main.py --log-level DEBUG # verbose output
 
 Environment
 -----------
-Copy .env.example → .env and fill in your API credentials.
-See SETUP.txt for the complete credential setup guide.
-Set DRY_RUN=true to simulate without placing real orders.
+Copy .env.example → .env and fill in credentials. See SETUP.txt for details.
+Set DRY_RUN=true to simulate without placing real orders (default).
+
+Demo vs Production note
+-----------------------
+Kalshi's demo environment only has long-dated markets (7-30+ days out).
+Set KALSHI_ENV=prod and RESOLUTION_WINDOW_HOURS=24 for the full strategy.
+While testing on demo, set RESOLUTION_WINDOW_HOURS=168 or higher.
 """
 
 from __future__ import annotations
@@ -36,22 +40,12 @@ from utils.logger import setup_logging
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Prediction market trading bot (maker rebates + resolution drift)"
+        description="Resolution drift arbitrage bot"
     )
     parser.add_argument(
         "--once",
         action="store_true",
-        help="Run a single resolution bot cycle and exit (for testing)",
-    )
-    parser.add_argument(
-        "--maker-only",
-        action="store_true",
-        help="Run only the maker rebate bot (disables resolution bot for this session)",
-    )
-    parser.add_argument(
-        "--resolution-only",
-        action="store_true",
-        help="Run only the resolution drift bot (disables maker bot for this session)",
+        help="Run a single scan cycle and exit (for testing)",
     )
     parser.add_argument(
         "--log-level",
@@ -78,14 +72,6 @@ def main() -> None:
         logger.error("Configuration error: %s", exc)
         sys.exit(1)
 
-    # Override bot toggles from CLI flags
-    if args.maker_only:
-        object.__setattr__(cfg.bot, "resolution_enabled", False)
-        logger.info("CLI override: resolution bot DISABLED (--maker-only)")
-    if args.resolution_only:
-        object.__setattr__(cfg.bot, "maker_enabled", False)
-        logger.info("CLI override: maker bot DISABLED (--resolution-only)")
-
     if cfg.bot.dry_run:
         logger.warning(
             "DRY RUN mode – no real orders will be placed. "
@@ -95,7 +81,7 @@ def main() -> None:
     coordinator = BotCoordinator(config=cfg)
 
     if args.once:
-        logger.info("Running single resolution cycle (--once mode)")
+        logger.info("Running single scan cycle (--once mode)")
         result = coordinator.run_once()
         logger.info("Done. Result: %s", result)
     else:

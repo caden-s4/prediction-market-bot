@@ -6,7 +6,7 @@ All other modules import from here; nothing reads os.environ directly.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -37,7 +37,7 @@ class KalshiConfig:
     api_key: str
     api_secret: str
     env: str            # "prod" | "demo"
-    base_url: str = field(init=False)
+    base_url: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -89,26 +89,20 @@ class PolymarketConfig:
 @dataclass(frozen=True)
 class BotConfig:
     dry_run: bool                               # Never place real orders when True
-    bankroll_usd: float                         # Starting capital in USD
+    bankroll_usd: float                         # Total capital in USD
 
     # ── Shared infrastructure ──────────────────────────────────────────────
     fee_cache_ttl_seconds: int                  # Fee cache TTL (default 900 = 15 min)
 
-    # ── Bankroll split ─────────────────────────────────────────────────────
-    maker_allocation_fraction: float            # Fraction for maker bot (default 0.60)
-    # resolution bot gets (1 - maker_allocation_fraction)
-
-    # ── Bot 1: Maker Rebate Harvester ──────────────────────────────────────
-    maker_enabled: bool                         # Toggle maker bot on/off
-    maker_half_spread: float                    # Half-spread around fair value (default 1%)
-    maker_cap_usd: float                        # Per-market per-side exposure cap
-
-    # ── Bot 2: Resolution Drift Arbitrage ──────────────────────────────────
-    resolution_enabled: bool                    # Toggle resolution bot on/off
-    resolution_window_hours: float              # Markets expiring within this many hours
+    # ── Resolution Drift Arbitrage ─────────────────────────────────────────
+    # Scan window: only trade markets expiring within this many hours.
+    # Strategy spec is 24h for live trading. Set higher (e.g. 168) while testing
+    # on Kalshi demo, which only has long-dated markets.
+    resolution_window_hours: float
     resolution_min_gap: float                   # Min fee-adjusted gap to flag (default 4%)
-    resolution_kelly_fraction: float            # Fractional Kelly multiplier (default 12%)
-    resolution_max_position_fraction: float     # Max single position % of bankroll
+    resolution_kelly_fraction: float            # Fractional Kelly (default 12%)
+    resolution_max_position_fraction: float     # Hard cap per position (default 20%)
+    resolution_scan_interval_seconds: int       # How often to poll (default 300 = 5 min)
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -116,15 +110,11 @@ class BotConfig:
             dry_run=_get("DRY_RUN", "true").lower() != "false",
             bankroll_usd=float(_get("BANKROLL_USD", "1000.0")),
             fee_cache_ttl_seconds=int(_get("FEE_CACHE_TTL_SECONDS", "900")),
-            maker_allocation_fraction=float(_get("MAKER_ALLOCATION_FRACTION", "0.60")),
-            maker_enabled=_get("MAKER_ENABLED", "true").lower() != "false",
-            maker_half_spread=float(_get("MAKER_HALF_SPREAD", "0.010")),
-            maker_cap_usd=float(_get("MAKER_CAP_USD", "75.0")),
-            resolution_enabled=_get("RESOLUTION_ENABLED", "true").lower() != "false",
-            resolution_window_hours=float(_get("RESOLUTION_WINDOW_HOURS", "24.0")),
+            resolution_window_hours=float(_get("RESOLUTION_WINDOW_HOURS", "168.0")),
             resolution_min_gap=float(_get("RESOLUTION_MIN_GAP", "0.04")),
             resolution_kelly_fraction=float(_get("RESOLUTION_KELLY_FRACTION", "0.12")),
             resolution_max_position_fraction=float(_get("RESOLUTION_MAX_POSITION_FRACTION", "0.20")),
+            resolution_scan_interval_seconds=int(_get("RESOLUTION_SCAN_INTERVAL_SECONDS", "300")),
         )
 
 

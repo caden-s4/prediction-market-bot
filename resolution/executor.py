@@ -39,7 +39,6 @@ from shared.fee_cache import FeeCache
 
 logger = logging.getLogger(__name__)
 
-SCAN_INTERVAL_SECONDS = 300       # 5-minute poll cycle
 KELLY_FRACTION = 0.12             # 12% fractional Kelly (conservative for thin books)
 MAX_POSITION_FRACTION = 0.20      # hard cap: 20% of total bankroll per position
 
@@ -61,16 +60,18 @@ class TradeRecord:
 
 class ResolutionBot:
     """
-    Bot 2: Resolution Drift Arbitrage.
+    Resolution Drift Arbitrage bot.
 
     Parameters
     ----------
-    kalshi_client : Kalshi REST client (None = disabled)
-    poly_client   : Polymarket REST client (None = disabled)
-    fee_cache     : shared fee rate cache
-    bankroll      : shared bankroll (uses 'resolution' allocation)
-    exclusions    : shared exclusion list
-    dry_run       : if True, log orders but don't place them
+    kalshi_client    : Kalshi REST client (None = disabled)
+    poly_client      : Polymarket REST client (None = disabled)
+    fee_cache        : shared fee rate cache
+    bankroll         : shared bankroll
+    exclusions       : shared exclusion list
+    dry_run          : if True, log orders but don't place them
+    window_hours     : scan only markets expiring within this many hours
+    scan_interval    : seconds between scan cycles
     """
 
     def __init__(
@@ -81,6 +82,8 @@ class ResolutionBot:
         bankroll: Bankroll,
         exclusions: ExclusionList,
         dry_run: bool = True,
+        window_hours: float = 168.0,
+        scan_interval: int = 300,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
@@ -88,8 +91,11 @@ class ResolutionBot:
         self._bankroll = bankroll
         self._exclusions = exclusions
         self._dry_run = dry_run
+        self._scan_interval = scan_interval
 
-        self._scanner = ResolutionScanner(kalshi_client, poly_client, exclusions)
+        self._scanner = ResolutionScanner(
+            kalshi_client, poly_client, exclusions, window_hours=window_hours
+        )
         self._gap_detector = GapDetector(fee_cache)
         self._ground_truth = GroundTruthRouter()
         self._confidence = ConfidenceScorer()
@@ -109,7 +115,7 @@ class ResolutionBot:
                 break
             except Exception as exc:
                 logger.exception("ResolutionBot: cycle error: %s", exc)
-            time.sleep(SCAN_INTERVAL_SECONDS)
+            time.sleep(self._scan_interval)
 
     def run_once(self) -> dict:
         """Execute one full scan-and-evaluate cycle. Returns summary dict."""
@@ -238,7 +244,7 @@ class ResolutionBot:
             return False
 
         # Reserve capital
-        if not self._bankroll.reserve("resolution", mid, size_usd):
+        if not self._bankroll.reserve(mid, size_usd):
             return False
 
         # Place order
