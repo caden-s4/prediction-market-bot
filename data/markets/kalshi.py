@@ -227,7 +227,9 @@ class KalshiClient(BaseMarketClient):
         results: List[Market] = []
         seen: set = set()
 
-        for series in _WEATHER_SERIES_TICKERS:
+        for i, series in enumerate(_WEATHER_SERIES_TICKERS):
+            if i > 0:
+                time.sleep(0.6)  # stay under Kalshi rate limit (~1 req/s)
             try:
                 params: Dict[str, Any] = {
                     "status": "open",
@@ -249,7 +251,24 @@ class KalshiClient(BaseMarketClient):
                 logger.warning("Kalshi series=%s fetch failed: %s", series, exc)
 
         logger.debug("Kalshi weather scan complete: %d markets found", len(results))
+        if not results:
+            self._log_available_series()
         return results
+
+    def _log_available_series(self) -> None:
+        """Query /series and log all tickers so we can see what's on this API."""
+        try:
+            time.sleep(0.6)
+            data = self._get("/series", params={"limit": 200})
+            series_list = data.get("series", [])
+            tickers = [s.get("ticker", "") for s in series_list]
+            logger.info(
+                "Kalshi available series (%d total): %s",
+                len(tickers),
+                sorted(tickers),
+            )
+        except Exception as exc:
+            logger.warning("Kalshi /series discovery failed: %s", exc)
 
     def _parse_market(self, item: dict) -> Optional[Market]:
         try:
