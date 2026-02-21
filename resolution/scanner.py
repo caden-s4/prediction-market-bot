@@ -41,8 +41,9 @@ SCAN_CATEGORIES = [
 # Hard exclusion: never touch these category strings
 EXCLUDED_CATEGORIES = {"crypto", "cryptocurrency", "weather"}
 
-# Markets expiring within this window are candidates
-RESOLUTION_WINDOW_HOURS = 24
+# Default scan window. Overridden by config (RESOLUTION_WINDOW_HOURS env var).
+# Strategy spec: 24h for live prod. Set 168+ for Kalshi demo (only long-dated markets).
+RESOLUTION_WINDOW_HOURS = 168
 
 # Minimum order book depth (total $ on best bid + ask) to consider a market
 MIN_DEPTH_USD = 50.0
