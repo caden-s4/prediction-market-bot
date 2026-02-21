@@ -11,7 +11,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env from the project root (parent of this file's directory)
 _ENV_PATH = Path(__file__).parent / ".env"
 load_dotenv(_ENV_PATH, override=False)
 
@@ -34,16 +33,15 @@ def _get(key: str, default: str = "") -> str:
 
 @dataclass(frozen=True)
 class KalshiConfig:
-    enabled: bool           # Set KALSHI_ENABLED=false to disable entirely
+    enabled: bool
     api_key: str
     api_secret: str
-    env: str  # "prod" | "demo"
+    env: str            # "prod" | "demo"
     base_url: str = field(init=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
-            self,
-            "base_url",
+            self, "base_url",
             "https://api.elections.kalshi.com/trade-api/v2"
             if self.env == "prod"
             else "https://demo-api.kalshi.co/trade-api/v2",
@@ -64,14 +62,14 @@ class KalshiConfig:
 
 @dataclass(frozen=True)
 class PolymarketConfig:
-    enabled: bool           # Set POLYMARKET_ENABLED=false to disable entirely
+    enabled: bool
     api_key: str
     api_secret: str
     api_passphrase: str
     private_key: str
     funder_address: str
     host: str = "https://clob.polymarket.com"
-    chain_id: int = 137  # Polygon mainnet
+    chain_id: int = 137
 
     @classmethod
     def from_env(cls) -> "PolymarketConfig":
@@ -90,24 +88,43 @@ class PolymarketConfig:
 
 @dataclass(frozen=True)
 class BotConfig:
-    min_edge_threshold: float       # Minimum edge fraction to trade (e.g. 0.05)
-    kelly_fraction: float           # Fractional Kelly multiplier (e.g. 0.25)
-    max_position_fraction: float    # Max single position as fraction of bankroll
-    max_total_exposure: float       # Max total exposure as fraction of bankroll
-    bankroll_usd: float             # Starting / current bankroll in USD
-    poll_interval_seconds: int      # How often to run the pipeline
-    dry_run: bool                   # If True, never place real orders
+    dry_run: bool                               # Never place real orders when True
+    bankroll_usd: float                         # Starting capital in USD
+
+    # ── Shared infrastructure ──────────────────────────────────────────────
+    fee_cache_ttl_seconds: int                  # Fee cache TTL (default 900 = 15 min)
+
+    # ── Bankroll split ─────────────────────────────────────────────────────
+    maker_allocation_fraction: float            # Fraction for maker bot (default 0.60)
+    # resolution bot gets (1 - maker_allocation_fraction)
+
+    # ── Bot 1: Maker Rebate Harvester ──────────────────────────────────────
+    maker_enabled: bool                         # Toggle maker bot on/off
+    maker_half_spread: float                    # Half-spread around fair value (default 1%)
+    maker_cap_usd: float                        # Per-market per-side exposure cap
+
+    # ── Bot 2: Resolution Drift Arbitrage ──────────────────────────────────
+    resolution_enabled: bool                    # Toggle resolution bot on/off
+    resolution_window_hours: float              # Markets expiring within this many hours
+    resolution_min_gap: float                   # Min fee-adjusted gap to flag (default 4%)
+    resolution_kelly_fraction: float            # Fractional Kelly multiplier (default 12%)
+    resolution_max_position_fraction: float     # Max single position % of bankroll
 
     @classmethod
     def from_env(cls) -> "BotConfig":
         return cls(
-            min_edge_threshold=float(_get("MIN_EDGE_THRESHOLD", "0.05")),
-            kelly_fraction=float(_get("KELLY_FRACTION", "0.25")),
-            max_position_fraction=float(_get("MAX_POSITION_FRACTION", "0.08")),
-            max_total_exposure=float(_get("MAX_TOTAL_EXPOSURE", "0.25")),
-            bankroll_usd=float(_get("BANKROLL_USD", "1000.0")),
-            poll_interval_seconds=int(_get("POLL_INTERVAL_SECONDS", "300")),
             dry_run=_get("DRY_RUN", "true").lower() != "false",
+            bankroll_usd=float(_get("BANKROLL_USD", "1000.0")),
+            fee_cache_ttl_seconds=int(_get("FEE_CACHE_TTL_SECONDS", "900")),
+            maker_allocation_fraction=float(_get("MAKER_ALLOCATION_FRACTION", "0.60")),
+            maker_enabled=_get("MAKER_ENABLED", "true").lower() != "false",
+            maker_half_spread=float(_get("MAKER_HALF_SPREAD", "0.010")),
+            maker_cap_usd=float(_get("MAKER_CAP_USD", "75.0")),
+            resolution_enabled=_get("RESOLUTION_ENABLED", "true").lower() != "false",
+            resolution_window_hours=float(_get("RESOLUTION_WINDOW_HOURS", "24.0")),
+            resolution_min_gap=float(_get("RESOLUTION_MIN_GAP", "0.04")),
+            resolution_kelly_fraction=float(_get("RESOLUTION_KELLY_FRACTION", "0.12")),
+            resolution_max_position_fraction=float(_get("RESOLUTION_MAX_POSITION_FRACTION", "0.20")),
         )
 
 
@@ -115,12 +132,12 @@ class BotConfig:
 
 @dataclass(frozen=True)
 class MonitoringConfig:
-    telegram_token: str              # Telegram bot token (empty = disabled)
-    telegram_chat_id: str            # Telegram chat/channel ID
-    discord_webhook_url: str         # Discord incoming webhook URL (empty = disabled)
-    daily_drawdown_alert_pct: float  # alert when daily loss > X% of bankroll
-    max_daily_loss_usd: float        # halt trading when daily loss > $X (0 = disabled)
-    snapshot_interval_seconds: int   # how often to write portfolio snapshots
+    telegram_token: str
+    telegram_chat_id: str
+    discord_webhook_url: str
+    daily_drawdown_alert_pct: float
+    max_daily_loss_usd: float
+    snapshot_interval_seconds: int
 
     @classmethod
     def from_env(cls) -> "MonitoringConfig":
