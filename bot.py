@@ -1,73 +1,61 @@
 """
-bot.py – main Bot orchestrator.
+bot.py – BotCoordinator: runs both bots from a single process.
 
-The Bot:
-  1. Scans markets via MarketScanner
-  2. Fetches order books for candidates
-  3. Runs the full reasoning pipeline (Stages 1–5) via ReasoningEngine
-  4. Executes trade signals via Executor
-  5. Re-evaluates open positions (Stage 6) on every cycle
-  6. Updates the meta-calibration layer
-  7. Persists state between restarts
+Two bots, one process:
+  Bot 1 (maker)      – async event loop, driven by WebSocket price feed
+  Bot 2 (resolution) – sync polling loop, runs every 5 minutes
 
-Run in a loop by main.py.
+They share:
+  - FeeCache       : per-market taker fee rates (refresh every 15 min)
+  - ExclusionList  : markets neither bot may touch
+  - Bankroll       : 60/40 capital split with daily halt logic
+
+Architecture:
+  - Bot 2 runs in a background thread
+  - Bot 1 runs in the main asyncio event loop
+  - Both write to the same event DB and monitoring layer
+  - Ctrl-C or daily halt stops both cleanly
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import threading
 import time
-from typing import Dict, List, Optional
+from typing import Optional
 
 from config import AppConfig
-from data.markets.base import BaseMarketClient, Market, OrderBook
 from data.markets.kalshi import KalshiClient
 from data.markets.polymarket import PolymarketClient
-from data.markets.scanner import MarketScanner, build_default_scanner
-from data.weather.aggregator import ConsensusForecast, WeatherAggregator
-from execution.executor import Executor
-from execution.portfolio import Portfolio
-from meta.calibration import CalibrationTracker
-from pipeline.python_engine import PythonReasoningEngine
-from pipeline.reasoning_engine import PipelineResult, ReasoningEngine
-from pipeline.stage1_probability import Stage1Probability
-from pipeline.stage2_market import Stage2Market
-from pipeline.stage3_edge import Stage3Edge
-from pipeline.stage4_risk import Stage4Risk
-from pipeline.stage5_timing import Stage5Timing
-from pipeline.stage6_reevaluation import Stage6Reevaluation
+from maker.quoter import MakerBot
+from monitoring.alerts import AlertManager
+from monitoring.event_db import EventDB
+from resolution.executor import ResolutionBot
+from shared.bankroll import Bankroll
+from shared.exclusion_list import ExclusionList
+from shared.fee_cache import FeeCache
 from utils.storage import StateStore
 
 logger = logging.getLogger(__name__)
 
 
-class Bot:
+class BotCoordinator:
     """
-    Top-level prediction market trading bot.
-
-    Inject any ReasoningEngine subclass to swap reasoning logic
-    (e.g., switch from PythonReasoningEngine to LLMReasoningEngine).
+    Top-level coordinator that owns both bots and all shared infrastructure.
 
     Parameters
     ----------
-    config            : loaded AppConfig (credentials + bot settings)
-    reasoning_engine  : optional custom ReasoningEngine; defaults to Python engine
-    scanner           : optional custom MarketScanner; defaults to weather-first
+    config : loaded AppConfig (credentials + settings)
     """
 
-    def __init__(
-        self,
-        config: AppConfig,
-        reasoning_engine: Optional[ReasoningEngine] = None,
-        scanner: Optional[MarketScanner] = None,
-    ) -> None:
+    def __init__(self, config: AppConfig) -> None:
         self._cfg = config
-        self._bot_cfg = config.bot
+        bc = config.bot
 
-        # ── Market clients ────────────────────────────────────────────────
+        # ── Platform clients ──────────────────────────────────────────────
         self._kalshi: Optional[KalshiClient] = None
-        self._polymarket: Optional[PolymarketClient] = None
-        self._clients: Dict[str, BaseMarketClient] = {}
+        self._poly: Optional[PolymarketClient] = None
 
         if config.kalshi.enabled:
             self._kalshi = KalshiClient(
@@ -75,245 +63,156 @@ class Bot:
                 api_secret=config.kalshi.api_secret,
                 base_url=config.kalshi.base_url,
             )
-            self._clients["kalshi"] = self._kalshi
+            logger.info("Kalshi client: ENABLED (%s)", config.kalshi.env)
         else:
-            logger.info("Kalshi access DISABLED (KALSHI_ENABLED=false)")
+            logger.info("Kalshi client: DISABLED")
 
         if config.polymarket.enabled:
-            self._polymarket = PolymarketClient(
+            self._poly = PolymarketClient(
                 api_key=config.polymarket.api_key,
                 api_secret=config.polymarket.api_secret,
                 api_passphrase=config.polymarket.api_passphrase,
                 private_key=config.polymarket.private_key,
                 funder_address=config.polymarket.funder_address,
             )
-            self._clients["polymarket"] = self._polymarket
+            logger.info("Polymarket client: ENABLED")
         else:
-            logger.info("Polymarket access DISABLED (POLYMARKET_ENABLED=false)")
+            logger.info("Polymarket client: DISABLED")
 
-        if not self._clients:
+        if not self._kalshi and not self._poly:
             raise RuntimeError(
-                "No platforms enabled. Set KALSHI_ENABLED=true and/or POLYMARKET_ENABLED=true in .env"
+                "No platforms enabled. Set KALSHI_ENABLED=true and/or "
+                "POLYMARKET_ENABLED=true in .env"
             )
 
-        # ── Market scanner ────────────────────────────────────────────────
-        self._scanner = scanner or build_default_scanner(
-            polymarket_client=self._polymarket,
-            kalshi_client=self._kalshi,
-        )
-
-        # ── Weather aggregator ────────────────────────────────────────────
-        self._aggregator = WeatherAggregator()
-
-        # ── Reasoning pipeline stages ─────────────────────────────────────
-        s3 = Stage3Edge(min_edge_threshold=self._bot_cfg.min_edge_threshold)
-        s4 = Stage4Risk(
-            kelly_fraction=self._bot_cfg.kelly_fraction,
-            max_position_fraction=self._bot_cfg.max_position_fraction,
-            max_total_exposure=self._bot_cfg.max_total_exposure,
-        )
-        s5 = Stage5Timing(base_edge_threshold=self._bot_cfg.min_edge_threshold)
-
-        self._engine: ReasoningEngine = reasoning_engine or PythonReasoningEngine(
-            stage1=Stage1Probability(self._aggregator),
-            stage2=Stage2Market(),
-            stage3=s3,
-            stage4=s4,
-            stage5=s5,
-        )
-        self._stage6 = Stage6Reevaluation(
-            min_edge_to_hold=0.0,
-            rebalance_improvement=0.03,
-        )
-
-        # ── Portfolio + execution ─────────────────────────────────────────
+        # ── Shared infrastructure ─────────────────────────────────────────
+        self._fee_cache = FeeCache(ttl=bc.fee_cache_ttl_seconds)
+        self._exclusions = ExclusionList()
         self._state = StateStore()
-        bankroll = self._state.get("bankroll", self._bot_cfg.bankroll_usd)
-        self._portfolio = Portfolio(starting_bankroll=bankroll)
-        self._calibration = CalibrationTracker()
-        self._executor = Executor(
-            clients=self._clients,
-            portfolio=self._portfolio,
-            calibration=self._calibration,
-            dry_run=self._bot_cfg.dry_run,
+
+        starting_bankroll = self._state.get("bankroll", bc.bankroll_usd)
+        self._bankroll = Bankroll(
+            total_usd=starting_bankroll,
+            maker_fraction=bc.maker_allocation_fraction,
+            resolution_fraction=1.0 - bc.maker_allocation_fraction,
+            max_daily_loss_usd=config.monitoring.max_daily_loss_usd,
         )
+
+        # ── Monitoring ────────────────────────────────────────────────────
+        self._event_db = EventDB()
+        self._alerts = AlertManager(config.monitoring)
+
+        # ── Bot 1: Maker (Polymarket only, async) ─────────────────────────
+        self._maker: Optional[MakerBot] = None
+        if self._poly and bc.maker_enabled:
+            maker_markets = self._poly.get_markets(category="crypto", limit=200)
+            self._maker = MakerBot(
+                markets=maker_markets,
+                poly_client=self._poly,
+                fee_cache=self._fee_cache,
+                bankroll=self._bankroll,
+                exclusions=self._exclusions,
+                half_spread=bc.maker_half_spread,
+                cap_usd=bc.maker_cap_usd,
+                dry_run=bc.dry_run,
+            )
+            logger.info(
+                "MakerBot: ENABLED (half_spread=%.3f cap=$%.0f)",
+                bc.maker_half_spread, bc.maker_cap_usd,
+            )
+        else:
+            logger.info(
+                "MakerBot: DISABLED (maker_enabled=%s poly=%s)",
+                bc.maker_enabled, self._poly is not None,
+            )
+
+        # ── Bot 2: Resolution drift (both platforms, sync polling) ─────────
+        self._resolution: Optional[ResolutionBot] = None
+        if bc.resolution_enabled:
+            self._resolution = ResolutionBot(
+                kalshi_client=self._kalshi,
+                poly_client=self._poly,
+                fee_cache=self._fee_cache,
+                bankroll=self._bankroll,
+                exclusions=self._exclusions,
+                dry_run=bc.dry_run,
+            )
+            logger.info("ResolutionBot: ENABLED")
+        else:
+            logger.info("ResolutionBot: DISABLED")
 
         logger.info(
-            "Bot initialised | dry_run=%s bankroll=$%.2f min_edge=%.1f%%",
-            self._bot_cfg.dry_run,
-            bankroll,
-            self._bot_cfg.min_edge_threshold * 100,
+            "BotCoordinator ready | dry_run=%s bankroll=$%.2f | "
+            "maker_alloc=%.0f%% resolution_alloc=%.0f%%",
+            bc.dry_run,
+            starting_bankroll,
+            bc.maker_allocation_fraction * 100,
+            (1.0 - bc.maker_allocation_fraction) * 100,
         )
 
-    # ── Main loop ─────────────────────────────────────────────────────────────
+    # ── Entry points ──────────────────────────────────────────────────────────
 
     def run_forever(self) -> None:
-        """Run the pipeline loop indefinitely. Ctrl-C to stop."""
-        logger.info("Bot starting main loop (interval=%ds)", self._bot_cfg.poll_interval_seconds)
-        while True:
+        """
+        Start both bots.
+        Bot 2 (resolution) runs in a background daemon thread.
+        Bot 1 (maker) runs in the main asyncio event loop.
+        Ctrl-C stops both.
+        """
+        logger.info("BotCoordinator: starting both bots")
+
+        # Launch Bot 2 in a background thread
+        if self._resolution:
+            t = threading.Thread(
+                target=self._resolution_thread,
+                name="resolution-bot",
+                daemon=True,
+            )
+            t.start()
+            logger.info("ResolutionBot: thread started")
+
+        # Run Bot 1 in the main event loop (blocking)
+        if self._maker:
             try:
-                self.run_once()
+                asyncio.run(self._maker.run())
             except KeyboardInterrupt:
-                logger.info("Bot stopped by user.")
-                break
-            except Exception as exc:
-                logger.exception("Bot loop error (will retry): %s", exc)
-
-            # Persist bankroll between cycles
-            self._state.set("bankroll", self._portfolio.bankroll)
-            logger.info(
-                "Cycle complete. Sleeping %ds | bankroll=$%.2f | open_positions=%d",
-                self._bot_cfg.poll_interval_seconds,
-                self._portfolio.bankroll,
-                len(self._portfolio.open_positions),
-            )
-            time.sleep(self._bot_cfg.poll_interval_seconds)
-
-    def run_once(self) -> PipelineResult:
-        """
-        Execute one full pipeline cycle.
-        Returns a PipelineResult for inspection / testing.
-        """
-        logger.info("=== Pipeline cycle start ===")
-
-        # ── Step 1: Scan markets ───────────────────────────────────────────
-        markets: List[Market] = self._scanner.scan(prioritise_weather=True)
-        logger.info("Scanned %d markets", len(markets))
-
-        if not markets:
-            logger.warning("No markets found – skipping cycle")
-            return PipelineResult(signals=[], markets_evaluated=0, markets_passed=0)
-
-        # ── Step 2: Re-evaluate open positions (Stage 6) first ────────────
-        self._reevaluate_open_positions(markets)
-
-        # ── Step 3: Fetch order books for candidate markets ────────────────
-        order_books: Dict[str, OrderBook] = {}
-        forecasts: Dict[str, Optional[ConsensusForecast]] = {}
-
-        for market in markets:
-            # Skip markets we're already in (handled by Stage 6)
-            if self._portfolio.get_position(market.market_id):
-                continue
-
-            client = self._clients.get(market.platform)
-            if not client:
-                continue
-
+                logger.info("BotCoordinator: interrupted by user")
+            finally:
+                self._maker.stop()
+        else:
+            # No maker bot – keep main thread alive for resolution bot
+            logger.info("BotCoordinator: running resolution-only mode")
             try:
-                ob = client.get_order_book(market.market_id)
-                order_books[market.market_id] = ob
-            except Exception as exc:
-                logger.warning("Failed to fetch order book for %s: %s", market.market_id, exc)
-                continue
+                while True:
+                    time.sleep(10)
+                    self._persist_state()
+            except KeyboardInterrupt:
+                logger.info("BotCoordinator: stopped by user")
 
-            # Pre-fetch forecasts for weather markets with location data
-            if market.is_weather_market() and market.location:
-                try:
-                    fc = self._aggregator.get_consensus(
-                        latitude=market.location["lat"],
-                        longitude=market.location["lon"],
-                        horizon_hours=min(market.hours_to_resolution, 240.0),
-                    )
-                    forecasts[market.market_id] = fc
-                except Exception as exc:
-                    logger.warning("Forecast failed for %s: %s", market.market_id, exc)
-                    forecasts[market.market_id] = None
-            else:
-                forecasts[market.market_id] = None
+        self._persist_state()
+        logger.info("BotCoordinator: shutdown complete")
 
-        # ── Step 4: Run reasoning pipeline (Stages 1–5) ───────────────────
-        result = self._engine.evaluate_markets(
-            markets=[m for m in markets if m.market_id in order_books],
-            order_books=order_books,
-            forecasts=forecasts,
-            bankroll=self._portfolio.bankroll,
-            current_exposure=self._portfolio.total_exposure_usd,
-        )
+    def run_once(self) -> dict:
+        """Run a single resolution bot cycle (for testing / --once mode)."""
+        if self._resolution:
+            return self._resolution.run_once()
+        return {"error": "resolution bot disabled"}
 
-        logger.info(
-            "Pipeline: %d evaluated, %d passed, %d tradeable",
-            result.markets_evaluated,
-            result.markets_passed,
-            len(result.tradeable_signals),
-        )
+    # ── Internals ─────────────────────────────────────────────────────────────
 
-        # ── Step 5: Execute trade signals ─────────────────────────────────
-        if result.tradeable_signals:
-            logger.info("Top signals:")
-            for sig in result.top_signals(5):
-                logger.info(
-                    "  %s %s edge=%.1f%% size=$%.2f",
-                    sig.action, sig.market.market_id, sig.edge * 100, sig.position_size_usd,
-                )
-            self._executor.execute_signals(result.tradeable_signals)
-
-        # ── Step 6: Check arbitrage opportunities ──────────────────────────
-        arb_candidates = self._scanner.scan_arbitrage_candidates()
-        if arb_candidates:
-            logger.info(
-                "Arbitrage: %d cross-platform opportunities found (best spread: %.3f)",
-                len(arb_candidates),
-                arb_candidates[0]["price_spread"],
+    def _resolution_thread(self) -> None:
+        """Target for the resolution bot background thread."""
+        try:
+            if self._resolution:
+                self._resolution.run_forever()
+        except Exception as exc:
+            logger.exception("ResolutionBot: fatal error in thread: %s", exc)
+            self._alerts.send_alert(
+                f"CRITICAL: ResolutionBot thread died: {exc}", level="critical"
             )
 
-        # ── Step 7: Save calibration snapshot periodically ─────────────────
-        self._calibration.snapshot()
-
-        return result
-
-    # ── Stage 6 helper ────────────────────────────────────────────────────────
-
-    def _reevaluate_open_positions(self, fresh_markets: List[Market]) -> None:
-        """Re-run Stage 6 on all open positions using fresh market data."""
-        if not self._portfolio.open_positions:
-            return
-
-        market_map = {m.market_id: m for m in fresh_markets}
-        open_orders = [p.order for p in self._portfolio.open_positions]
-        original_edges = {
-            p.market_id: p.entry_edge for p in self._portfolio.open_positions
-        }
-
-        # Fetch fresh forecasts + order books for open positions
-        position_forecasts: Dict = {}
-        fresh_order_books: Dict = {}
-
-        for pos in self._portfolio.open_positions:
-            mid = pos.market_id
-            market = market_map.get(mid)
-            if not market:
-                continue
-            client = self._clients.get(pos.platform)
-            if client:
-                try:
-                    fresh_order_books[mid] = client.get_order_book(mid)
-                except Exception:
-                    pass
-            if market.location:
-                try:
-                    position_forecasts[mid] = self._aggregator.get_consensus(
-                        latitude=market.location["lat"],
-                        longitude=market.location["lon"],
-                        horizon_hours=min(market.hours_to_resolution, 240.0),
-                    )
-                except Exception:
-                    position_forecasts[mid] = None
-
-        # Determine best new opportunity edge for rebalance logic
-        best_new_edge = 0.0
-
-        decisions = self._stage6.run(
-            open_positions=open_orders,
-            position_markets={mid: market_map[mid] for mid in original_edges if mid in market_map},
-            position_forecasts=position_forecasts,
-            order_books=fresh_order_books,
-            original_edges=original_edges,
-            best_new_edge=best_new_edge,
-            at_max_exposure=(
-                self._portfolio.total_exposure_usd
-                >= self._portfolio.bankroll * self._bot_cfg.max_total_exposure * 0.95
-            ),
-        )
-
-        self._executor.execute_reevaluation(decisions)
+    def _persist_state(self) -> None:
+        summary = self._bankroll.summary()
+        self._state.set("bankroll", summary["total_usd"])
+        self._state.set("bankroll_summary", summary)
+        logger.debug("BotCoordinator: state persisted %s", summary)

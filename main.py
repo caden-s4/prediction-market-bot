@@ -1,50 +1,57 @@
 """
-main.py – entry point for the prediction market weather trading bot.
+main.py – entry point for the prediction market trading bot.
+
+Two bots run simultaneously from this process:
+  Bot 1 – Maker Rebate Harvester (Polymarket 5/15-min crypto markets)
+  Bot 2 – Resolution Drift Arbitrage (non-crypto markets expiring within 24h)
 
 Usage
 -----
-    python main.py                        # run live (or dry-run if DRY_RUN=true)
-    python main.py --once                 # run a single pipeline cycle and exit
+    python main.py                        # run both bots live (or dry-run)
+    python main.py --once                 # single resolution bot cycle, then exit
+    python main.py --maker-only           # run only the maker bot
+    python main.py --resolution-only      # run only the resolution bot
     python main.py --log-level DEBUG      # verbose output
 
 Environment
 -----------
-Copy .env.example → .env and fill in your API credentials before running.
-Set DRY_RUN=true to simulate trades without placing real orders.
-
-Swapping the reasoning engine (e.g. to use an LLM)
------------------------------------------------------
-    from my_llm_engine import LLMReasoningEngine
-    bot = Bot(config=cfg, reasoning_engine=LLMReasoningEngine(...))
-
-Changing which markets are scanned
-------------------------------------
-Edit data/markets/scanner.py → build_default_scanner() and change `categories`
-from ["weather"] to e.g. ["weather", "politics", "sports"].
+Copy .env.example → .env and fill in your API credentials.
+See SETUP.txt for the complete credential setup guide.
+Set DRY_RUN=true to simulate without placing real orders.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
-# Add project root to path so all modules resolve correctly
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import AppConfig
-from bot import Bot
+from bot import BotCoordinator
 from utils.logger import setup_logging
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Prediction market weather trading bot"
+        description="Prediction market trading bot (maker rebates + resolution drift)"
     )
     parser.add_argument(
         "--once",
         action="store_true",
-        help="Run a single pipeline cycle and exit (useful for testing)",
+        help="Run a single resolution bot cycle and exit (for testing)",
+    )
+    parser.add_argument(
+        "--maker-only",
+        action="store_true",
+        help="Run only the maker rebate bot (disables resolution bot for this session)",
+    )
+    parser.add_argument(
+        "--resolution-only",
+        action="store_true",
+        help="Run only the resolution drift bot (disables maker bot for this session)",
     )
     parser.add_argument(
         "--log-level",
@@ -63,8 +70,6 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     setup_logging(level=args.log_level, log_file=args.log_file)
-
-    import logging
     logger = logging.getLogger(__name__)
 
     try:
@@ -73,45 +78,28 @@ def main() -> None:
         logger.error("Configuration error: %s", exc)
         sys.exit(1)
 
+    # Override bot toggles from CLI flags
+    if args.maker_only:
+        object.__setattr__(cfg.bot, "resolution_enabled", False)
+        logger.info("CLI override: resolution bot DISABLED (--maker-only)")
+    if args.resolution_only:
+        object.__setattr__(cfg.bot, "maker_enabled", False)
+        logger.info("CLI override: maker bot DISABLED (--resolution-only)")
+
     if cfg.bot.dry_run:
         logger.warning(
-            "DRY RUN mode enabled – no real orders will be placed. "
+            "DRY RUN mode – no real orders will be placed. "
             "Set DRY_RUN=false in .env to trade live."
         )
 
-    # ── Instantiate the bot ───────────────────────────────────────────────────
-    # To use a custom reasoning engine, pass reasoning_engine= here:
-    #
-    #   from pipeline.python_engine import PythonReasoningEngine
-    #   engine = PythonReasoningEngine(...)
-    #   bot = Bot(config=cfg, reasoning_engine=engine)
-    #
-    # Or for an LLM engine (future):
-    #   from my_llm_engine import LLMReasoningEngine
-    #   bot = Bot(config=cfg, reasoning_engine=LLMReasoningEngine(model="gpt-4o"))
-    #
-    bot = Bot(config=cfg)
+    coordinator = BotCoordinator(config=cfg)
 
     if args.once:
-        logger.info("Running single cycle (--once mode)")
-        result = bot.run_once()
-        logger.info(
-            "Done. Evaluated=%d Passed=%d Tradeable=%d",
-            result.markets_evaluated,
-            result.markets_passed,
-            len(result.tradeable_signals),
-        )
-        for sig in result.top_signals(10):
-            logger.info(
-                "  SIGNAL: %s | %s | edge=%.2f%% | size=$%.2f | %s",
-                sig.action,
-                sig.market.market_id,
-                sig.edge * 100,
-                sig.position_size_usd,
-                sig.reasoning,
-            )
+        logger.info("Running single resolution cycle (--once mode)")
+        result = coordinator.run_once()
+        logger.info("Done. Result: %s", result)
     else:
-        bot.run_forever()
+        coordinator.run_forever()
 
 
 if __name__ == "__main__":
