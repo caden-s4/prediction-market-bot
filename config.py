@@ -96,8 +96,8 @@ class BotConfig:
 
     # ── Resolution Drift Arbitrage ─────────────────────────────────────────
     # Scan window: only trade markets expiring within this many hours.
-    # Strategy spec is 24h for live trading. Set higher (e.g. 168) while testing
-    # on Kalshi demo, which only has long-dated markets.
+    # Strategy spec is 24h for live trading (prod).
+    # Kalshi demo markets are 14-30 days out — set 720 for demo testing.
     resolution_window_hours: float
     resolution_min_gap: float                   # Min fee-adjusted gap to flag (default 4%)
     resolution_kelly_fraction: float            # Fractional Kelly (default 12%)
@@ -110,7 +110,7 @@ class BotConfig:
             dry_run=_get("DRY_RUN", "true").lower() != "false",
             bankroll_usd=float(_get("BANKROLL_USD", "1000.0")),
             fee_cache_ttl_seconds=int(_get("FEE_CACHE_TTL_SECONDS", "900")),
-            resolution_window_hours=float(_get("RESOLUTION_WINDOW_HOURS", "168.0")),
+            resolution_window_hours=float(_get("RESOLUTION_WINDOW_HOURS", "720.0")),
             resolution_min_gap=float(_get("RESOLUTION_MIN_GAP", "0.04")),
             resolution_kelly_fraction=float(_get("RESOLUTION_KELLY_FRACTION", "0.12")),
             resolution_max_position_fraction=float(_get("RESOLUTION_MAX_POSITION_FRACTION", "0.20")),
