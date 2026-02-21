@@ -124,17 +124,36 @@ class ResolutionScanner:
         self, client: BaseMarketClient, platform_name: str
     ) -> List[Market]:
         results: List[Market] = []
-        for category in SCAN_CATEGORIES:
+        seen: set = set()
+
+        # Kalshi has no server-side category filter – one paginated call covers all
+        # open markets and we filter client-side. Polymarket supports per-category
+        # params so we query each category separately for complete coverage.
+        if platform_name == "kalshi":
             try:
-                markets = client.get_markets(category=category, limit=self._max)
+                markets = client.get_markets(limit=self._max)
                 for m in markets:
-                    if self._is_candidate(m):
+                    if m.market_id not in seen and self._is_candidate(m):
+                        seen.add(m.market_id)
                         results.append(m)
             except Exception as exc:
                 logger.warning(
-                    "ResolutionScanner: failed fetching %s/%s: %s",
-                    platform_name, category, exc,
+                    "ResolutionScanner: failed fetching kalshi markets: %s", exc
                 )
+        else:
+            for category in SCAN_CATEGORIES:
+                try:
+                    markets = client.get_markets(category=category, limit=self._max)
+                    for m in markets:
+                        if m.market_id not in seen and self._is_candidate(m):
+                            seen.add(m.market_id)
+                            results.append(m)
+                except Exception as exc:
+                    logger.warning(
+                        "ResolutionScanner: failed fetching %s/%s: %s",
+                        platform_name, category, exc,
+                    )
+
         logger.info(
             "ResolutionScanner: %s → %d candidates", platform_name, len(results)
         )
