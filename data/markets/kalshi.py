@@ -197,24 +197,48 @@ class KalshiClient(BaseMarketClient):
         self,
         category: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        limit: int = 100,
+        limit: int = 200,
     ) -> List[Market]:
-        params: Dict[str, Any] = {
-            "status": "open",
-            "limit": min(limit, 200),
-        }
-        try:
-            data = self._get("/markets", params=params)
-        except Exception as exc:
-            logger.error("Kalshi get_markets failed: %s", exc)
-            return []
+        """
+        Fetch open markets from Kalshi with cursor-based pagination.
 
-        markets: List[Market] = []
-        for item in data.get("markets", []):
-            market = self._parse_market(item)
-            if market:
-                markets.append(market)
-        return markets
+        category is matched client-side (Kalshi API has no category filter).
+        All open markets are fetched first (up to limit), then filtered.
+        """
+        weather_only = (category == "weather") if category else False
+        page_size = min(200, limit)
+        fetched: List[Market] = []
+        cursor: Optional[str] = None
+
+        while len(fetched) < limit:
+            params: Dict[str, Any] = {"status": "open", "limit": page_size}
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                data = self._get("/markets", params=params)
+            except Exception as exc:
+                logger.error("Kalshi get_markets failed: %s", exc)
+                break
+
+            raw = data.get("markets", [])
+            if not raw:
+                break
+
+            for item in raw:
+                market = self._parse_market(item, weather_only=weather_only)
+                if not market:
+                    continue
+                # Client-side category filter (skip only if a specific non-weather
+                # category was requested and market doesn't match)
+                if category and not weather_only and market.category != category:
+                    continue
+                fetched.append(market)
+
+            cursor = data.get("cursor")
+            if not cursor or len(raw) < page_size:
+                break  # no more pages
+
+        return fetched[:limit]
 
     def get_weather_markets(self, limit: int = 200) -> List[Market]:
         """Fetch weather-series markets from Kalshi.
@@ -244,7 +268,7 @@ class KalshiClient(BaseMarketClient):
                     if ticker in seen:
                         continue
                     seen.add(ticker)
-                    m = self._parse_market(item)
+                    m = self._parse_market(item, weather_only=True)
                     if m:
                         results.append(m)
             except Exception as exc:
@@ -270,20 +294,19 @@ class KalshiClient(BaseMarketClient):
         except Exception as exc:
             logger.warning("Kalshi /series discovery failed: %s", exc)
 
-    def _parse_market(self, item: dict) -> Optional[Market]:
+    def _parse_market(self, item: dict, weather_only: bool = False) -> Optional[Market]:
         try:
             ticker = item.get("ticker", "")
             title = item.get("title", "")
             subtitle = item.get("subtitle", "")
             question = f"{title} {subtitle}".strip()
 
-            # Filter to weather-only
             is_weather = bool(
                 _WEATHER_SERIES.match(ticker)
                 or any(kw in question.lower() for kw in
                        ("rain", "snow", "precip", "storm", "temperature", "wind", "weather"))
             )
-            if not is_weather:
+            if weather_only and not is_weather:
                 return None
 
             close_time = item.get("close_time") or item.get("expiration_time")
@@ -302,12 +325,18 @@ class KalshiClient(BaseMarketClient):
             yes_price = (yes_bid + yes_ask) / 2.0
             no_price = (no_bid + no_ask) / 2.0
 
+            # Infer category from series ticker or question keywords
+            category = self._infer_category(ticker, question, is_weather)
+            tags = [category]
+            if is_weather:
+                tags.append("weather")
+
             return Market(
                 market_id=ticker,
                 platform=self.PLATFORM,
                 question=question,
-                category="weather",
-                tags=["weather"],
+                category=category,
+                tags=tags,
                 resolution_date=resolution_date,
                 yes_price=yes_price,
                 no_price=no_price,
@@ -319,6 +348,28 @@ class KalshiClient(BaseMarketClient):
         except Exception as exc:
             logger.warning("Kalshi _parse_market error: %s | item=%s", exc, item)
             return None
+
+    @staticmethod
+    def _infer_category(ticker: str, question: str, is_weather: bool) -> str:
+        if is_weather:
+            return "weather"
+        t = ticker.upper()
+        q = question.lower()
+        if any(x in t for x in ("KXELECT", "KXPRES", "KXSEN", "KXGOV", "KXHOUS", "KXCONG")):
+            return "politics"
+        if any(x in t for x in ("KXNFL", "KXNBA", "KXMLB", "KXNHL", "KXSOC", "KXCFB", "KXNCAR")):
+            return "sports"
+        if any(x in t for x in ("KXFED", "KXFOMC", "KXCPI", "KXGDP", "KXECON", "KXJOBS")):
+            return "economics"
+        if any(w in q for w in ("election", "vote", "senate", "congress", "president", "governor")):
+            return "politics"
+        if any(w in q for w in ("win", "championship", "super bowl", "world series", "nfl", "nba", "mlb")):
+            return "sports"
+        if any(w in q for w in ("fed", "rate", "inflation", "gdp", "cpi", "unemployment", "jobs")):
+            return "economics"
+        if any(w in q for w in ("court", "judge", "ruling", "lawsuit", "sec", "ftc", "fda")):
+            return "legal"
+        return "general"
 
     # ── Order book ────────────────────────────────────────────────────────────
 

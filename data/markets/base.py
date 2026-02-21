@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
@@ -132,8 +132,12 @@ class Market:
 
     @property
     def hours_to_resolution(self) -> float:
-        delta = self.resolution_date - datetime.utcnow()
-        return max(delta.total_seconds() / 3600, 0.0)
+        now = datetime.now(timezone.utc)
+        # Handle both timezone-aware and naive resolution_date
+        rd = self.resolution_date
+        if rd.tzinfo is None:
+            rd = rd.replace(tzinfo=timezone.utc)
+        return max((rd - now).total_seconds() / 3600, 0.0)
 
     def is_weather_market(self) -> bool:
         return (
