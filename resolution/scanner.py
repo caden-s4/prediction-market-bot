@@ -125,15 +125,31 @@ class ResolutionScanner:
     ) -> List[Market]:
         results: List[Market] = []
         seen: set = set()
+        rejected_reasons: dict = {"excluded": 0, "category": 0, "hours": 0, "price": 0}
 
         # Kalshi has no server-side category filter – one paginated call covers all
         # open markets and we filter client-side. Polymarket supports per-category
         # params so we query each category separately for complete coverage.
         if platform_name == "kalshi":
             try:
-                markets = client.get_markets(limit=self._max)
-                for m in markets:
-                    if m.market_id not in seen and self._is_candidate(m):
+                all_markets = client.get_markets(limit=self._max)
+                logger.debug(
+                    "ResolutionScanner: kalshi raw fetch → %d markets", len(all_markets)
+                )
+                if all_markets:
+                    sample = all_markets[0]
+                    logger.debug(
+                        "ResolutionScanner: kalshi sample market id=%s cat=%s "
+                        "hours=%.1f yes_price=%.3f question=%s",
+                        sample.market_id, sample.category,
+                        sample.hours_to_resolution, sample.yes_price,
+                        sample.question[:60],
+                    )
+                for m in all_markets:
+                    reason = self._reject_reason(m)
+                    if reason:
+                        rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
+                    elif m.market_id not in seen:
                         seen.add(m.market_id)
                         results.append(m)
             except Exception as exc:
@@ -143,48 +159,45 @@ class ResolutionScanner:
         else:
             for category in SCAN_CATEGORIES:
                 try:
-                    markets = client.get_markets(category=category, limit=self._max)
-                    for m in markets:
-                        if m.market_id not in seen and self._is_candidate(m):
+                    all_markets = client.get_markets(category=category, limit=self._max)
+                    for m in all_markets:
+                        reason = self._reject_reason(m)
+                        if not reason and m.market_id not in seen:
                             seen.add(m.market_id)
                             results.append(m)
+                        elif reason:
+                            rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
                 except Exception as exc:
                     logger.warning(
                         "ResolutionScanner: failed fetching %s/%s: %s",
                         platform_name, category, exc,
                     )
 
+        if rejected_reasons:
+            logger.debug(
+                "ResolutionScanner: %s rejection breakdown: %s",
+                platform_name, rejected_reasons,
+            )
         logger.info(
             "ResolutionScanner: %s → %d candidates", platform_name, len(results)
         )
         return results
 
-    def _is_candidate(self, market: Market) -> bool:
-        """Return True if this market should be evaluated by the resolution bot."""
-        # Exclude explicitly blacklisted markets
+    def _reject_reason(self, market: Market) -> Optional[str]:
+        """Return a rejection reason string, or None if the market is a valid candidate."""
         if self._exclusions.is_excluded(market.platform, market.market_id):
-            return False
-
-        # Exclude crypto / weather
-        if market.category.lower() in EXCLUDED_CATEGORIES:
-            return False
-        if market.is_weather_market():
-            return False
-
-        # Must be expiring within the window
-        now = datetime.now(timezone.utc)
-        try:
-            hours_left = (market.resolution_date - now).total_seconds() / 3600
-        except Exception:
-            return False
+            return "excluded"
+        if market.category.lower() in EXCLUDED_CATEGORIES or market.is_weather_market():
+            return "category"
+        hours_left = market.hours_to_resolution   # uses fixed timezone-aware property
         if not (0 < hours_left <= self._window_hours):
-            return False
-
-        # Must have a valid YES probability
+            return "hours"
         if not (0.001 < market.yes_price < 0.999):
-            return False
+            return "price"
+        return None
 
-        return True
+    def _is_candidate(self, market: Market) -> bool:
+        return self._reject_reason(market) is None
 
     @staticmethod
     def _same_event(poly: Market, kalshi: Market) -> bool:
