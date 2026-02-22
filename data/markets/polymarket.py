@@ -11,6 +11,7 @@ to raw HTTP when the library is not installed.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -223,11 +224,17 @@ class PolymarketClient(BaseMarketClient):
             )
 
             # Prices: Polymarket stores outcome prices as 0–1 floats.
-            # Use `or` not `.get(key, default)` because the key can exist with a null value
-            # (group/multi-outcome markets), which bypasses the get() default.
-            prices = item.get("outcomePrices") or ["0.5", "0.5"]
-            yes_price = float(prices[0]) if prices else 0.5
-            no_price = float(prices[1]) if len(prices) > 1 else 1.0 - yes_price
+            # The Gamma API serializes array fields as JSON strings (e.g. '["0.55","0.45"]'),
+            # so parse with json.loads when needed. Use `or` (not `.get(key, default)`)
+            # because the key can exist with a null value, bypassing the get() default.
+            prices_raw = item.get("outcomePrices") or ["0.5", "0.5"]
+            if isinstance(prices_raw, str):
+                try:
+                    prices_raw = json.loads(prices_raw)
+                except (json.JSONDecodeError, ValueError):
+                    prices_raw = ["0.5", "0.5"]
+            yes_price = float(prices_raw[0]) if prices_raw else 0.5
+            no_price = float(prices_raw[1]) if len(prices_raw) > 1 else 1.0 - yes_price
 
             category = item.get("category", "")
             if not category and tag_names:
