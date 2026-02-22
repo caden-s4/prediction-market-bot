@@ -210,12 +210,17 @@ class KalshiClient(BaseMarketClient):
         category: Optional[str] = None,
         tags: Optional[List[str]] = None,
         limit: Optional[int] = None,
+        max_close_ts: Optional[int] = None,
     ) -> List[Market]:
         """
         Fetch open markets from Kalshi with cursor-based pagination.
 
         limit=None (default) fetches ALL pages — recommended for full coverage.
         Pass an integer to cap at that many markets (useful for testing).
+
+        max_close_ts: Unix timestamp (seconds). When set, Kalshi filters server-side
+        to only return markets closing before that time. This dramatically reduces
+        page count when used with a short resolution window (e.g. 24h).
 
         category is matched client-side (Kalshi API has no category filter).
         """
@@ -234,6 +239,8 @@ class KalshiClient(BaseMarketClient):
             page += 1
 
             params: Dict[str, Any] = {"status": "open", "limit": page_size}
+            if max_close_ts is not None:
+                params["max_close_ts"] = max_close_ts
             if cursor:
                 params["cursor"] = cursor
             try:

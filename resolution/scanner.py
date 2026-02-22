@@ -17,6 +17,7 @@ Vague or subjective markets are excluded by the confidence scorer downstream.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -133,7 +134,10 @@ class ResolutionScanner:
         # params so we query each category separately for complete coverage.
         if platform_name == "kalshi":
             try:
-                all_markets = client.get_markets()  # no limit – fetch all pages
+                # Pass max_close_ts so Kalshi filters server-side – avoids fetching
+                # the full 76k+ market universe just to discard 99.9% of it.
+                max_close_ts = int(time.time() + self._window_hours * 3600)
+                all_markets = client.get_markets(max_close_ts=max_close_ts)
                 logger.debug(
                     "ResolutionScanner: kalshi raw fetch → %d markets", len(all_markets)
                 )
