@@ -114,7 +114,7 @@ class BotConfig:
             resolution_min_gap=float(_get("RESOLUTION_MIN_GAP", "0.04")),
             resolution_kelly_fraction=float(_get("RESOLUTION_KELLY_FRACTION", "0.12")),
             resolution_max_position_fraction=float(_get("RESOLUTION_MAX_POSITION_FRACTION", "0.20")),
-            resolution_scan_interval_seconds=int(_get("RESOLUTION_SCAN_INTERVAL_SECONDS", "300")),
+            resolution_scan_interval_seconds=int(float(_get("RESOLUTION_SCAN_INTERVAL_SECONDS", "300"))),
         )
 
 
