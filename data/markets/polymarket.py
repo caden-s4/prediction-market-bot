@@ -222,8 +222,10 @@ class PolymarketClient(BaseMarketClient):
                 else datetime.now(timezone.utc)
             )
 
-            # Prices: Polymarket stores outcome prices as 0–1 floats
-            prices = item.get("outcomePrices", ["0.5", "0.5"])
+            # Prices: Polymarket stores outcome prices as 0–1 floats.
+            # Use `or` not `.get(key, default)` because the key can exist with a null value
+            # (group/multi-outcome markets), which bypasses the get() default.
+            prices = item.get("outcomePrices") or ["0.5", "0.5"]
             yes_price = float(prices[0]) if prices else 0.5
             no_price = float(prices[1]) if len(prices) > 1 else 1.0 - yes_price
 
