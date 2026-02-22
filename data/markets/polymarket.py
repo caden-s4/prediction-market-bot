@@ -171,16 +171,18 @@ class PolymarketClient(BaseMarketClient):
         category: Optional[str] = None,
         tags: Optional[List[str]] = None,
         limit: int = 100,
+        **kwargs,
     ) -> List[Market]:
         """
         Fetch open Polymarket markets via the Gamma (REST) API.
-        Filters to weather-related markets by keyword matching.
         """
         params: Dict[str, Any] = {
             "active": "true",
             "closed": "false",
             "limit": limit,
         }
+        if category:
+            params["category"] = category
         if tags:
             params["tag_slug"] = ",".join(tags)
 
@@ -209,13 +211,9 @@ class PolymarketClient(BaseMarketClient):
     def _parse_market(self, item: dict) -> Optional[Market]:
         try:
             question = item.get("question", item.get("title", ""))
-            is_weather = bool(_WEATHER_PATTERNS.search(question))
             tags_raw = item.get("tags", [])
             tag_names = [t.get("slug", t) if isinstance(t, dict) else str(t)
                          for t in tags_raw]
-            if not is_weather and "weather" not in " ".join(tag_names).lower():
-                # Skip non-weather markets
-                return None
 
             end_date = item.get("endDate") or item.get("end_date_iso")
             resolution_date = (
@@ -225,16 +223,19 @@ class PolymarketClient(BaseMarketClient):
             )
 
             # Prices: Polymarket stores outcome prices as 0–1 floats
-            outcomes = item.get("outcomes", ["Yes", "No"])
             prices = item.get("outcomePrices", ["0.5", "0.5"])
             yes_price = float(prices[0]) if prices else 0.5
             no_price = float(prices[1]) if len(prices) > 1 else 1.0 - yes_price
+
+            category = item.get("category", "")
+            if not category and tag_names:
+                category = tag_names[0]
 
             return Market(
                 market_id=item.get("conditionId") or item.get("id", ""),
                 platform=self.PLATFORM,
                 question=question,
-                category="weather" if is_weather else item.get("category", ""),
+                category=category.lower(),
                 tags=tag_names,
                 resolution_date=resolution_date,
                 yes_price=yes_price,
