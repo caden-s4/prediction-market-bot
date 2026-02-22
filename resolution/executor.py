@@ -138,6 +138,16 @@ class ResolutionBot:
         # ── Step 1: Scan ──────────────────────────────────────────────────
         markets = self._scanner.scan()
         summary["markets_scanned"] = len(markets)
+        summary["scanned_sample"] = [
+            {
+                "question": m.question,
+                "category": m.category,
+                "hours_left": round(m.hours_to_resolution, 1),
+                "yes_price": m.yes_price,
+                "market_id": m.market_id,
+            }
+            for m in markets[:3]
+        ]
 
         # ── Step 2: Cross-platform gap detection ──────────────────────────
         pairs = self._scanner.scan_cross_platform_pairs(markets)
