@@ -62,6 +62,9 @@ class FederalRegisterSource(DataSource):
     """
 
     def can_handle(self, market: Market) -> bool:
+        # Sports markets are never resolved by government documents.
+        if market.category.lower() in ("sports", "sport", "esports"):
+            return False
         text = (market.question + " " + " ".join(market.tags)).lower()
         return (
             market.category.lower() in ("politics", "legal", "regulatory", "law", "government")

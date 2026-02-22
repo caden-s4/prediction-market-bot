@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Optional
 
 import requests
@@ -45,6 +46,11 @@ _SPORT_MAP = {
 
 _ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 _TIMEOUT = 8  # seconds
+
+# Module-level scoreboard cache: sport_path → (fetched_at, events_list)
+# Shared across all markets in a cycle so ESPN is hit once per sport, not once per market.
+_SCOREBOARD_CACHE: dict = {}
+_CACHE_TTL = 90  # seconds — long enough to cover a full scan cycle
 
 
 class SportsDataSource(DataSource):
@@ -119,13 +125,28 @@ class SportsDataSource(DataSource):
         return []
 
     def _fetch_events(self, sport_path: str) -> list:
-        """Fetch scoreboard events from ESPN."""
+        """Fetch scoreboard events from ESPN, using a short-lived module-level cache.
+
+        All markets in a single scan cycle fall back to the same sport_path
+        (usually football/nfl). Without caching this hits ESPN once per market
+        — 90+ redundant identical requests. The cache ensures at most one real
+        HTTP call per sport per 90-second window.
+        """
+        now = time.monotonic()
+        cached = _SCOREBOARD_CACHE.get(sport_path)
+        if cached:
+            fetched_at, events = cached
+            if now - fetched_at < _CACHE_TTL:
+                return events
+
         url = f"{_ESPN_BASE}/{sport_path}/scoreboard"
         try:
             resp = requests.get(url, timeout=_TIMEOUT)
             resp.raise_for_status()
             data = resp.json()
-            return data.get("events", [])
+            events = data.get("events", [])
+            _SCOREBOARD_CACHE[sport_path] = (now, events)
+            return events
         except Exception as exc:
             logger.debug("SportsSource: failed fetching %s: %s", url, exc)
             return []
