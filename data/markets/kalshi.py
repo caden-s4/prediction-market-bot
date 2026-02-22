@@ -162,18 +162,17 @@ class KalshiClient(BaseMarketClient):
             "KALSHI-ACCESS-SIGNATURE": sig_b64,
         }
 
-    def _get(self, path: str, params: Optional[Dict] = None) -> Any:
+    def _get(self, path: str, params: Optional[Dict] = None, _quiet: bool = False) -> Any:
         full_path = self._path_prefix + path
         headers = self._sign("GET", full_path)
         url = self._base_url + path
         resp = self._session.get(url, params=params, headers=headers, timeout=15)
-        logger.debug("Kalshi GET %s → HTTP %d", url, resp.status_code)
+        if not _quiet:
+            logger.debug("Kalshi GET %s → HTTP %d", url, resp.status_code)
         if not resp.ok:
             logger.debug("Kalshi error body: %s", resp.text[:500])
         resp.raise_for_status()
-        data = resp.json()
-        logger.debug("Kalshi response keys: %s", list(data.keys()) if isinstance(data, dict) else type(data).__name__)
-        return data
+        return resp.json()
 
     def _post(self, path: str, body: Dict) -> Any:
         import json
@@ -225,7 +224,7 @@ class KalshiClient(BaseMarketClient):
             if cursor:
                 params["cursor"] = cursor
             try:
-                data = self._get("/markets", params=params)
+                data = self._get("/markets", params=params, _quiet=(page > 1))
             except Exception as exc:
                 logger.error("Kalshi get_markets failed: %s", exc)
                 break
@@ -248,7 +247,11 @@ class KalshiClient(BaseMarketClient):
             if not cursor or len(raw) < page_size:
                 break  # exhausted all pages
 
-        return fetched if limit is None else fetched[:limit]
+        result = fetched if limit is None else fetched[:limit]
+        logger.debug(
+            "Kalshi get_markets: %d pages, %d markets fetched", page, len(result)
+        )
+        return result
 
     def get_weather_markets(self, limit: int = 200) -> List[Market]:
         """Fetch weather-series markets from Kalshi.
