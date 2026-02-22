@@ -355,6 +355,14 @@ class KalshiClient(BaseMarketClient):
             return "weather"
         t = ticker.upper()
         q = question.lower()
+        # Crypto series: price/level markets for BTC, ETH, SOL, etc.
+        _CRYPTO_PREFIXES = (
+            "KXBTC", "KXETH", "KXSOL", "KXLTC", "KXDOGE", "KXBNB",
+            "KXADA", "KXXRP", "KXMATIC", "KXAVAX", "KXLINK", "KXDOT",
+            "KXCRYPTO",
+        )
+        if any(t.startswith(p) for p in _CRYPTO_PREFIXES):
+            return "crypto"
         if any(x in t for x in ("KXELECT", "KXPRES", "KXSEN", "KXGOV", "KXHOUS", "KXCONG")):
             return "politics"
         if any(x in t for x in ("KXNFL", "KXNBA", "KXMLB", "KXNHL", "KXSOC", "KXCFB", "KXNCAR")):
