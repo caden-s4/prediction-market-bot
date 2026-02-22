@@ -126,6 +126,7 @@ class ResolutionBot:
             "pairs_found": 0,
             "signals_flagged": 0,
             "trades_fired": 0,
+            "trade_details": [],
             "positions_monitored": len(self._positions),
             "exits_triggered": 0,
         }
@@ -155,8 +156,10 @@ class ResolutionBot:
 
         # ── Step 4 + 5: Confidence score and execute ──────────────────────
         for signal in all_signals:
-            if self._try_execute(signal):
+            detail = self._try_execute(signal)
+            if detail is not None:
                 summary["trades_fired"] += 1
+                summary["trade_details"].append(detail)
 
         # ── Step 6: Monitor open positions ────────────────────────────────
         exits = self._monitor_positions()
@@ -203,18 +206,18 @@ class ResolutionBot:
                 signals.append(signal)
         return signals
 
-    def _try_execute(self, signal: GapSignal) -> bool:
+    def _try_execute(self, signal: GapSignal) -> Optional[dict]:
         """
         Run confidence check and execute the trade if it passes.
-        Returns True if a trade was placed.
+        Returns a trade detail dict on success, None if skipped.
         """
         market = signal.market_to_buy
         mid = market.market_id
 
         if mid in self._positions:
-            return False  # already in this market
+            return None  # already in this market
         if self._exclusions.is_excluded(market.platform, mid):
-            return False
+            return None
 
         # Use the ground truth result carried on the signal (info signals) or
         # re-fetch it (cross-platform signals that didn't go through the router).
@@ -226,7 +229,7 @@ class ResolutionBot:
             logger.info(
                 "ResolutionBot: SKIP %s – %s", mid, score.skip_reason
             )
-            return False
+            return None
 
         # Fee check: re-verify after confidence pass
         fee = self._fee_cache.get_taker_fee(market.platform, mid, force_refresh=True)
@@ -236,17 +239,17 @@ class ResolutionBot:
                 "(fee=%.4f eff_gap=%.4f)", mid, fee, signal.effective_gap,
             )
             self._exclusions.add_fee_surprise(market.platform, mid)
-            return False
+            return None
 
         # Size using fractional Kelly
         size_usd = self._compute_size(signal, score.source_confidence)
         if size_usd < 1.0:
             logger.info("ResolutionBot: SKIP %s – size too small ($%.2f)", mid, size_usd)
-            return False
+            return None
 
         # Reserve capital
         if not self._bankroll.reserve(mid, size_usd):
-            return False
+            return None
 
         # Place order
         order_id = self._place_order(market, signal, size_usd, fee)
@@ -269,10 +272,20 @@ class ResolutionBot:
             order_id=order_id,
         )
         logger.info(
-            "ResolutionBot: TRADE %s %s @ %.4f size=$%.2f (order=%s)",
+            "ResolutionBot: TRADE %s %s @ %.4f size=$%.2f (order=%s)\n  → \"%s\"",
             signal.action, mid, signal.target_price, size_usd, order_id,
+            market.question,
         )
-        return True
+        return {
+            "action": signal.action,
+            "question": market.question,
+            "market_id": mid,
+            "platform": market.platform,
+            "price": signal.target_price,
+            "size_usd": size_usd,
+            "hours_left": round(market.hours_to_resolution, 1),
+            "source": gt.source_name if gt else "unknown",
+        }
 
     def _place_order(
         self, market: Market, signal: GapSignal, size_usd: float, fee: float
