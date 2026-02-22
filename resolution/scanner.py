@@ -133,7 +133,7 @@ class ResolutionScanner:
         # params so we query each category separately for complete coverage.
         if platform_name == "kalshi":
             try:
-                all_markets = client.get_markets(limit=self._max)
+                all_markets = client.get_markets()  # no limit – fetch all pages
                 logger.debug(
                     "ResolutionScanner: kalshi raw fetch → %d markets", len(all_markets)
                 )

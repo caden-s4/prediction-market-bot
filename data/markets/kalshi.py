@@ -197,20 +197,30 @@ class KalshiClient(BaseMarketClient):
         self,
         category: Optional[str] = None,
         tags: Optional[List[str]] = None,
-        limit: int = 200,
+        limit: Optional[int] = None,
     ) -> List[Market]:
         """
         Fetch open markets from Kalshi with cursor-based pagination.
 
+        limit=None (default) fetches ALL pages — recommended for full coverage.
+        Pass an integer to cap at that many markets (useful for testing).
+
         category is matched client-side (Kalshi API has no category filter).
-        All open markets are fetched first (up to limit), then filtered.
         """
         weather_only = (category == "weather") if category else False
-        page_size = min(200, limit)
+        page_size = 200
         fetched: List[Market] = []
         cursor: Optional[str] = None
+        page = 0
 
-        while len(fetched) < limit:
+        while True:
+            if limit is not None and len(fetched) >= limit:
+                break
+
+            if page > 0:
+                time.sleep(0.05)  # stay well under Kalshi rate limits between pages
+            page += 1
+
             params: Dict[str, Any] = {"status": "open", "limit": page_size}
             if cursor:
                 params["cursor"] = cursor
@@ -236,9 +246,9 @@ class KalshiClient(BaseMarketClient):
 
             cursor = data.get("cursor")
             if not cursor or len(raw) < page_size:
-                break  # no more pages
+                break  # exhausted all pages
 
-        return fetched[:limit]
+        return fetched if limit is None else fetched[:limit]
 
     def get_weather_markets(self, limit: int = 200) -> List[Market]:
         """Fetch weather-series markets from Kalshi.
