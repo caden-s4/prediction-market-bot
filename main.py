@@ -42,7 +42,7 @@ from utils.logger import setup_logging
 _SEP_W = 54  # width of separator lines
 
 
-def _print_summary(result: dict, cfg: AppConfig) -> None:
+def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> None:
     """Print a clean, human-readable cycle summary to stdout."""
     now = datetime.now().strftime("%H:%M:%S")
     mode = "DRY RUN" if cfg.bot.dry_run else "LIVE"
@@ -65,6 +65,7 @@ def _print_summary(result: dict, cfg: AppConfig) -> None:
     trades    = result.get("trades_fired", 0)
     positions = result.get("positions_monitored", 0)
     exits     = result.get("exits_triggered", 0)
+    trade_details = result.get("trade_details", [])
 
     sep   = "=" * _SEP_W
     thin  = "-" * _SEP_W
@@ -88,6 +89,24 @@ def _print_summary(result: dict, cfg: AppConfig) -> None:
     print(f"  Bankroll  ${bankroll:>10,.2f}   |   P&L today  {pnl_s:>8}   |   {elapsed_s:.1f}s")
     print(sep)
 
+    if show_names and trade_details:
+        print(f"\n  Trades this cycle:")
+        print(f"  {'─' * (_SEP_W - 2)}")
+        for d in trade_details:
+            action = d["action"].replace("_", " ").upper()
+            src    = d.get("source", "")
+            hrs    = d.get("hours_left", 0)
+            print(
+                f"  {action:<10}  ${d['size_usd']:<7.0f}  @{d['price']:.2f}"
+                f"  [{hrs:.1f}h]  [{src}]"
+            )
+            # Wrap question at 50 chars for readability
+            q = d["question"]
+            print(f"    {q[:80]}")
+            if len(q) > 80:
+                print(f"    {q[80:]}")
+        print()
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -108,6 +127,11 @@ def parse_args() -> argparse.Namespace:
         "--log-file",
         default=None,
         help="Optional path to write logs to (in addition to stdout)",
+    )
+    parser.add_argument(
+        "--names",
+        action="store_true",
+        help="Print the full market name and details for each trade fired",
     )
     return parser.parse_args()
 
@@ -134,14 +158,14 @@ def main() -> None:
     if args.once:
         logger.info("Running single scan cycle (--once mode)")
         result = coordinator.run_once()
-        _print_summary(result, cfg)
+        _print_summary(result, cfg, show_names=args.names)
     else:
         interval = cfg.bot.resolution_scan_interval_seconds
         logger.info("Starting continuous scan (interval=%ds)", interval)
         while True:
             try:
                 result = coordinator.run_once()
-                _print_summary(result, cfg)
+                _print_summary(result, cfg, show_names=args.names)
             except KeyboardInterrupt:
                 logger.info("Stopped by user")
                 break
