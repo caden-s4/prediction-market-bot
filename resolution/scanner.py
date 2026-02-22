@@ -69,12 +69,15 @@ class ResolutionScanner:
         poly_client: Optional[BaseMarketClient],
         exclusions: ExclusionList,
         window_hours: float = RESOLUTION_WINDOW_HOURS,
+        kalshi_window_hours: Optional[float] = None,
+        poly_window_hours: Optional[float] = None,
         max_per_platform: int = 500,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
         self._exclusions = exclusions
-        self._window_hours = window_hours
+        self._kalshi_window = kalshi_window_hours if kalshi_window_hours is not None else window_hours
+        self._poly_window = poly_window_hours if poly_window_hours is not None else window_hours
         self._max = max_per_platform
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -87,17 +90,17 @@ class ResolutionScanner:
         markets: List[Market] = []
 
         if self._kalshi:
-            markets.extend(self._scan_platform(self._kalshi, "kalshi"))
+            markets.extend(self._scan_platform(self._kalshi, "kalshi", self._kalshi_window))
 
         if self._poly:
-            markets.extend(self._scan_platform(self._poly, "polymarket"))
+            markets.extend(self._scan_platform(self._poly, "polymarket", self._poly_window))
 
         # Sort soonest-expiring first (most urgent to evaluate)
         markets.sort(key=lambda m: m.resolution_date)
 
         logger.info(
-            "ResolutionScanner: %d candidate markets within %dh window",
-            len(markets), self._window_hours,
+            "ResolutionScanner: %d candidate markets (kalshi_window=%gh poly_window=%gh)",
+            len(markets), self._kalshi_window, self._poly_window,
         )
         return markets
 
@@ -123,7 +126,7 @@ class ResolutionScanner:
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _scan_platform(
-        self, client: BaseMarketClient, platform_name: str
+        self, client: BaseMarketClient, platform_name: str, window_hours: float
     ) -> List[Market]:
         results: List[Market] = []
         seen: set = set()
@@ -136,7 +139,7 @@ class ResolutionScanner:
             try:
                 # Pass max_close_ts so Kalshi filters server-side – avoids fetching
                 # the full 76k+ market universe just to discard 99.9% of it.
-                max_close_ts = int(time.time() + self._window_hours * 3600)
+                max_close_ts = int(time.time() + window_hours * 3600)
                 all_markets = client.get_markets(max_close_ts=max_close_ts)
                 logger.debug(
                     "ResolutionScanner: kalshi raw fetch → %d markets", len(all_markets)
@@ -151,7 +154,7 @@ class ResolutionScanner:
                         sample.question[:60],
                     )
                 for m in all_markets:
-                    reason = self._reject_reason(m)
+                    reason = self._reject_reason(m, window_hours)
                     if reason:
                         rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
                     elif m.market_id not in seen:
@@ -166,7 +169,7 @@ class ResolutionScanner:
                 try:
                     all_markets = client.get_markets(category=category, limit=self._max)
                     for m in all_markets:
-                        reason = self._reject_reason(m)
+                        reason = self._reject_reason(m, window_hours)
                         if not reason and m.market_id not in seen:
                             seen.add(m.market_id)
                             results.append(m)
@@ -188,21 +191,21 @@ class ResolutionScanner:
         )
         return results
 
-    def _reject_reason(self, market: Market) -> Optional[str]:
+    def _reject_reason(self, market: Market, window_hours: float) -> Optional[str]:
         """Return a rejection reason string, or None if the market is a valid candidate."""
         if self._exclusions.is_excluded(market.platform, market.market_id):
             return "excluded"
         if market.category.lower() in EXCLUDED_CATEGORIES or market.is_weather_market():
             return "category"
         hours_left = market.hours_to_resolution   # uses fixed timezone-aware property
-        if not (0 < hours_left <= self._window_hours):
+        if not (0 < hours_left <= window_hours):
             return "hours"
         if not (0.001 < market.yes_price < 0.999):
             return "price"
         return None
 
-    def _is_candidate(self, market: Market) -> bool:
-        return self._reject_reason(market) is None
+    def _is_candidate(self, market: Market, window_hours: float) -> bool:
+        return self._reject_reason(market, window_hours) is None
 
     @staticmethod
     def _same_event(poly: Market, kalshi: Market) -> bool:

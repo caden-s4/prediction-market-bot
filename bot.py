@@ -101,6 +101,8 @@ class BotCoordinator:
             exclusions=self._exclusions,
             dry_run=bc.dry_run,
             window_hours=bc.resolution_window_hours,
+            kalshi_window_hours=bc.kalshi_resolution_window_hours,
+            poly_window_hours=bc.polymarket_resolution_window_hours,
             scan_interval=bc.resolution_scan_interval_seconds,
         )
 

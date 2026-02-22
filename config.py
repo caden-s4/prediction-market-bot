@@ -99,10 +99,13 @@ class BotConfig:
     fee_cache_ttl_seconds: int                  # Fee cache TTL (default 900 = 15 min)
 
     # ── Resolution Drift Arbitrage ─────────────────────────────────────────
-    # Scan window: only trade markets expiring within this many hours.
-    # Strategy spec is 24h for live trading (prod).
+    # Shared fallback window. Override per-platform with
+    # KALSHI_RESOLUTION_WINDOW_HOURS / POLYMARKET_RESOLUTION_WINDOW_HOURS.
     # Kalshi demo markets are 14-30 days out — set 720 for demo testing.
-    resolution_window_hours: float
+    # Polymarket markets rarely resolve within 24h — use 720 for most scans.
+    resolution_window_hours: float              # shared fallback
+    kalshi_resolution_window_hours: float       # kalshi-specific (falls back to shared)
+    polymarket_resolution_window_hours: float   # polymarket-specific (falls back to shared)
     resolution_min_gap: float                   # Min fee-adjusted gap to flag (default 4%)
     resolution_kelly_fraction: float            # Fractional Kelly (default 12%)
     resolution_max_position_fraction: float     # Hard cap per position (default 20%)
@@ -110,11 +113,14 @@ class BotConfig:
 
     @classmethod
     def from_env(cls) -> "BotConfig":
+        shared_window = float(_get("RESOLUTION_WINDOW_HOURS", "720.0"))
         return cls(
             dry_run=_get("DRY_RUN", "true").lower() != "false",
             bankroll_usd=float(_get("BANKROLL_USD", "1000.0")),
             fee_cache_ttl_seconds=int(_get("FEE_CACHE_TTL_SECONDS", "900")),
-            resolution_window_hours=float(_get("RESOLUTION_WINDOW_HOURS", "720.0")),
+            resolution_window_hours=shared_window,
+            kalshi_resolution_window_hours=float(_get("KALSHI_RESOLUTION_WINDOW_HOURS", str(shared_window))),
+            polymarket_resolution_window_hours=float(_get("POLYMARKET_RESOLUTION_WINDOW_HOURS", str(shared_window))),
             resolution_min_gap=float(_get("RESOLUTION_MIN_GAP", "0.04")),
             resolution_kelly_fraction=float(_get("RESOLUTION_KELLY_FRACTION", "0.12")),
             resolution_max_position_fraction=float(_get("RESOLUTION_MAX_POSITION_FRACTION", "0.20")),
