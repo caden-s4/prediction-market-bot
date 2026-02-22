@@ -164,15 +164,28 @@ class KalshiClient(BaseMarketClient):
 
     def _get(self, path: str, params: Optional[Dict] = None, _quiet: bool = False) -> Any:
         full_path = self._path_prefix + path
-        headers = self._sign("GET", full_path)
         url = self._base_url + path
-        resp = self._session.get(url, params=params, headers=headers, timeout=15)
-        if not _quiet:
-            logger.debug("Kalshi GET %s → HTTP %d", url, resp.status_code)
-        if not resp.ok:
-            logger.debug("Kalshi error body: %s", resp.text[:500])
+        backoff = 5.0
+        for attempt in range(4):
+            headers = self._sign("GET", full_path)
+            resp = self._session.get(url, params=params, headers=headers, timeout=15)
+            if not _quiet:
+                logger.debug("Kalshi GET %s → HTTP %d", url, resp.status_code)
+            if resp.status_code == 429:
+                logger.warning(
+                    "Kalshi 429 rate limit on %s – waiting %.0fs (attempt %d/4)",
+                    path, backoff, attempt + 1,
+                )
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            if not resp.ok:
+                logger.debug("Kalshi error body: %s", resp.text[:500])
+            resp.raise_for_status()
+            return resp.json()
+        # All retries exhausted
         resp.raise_for_status()
-        return resp.json()
+        return resp.json()  # unreachable but satisfies type checker
 
     def _post(self, path: str, body: Dict) -> Any:
         import json
@@ -217,7 +230,7 @@ class KalshiClient(BaseMarketClient):
                 break
 
             if page > 0:
-                time.sleep(0.05)  # stay well under Kalshi rate limits between pages
+                time.sleep(0.6)   # ~1 req/s – matches Kalshi's documented rate limit
             page += 1
 
             params: Dict[str, Any] = {"status": "open", "limit": page_size}
