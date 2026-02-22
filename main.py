@@ -29,6 +29,8 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -36,6 +38,55 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import AppConfig
 from bot import BotCoordinator
 from utils.logger import setup_logging
+
+_SEP_W = 54  # width of separator lines
+
+
+def _print_summary(result: dict, cfg: AppConfig) -> None:
+    """Print a clean, human-readable cycle summary to stdout."""
+    now = datetime.now().strftime("%H:%M:%S")
+    mode = "DRY RUN" if cfg.bot.dry_run else "LIVE"
+
+    platforms = []
+    if cfg.kalshi.enabled:
+        platforms.append(f"kalshi:{cfg.kalshi.env}")
+    if cfg.polymarket.enabled:
+        platforms.append("polymarket")
+    platform_str = " + ".join(platforms) if platforms else "no platform"
+
+    elapsed_s = result.get("cycle_ms", 0) / 1000
+    bankroll   = result.get("total_usd", 0.0)
+    daily_pnl  = result.get("daily_pnl_usd", 0.0)
+    halted     = result.get("halted", False)
+
+    scanned   = result.get("markets_scanned", 0)
+    pairs     = result.get("pairs_found", 0)
+    signals   = result.get("signals_flagged", 0)
+    trades    = result.get("trades_fired", 0)
+    positions = result.get("positions_monitored", 0)
+    exits     = result.get("exits_triggered", 0)
+
+    sep   = "=" * _SEP_W
+    thin  = "-" * _SEP_W
+    pnl_s = f"+${daily_pnl:.2f}" if daily_pnl >= 0 else f"-${abs(daily_pnl):.2f}"
+    halt_s = "  [HALTED]" if halted else ""
+
+    # Annotation tags
+    signal_tag = "  <-- potential trades" if signals and not trades else ""
+    trade_tag  = "  <-- trades executed!" if trades else ""
+
+    print(f"\n{sep}")
+    print(f"  SCAN COMPLETE   {now}   {mode}   {platform_str}{halt_s}")
+    print(sep)
+    print(f"  Markets scanned          {scanned:>5}")
+    print(f"  Cross-platform pairs     {pairs:>5}")
+    print(f"  Signals found            {signals:>5}{signal_tag}")
+    print(f"  Trades fired             {trades:>5}{trade_tag}")
+    print(f"  Open positions           {positions:>5}")
+    print(f"  Exits triggered          {exits:>5}")
+    print(thin)
+    print(f"  Bankroll  ${bankroll:>10,.2f}   |   P&L today  {pnl_s:>8}   |   {elapsed_s:.1f}s")
+    print(sep)
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,9 +134,20 @@ def main() -> None:
     if args.once:
         logger.info("Running single scan cycle (--once mode)")
         result = coordinator.run_once()
-        logger.info("Done. Result: %s", result)
+        _print_summary(result, cfg)
     else:
-        coordinator.run_forever()
+        interval = cfg.bot.resolution_scan_interval_seconds
+        logger.info("Starting continuous scan (interval=%ds)", interval)
+        while True:
+            try:
+                result = coordinator.run_once()
+                _print_summary(result, cfg)
+            except KeyboardInterrupt:
+                logger.info("Stopped by user")
+                break
+            except Exception as exc:
+                logger.exception("Cycle error: %s", exc)
+            time.sleep(interval)
 
 
 if __name__ == "__main__":

@@ -124,6 +124,7 @@ class BotCoordinator:
         """Run a single scan cycle (for testing / --once mode)."""
         result = self._resolution.run_once()
         self._persist_state()
+        result.update(self._bankroll.summary())
         return result
 
     # ── Internal ──────────────────────────────────────────────────────────────
