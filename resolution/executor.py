@@ -83,6 +83,8 @@ class ResolutionBot:
         exclusions: ExclusionList,
         dry_run: bool = True,
         window_hours: float = 168.0,
+        kalshi_window_hours: Optional[float] = None,
+        poly_window_hours: Optional[float] = None,
         scan_interval: int = 300,
     ) -> None:
         self._kalshi = kalshi_client
@@ -94,7 +96,10 @@ class ResolutionBot:
         self._scan_interval = scan_interval
 
         self._scanner = ResolutionScanner(
-            kalshi_client, poly_client, exclusions, window_hours=window_hours
+            kalshi_client, poly_client, exclusions,
+            window_hours=window_hours,
+            kalshi_window_hours=kalshi_window_hours,
+            poly_window_hours=poly_window_hours,
         )
         self._gap_detector = GapDetector(fee_cache)
         self._ground_truth = GroundTruthRouter()
