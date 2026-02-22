@@ -100,12 +100,23 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
                 f"  {action:<10}  ${d['size_usd']:<7.0f}  @{d['price']:.2f}"
                 f"  [{hrs:.1f}h]  [{src}]"
             )
-            # Wrap question at 50 chars for readability
             q = d["question"]
             print(f"    {q[:80]}")
             if len(q) > 80:
                 print(f"    {q[80:]}")
         print()
+    elif show_names and not trade_details:
+        sample = result.get("scanned_sample", [])
+        if sample:
+            print(f"\n  No trades – first {len(sample)} markets scanned:")
+            print(f"  {'─' * (_SEP_W - 2)}")
+            for m in sample:
+                cat  = m.get("category", "?")
+                hrs  = m.get("hours_left", 0)
+                yes  = m.get("yes_price", 0)
+                q    = m.get("question", "")
+                print(f"  [{cat:<11}]  {hrs:>5.1f}h  YES={yes:.2f}   {q[:55]}")
+            print()
 
 
 def parse_args() -> argparse.Namespace:
