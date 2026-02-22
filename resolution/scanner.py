@@ -40,7 +40,7 @@ SCAN_CATEGORIES = [
 ]
 
 # Hard exclusion: never touch these category strings
-EXCLUDED_CATEGORIES = {"crypto", "cryptocurrency", "weather"}
+EXCLUDED_CATEGORIES = {"crypto", "cryptocurrency", "weather", "esports"}
 
 # Default scan window. Overridden by config (RESOLUTION_WINDOW_HOURS env var).
 # Strategy spec: 24h for live prod. Kalshi demo markets are 14-30 days out — use 720.
