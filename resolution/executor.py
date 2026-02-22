@@ -163,6 +163,7 @@ class ResolutionBot:
         summary["exits_triggered"] = exits
 
         elapsed = (time.monotonic() - cycle_start) * 1000
+        summary["cycle_ms"] = round(elapsed)
         logger.info(
             "ResolutionBot: cycle done in %.0fms | %s",
             elapsed, summary,
