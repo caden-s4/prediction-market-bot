@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from data.ground_truth.router import GroundTruthRouter
-from data.markets.base import BaseMarketClient, Market
+from data.markets.base import BaseMarketClient, Market, Order, Side
 from resolution.confidence import ConfidenceScorer
 from resolution.decay_monitor import (
     DecayAction, DecayMonitor, OpenResolutionPosition,
@@ -288,16 +288,17 @@ class ResolutionBot:
         if not client:
             return None
 
-        side = "buy" if signal.action == "buy_yes" else "sell"
+        side = Side.YES if signal.action == "buy_yes" else Side.NO
+        order = Order(
+            market_id=market.market_id,
+            platform=market.platform,
+            side=side,
+            price=signal.target_price,
+            size_usd=size_usd,
+        )
         try:
-            result = client.place_order(
-                market_id=market.market_id,
-                side=side,
-                price=signal.target_price,
-                size=size_usd,
-                order_type="market",  # taker for immediate fill
-            )
-            return result.get("id") or result.get("order_id")
+            result = client.place_order(order)
+            return result.order_id
         except Exception as exc:
             logger.warning(
                 "ResolutionBot: order failed for %s: %s", market.market_id, exc

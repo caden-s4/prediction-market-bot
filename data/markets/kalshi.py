@@ -403,6 +403,8 @@ class KalshiClient(BaseMarketClient):
         )
         if any(t.startswith(p) for p in _CRYPTO_PREFIXES):
             return "crypto"
+        if any(x in t for x in ("KXMVESPORTS", "KXESPORTS")):
+            return "esports"
         if any(x in t for x in ("KXELECT", "KXPRES", "KXSEN", "KXGOV", "KXHOUS", "KXCONG")):
             return "politics"
         if any(x in t for x in ("KXNFL", "KXNBA", "KXMLB", "KXNHL", "KXSOC", "KXCFB", "KXNCAR")):
@@ -430,11 +432,11 @@ class KalshiClient(BaseMarketClient):
             # because a NO buyer willing to pay p for NO is offering 100-p for YES.
             yes_bids = [
                 PriceLevel(price=float(b[0]) / 100.0, size=float(b[1]))
-                for b in sorted(book.get("yes", []), key=lambda x: -x[0])
+                for b in sorted(book.get("yes") or [], key=lambda x: -x[0])
             ]
             yes_asks = [
                 PriceLevel(price=(100.0 - float(a[0])) / 100.0, size=float(a[1]))
-                for a in sorted(book.get("no", []), key=lambda x: x[0])
+                for a in sorted(book.get("no") or [], key=lambda x: x[0])
             ]
             return OrderBook(
                 market_id=market_id,
