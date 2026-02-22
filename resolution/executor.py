@@ -175,12 +175,21 @@ class ResolutionBot:
     def _fetch_info_signals(self, markets: List[Market]) -> List[GapSignal]:
         """For each single-platform market, try fetching ground truth and detect gaps."""
         signals = []
-        for market in markets:
-            if market.market_id in self._positions:
-                continue  # already in a position
-            if self._exclusions.is_excluded(market.platform, market.market_id):
-                continue
-
+        candidates = [
+            m for m in markets
+            if m.market_id not in self._positions
+            and not self._exclusions.is_excluded(m.platform, m.market_id)
+        ]
+        total = len(candidates)
+        logger.info(
+            "ResolutionBot: fetching ground truth for %d candidate markets…", total
+        )
+        for i, market in enumerate(candidates, 1):
+            if i % 25 == 0 or i == total:
+                logger.info(
+                    "ResolutionBot: ground truth progress %d/%d (signals so far: %d)",
+                    i, total, len(signals),
+                )
             gt = self._ground_truth.fetch(market)
             if gt is None or gt.ground_truth_prob is None:
                 continue
