@@ -120,7 +120,7 @@ class BotConfig:
             fee_cache_ttl_seconds=int(_get("FEE_CACHE_TTL_SECONDS", "900")),
             resolution_window_hours=shared_window,
             kalshi_resolution_window_hours=float(_get("KALSHI_RESOLUTION_WINDOW_HOURS", str(shared_window))),
-            polymarket_resolution_window_hours=float(_get("POLYMARKET_RESOLUTION_WINDOW_HOURS", str(shared_window))),
+            polymarket_resolution_window_hours=float(_get("POLYMARKET_RESOLUTION_WINDOW_HOURS", "4320.0")),
             resolution_min_gap=float(_get("RESOLUTION_MIN_GAP", "0.04")),
             resolution_kelly_fraction=float(_get("RESOLUTION_KELLY_FRACTION", "0.12")),
             resolution_max_position_fraction=float(_get("RESOLUTION_MAX_POSITION_FRACTION", "0.20")),
