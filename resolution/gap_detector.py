@@ -25,6 +25,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
+from data.ground_truth.base import GroundTruthResult
 from data.markets.base import Market
 from shared.fee_cache import FeeCache
 
@@ -54,6 +55,10 @@ class GapSignal:
     raw_gap: float = 0.0           # |reference - target|
     effective_gap: float = 0.0     # raw_gap minus fees
     taker_fee: float = 0.0         # fee on the market_to_buy side
+
+    # Full ground truth result – preserved from the data source so the
+    # executor can use the real source confidence rather than re-computing it.
+    ground_truth_result: Optional[GroundTruthResult] = None
 
     reasoning: str = ""
 
