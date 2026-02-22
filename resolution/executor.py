@@ -349,9 +349,9 @@ class ResolutionBot:
         for decision in decisions:
             mid = decision.position.market_id
             logger.info(
-                "DecayMonitor: %s %s capture=%.0%% gain=$%.2f – %s",
+                "DecayMonitor: %s %s capture=%.0f%% gain=$%.2f – %s",
                 decision.action, mid,
-                decision.capture_ratio,
+                decision.capture_ratio * 100,
                 decision.current_gain_usd,
                 decision.reason,
             )
