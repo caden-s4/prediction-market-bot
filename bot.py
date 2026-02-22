@@ -64,8 +64,10 @@ class BotCoordinator:
                 api_passphrase=config.polymarket.api_passphrase,
                 private_key=config.polymarket.private_key,
                 funder_address=config.polymarket.funder_address,
+                public_mode=config.polymarket.public_mode,
             )
-            logger.info("Polymarket client: ENABLED")
+            mode_label = "public/read-only" if config.polymarket.public_mode else "authenticated"
+            logger.info("Polymarket client: ENABLED (%s)", mode_label)
         else:
             logger.info("Polymarket client: DISABLED")
 
