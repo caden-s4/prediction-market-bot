@@ -395,13 +395,19 @@ class KalshiClient(BaseMarketClient):
             return "weather"
         t = ticker.upper()
         q = question.lower()
-        # Crypto series: price/level markets for BTC, ETH, SOL, etc.
+        # Crypto series: price/level markets for BTC, ETH, SOL, and altcoins.
         _CRYPTO_PREFIXES = (
             "KXBTC", "KXETH", "KXSOL", "KXLTC", "KXDOGE", "KXBNB",
             "KXADA", "KXXRP", "KXMATIC", "KXAVAX", "KXLINK", "KXDOT",
-            "KXCRYPTO",
+            "KXCRYPTO", "KXSHIBA", "KXPEPE", "KXFLOKI", "KXTRX", "KXATOM",
+            "KXNEAR", "KXFIL", "KXALGO", "KXICP", "KXAPT", "KXARB",
+            "KXWIF", "KXBONK", "KXINJ", "KXOP", "KXSUIPER",
         )
         if any(t.startswith(p) for p in _CRYPTO_PREFIXES):
+            return "crypto"
+        # Catch-all: Kalshi embeds price thresholds in crypto tickers as -T<decimal>
+        # e.g. KXSHIBAD-26FEB2217-T0.000006999 — no non-crypto market uses this format
+        if re.search(r"-T\d*\.\d{3,}", t):
             return "crypto"
         if any(x in t for x in ("KXMVESPORTS", "KXESPORTS")):
             return "esports"
