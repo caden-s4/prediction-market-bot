@@ -297,10 +297,25 @@ class ResolutionBot:
             return None
 
     def _compute_size(self, signal: GapSignal, source_confidence: float) -> float:
-        """Fractional Kelly sizing: conservative 10-15% of Kelly, capped at 20% bankroll."""
-        # Expected value: p * (1/entry - 1) - (1 - p)
-        p = signal.reference_price  # probability of winning
-        entry = signal.target_price
+        """Fractional Kelly sizing: conservative 12% of Kelly, capped at 20% bankroll."""
+        # Kelly formula: f* = (b*p - (1-p)) / b
+        # Must be computed from the perspective of the side being bought.
+        #
+        # BUY YES: buy YES at target_price; wins with prob = ground_truth_prob
+        # BUY NO:  buy NO at (1 - target_price); wins with prob = 1 - ground_truth_prob
+        gt_prob = signal.ground_truth_prob
+        if gt_prob is None:
+            # Fall back to reference_price for cross-platform signals without GT
+            gt_prob = signal.reference_price
+
+        if signal.action == "buy_yes":
+            p = gt_prob
+            entry = signal.target_price
+        else:
+            # BUY NO: flip perspective — probability NO wins, NO price is entry cost
+            p = 1.0 - gt_prob
+            entry = 1.0 - signal.target_price
+
         if entry <= 0 or entry >= 1:
             return 0.0
         b = (1.0 - entry) / entry
