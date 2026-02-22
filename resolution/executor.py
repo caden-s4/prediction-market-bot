@@ -189,6 +189,7 @@ class ResolutionBot:
             )
             if signal:
                 signal.ground_truth_prob = gt.ground_truth_prob
+                signal.ground_truth_result = gt  # preserve real source confidence
                 signals.append(signal)
         return signals
 
@@ -205,19 +206,9 @@ class ResolutionBot:
         if self._exclusions.is_excluded(market.platform, mid):
             return False
 
-        # Fetch ground truth for confidence scoring if not already available
-        gt = None
-        if signal.ground_truth_prob is not None:
-            from data.ground_truth.base import GroundTruthResult, SourceType
-            # Reconstruct a minimal GroundTruthResult for the scorer
-            gt = GroundTruthResult(
-                ground_truth_prob=signal.ground_truth_prob,
-                confidence=min(0.90, 0.70 + signal.effective_gap),
-                source_type=SourceType.HARD,
-                source_name="cached",
-            )
-        else:
-            gt = self._ground_truth.fetch(market)
+        # Use the ground truth result carried on the signal (info signals) or
+        # re-fetch it (cross-platform signals that didn't go through the router).
+        gt = signal.ground_truth_result or self._ground_truth.fetch(market)
 
         # Confidence gate
         score = self._confidence.score(market, gt, signal)
