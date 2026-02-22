@@ -243,6 +243,13 @@ class KalshiClient(BaseMarketClient):
                     continue
                 fetched.append(market)
 
+            # Log progress every 5 pages so the user can see pagination is still running
+            if page % 5 == 0:
+                logger.info(
+                    "Kalshi get_markets: fetched %d markets so far (page %d)…",
+                    len(fetched), page,
+                )
+
             cursor = data.get("cursor")
             if not cursor or len(raw) < page_size:
                 break  # exhausted all pages
