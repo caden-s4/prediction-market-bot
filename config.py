@@ -63,6 +63,7 @@ class KalshiConfig:
 @dataclass(frozen=True)
 class PolymarketConfig:
     enabled: bool
+    public_mode: bool       # True = unauthenticated GET only; no credentials needed
     api_key: str
     api_secret: str
     api_passphrase: str
@@ -74,13 +75,16 @@ class PolymarketConfig:
     @classmethod
     def from_env(cls) -> "PolymarketConfig":
         enabled = _get("POLYMARKET_ENABLED", "true").lower() != "false"
+        public_mode = _get("POLYMARKET_PUBLIC_MODE", "false").lower() != "false"
+        need_creds = enabled and not public_mode
         return cls(
             enabled=enabled,
-            api_key=_require("POLYMARKET_API_KEY") if enabled else _get("POLYMARKET_API_KEY", ""),
-            api_secret=_require("POLYMARKET_API_SECRET") if enabled else _get("POLYMARKET_API_SECRET", ""),
-            api_passphrase=_require("POLYMARKET_API_PASSPHRASE") if enabled else _get("POLYMARKET_API_PASSPHRASE", ""),
-            private_key=_require("POLYMARKET_PRIVATE_KEY") if enabled else _get("POLYMARKET_PRIVATE_KEY", ""),
-            funder_address=_require("POLYMARKET_FUNDER_ADDRESS") if enabled else _get("POLYMARKET_FUNDER_ADDRESS", ""),
+            public_mode=public_mode,
+            api_key=_require("POLYMARKET_API_KEY") if need_creds else _get("POLYMARKET_API_KEY", ""),
+            api_secret=_require("POLYMARKET_API_SECRET") if need_creds else _get("POLYMARKET_API_SECRET", ""),
+            api_passphrase=_require("POLYMARKET_API_PASSPHRASE") if need_creds else _get("POLYMARKET_API_PASSPHRASE", ""),
+            private_key=_require("POLYMARKET_PRIVATE_KEY") if need_creds else _get("POLYMARKET_PRIVATE_KEY", ""),
+            funder_address=_require("POLYMARKET_FUNDER_ADDRESS") if need_creds else _get("POLYMARKET_FUNDER_ADDRESS", ""),
         )
 
 

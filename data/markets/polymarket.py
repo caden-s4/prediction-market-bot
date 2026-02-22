@@ -118,13 +118,15 @@ class PolymarketClient(BaseMarketClient):
 
     def __init__(
         self,
-        api_key: str,
-        api_secret: str,
-        api_passphrase: str,
-        private_key: str,
-        funder_address: str,
+        api_key: str = "",
+        api_secret: str = "",
+        api_passphrase: str = "",
+        private_key: str = "",
+        funder_address: str = "",
         chain_id: int = 137,
+        public_mode: bool = False,
     ) -> None:
+        self._public_mode = public_mode
         self._api_key = api_key
         self._api_secret = api_secret
         self._api_passphrase = api_passphrase
@@ -132,8 +134,10 @@ class PolymarketClient(BaseMarketClient):
         self._funder_address = funder_address
         self._chain_id = chain_id
         self._session = requests.Session()
-        # Try to import official py-clob-client
-        self._clob_client = self._init_clob_client()
+        # In public mode skip authenticated CLOB client entirely
+        self._clob_client = None if public_mode else self._init_clob_client()
+        if public_mode:
+            logger.info("Polymarket: running in public mode (read-only, no credentials)")
 
     def _init_clob_client(self):
         try:
@@ -300,6 +304,12 @@ class PolymarketClient(BaseMarketClient):
     # ── Order management ──────────────────────────────────────────────────────
 
     def place_order(self, order: Order) -> Order:
+        if self._public_mode:
+            raise NotImplementedError(
+                "Polymarket is in public (read-only) mode. "
+                "Set POLYMARKET_PUBLIC_MODE=false and provide credentials to trade."
+            )
+
         if order.dry_run:
             logger.info("[DRY RUN] Would place %s order on Polymarket: %s", order.side, order)
             order.status = OrderStatus.FILLED
@@ -331,6 +341,10 @@ class PolymarketClient(BaseMarketClient):
         return order
 
     def cancel_order(self, order_id: str, market_id: str) -> bool:
+        if self._public_mode:
+            raise NotImplementedError(
+                "Polymarket is in public (read-only) mode. Cannot cancel orders."
+            )
         if not self._clob_client:
             logger.warning("Cannot cancel: py-clob-client not available")
             return False
