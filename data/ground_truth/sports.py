@@ -47,6 +47,15 @@ _SPORT_MAP = {
 _ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 _TIMEOUT = 8  # seconds
 
+# Prop/mention markets: "will announcers say X during game Y" — ESPN scores can't
+# answer these, so bail out early rather than returning a misleading result.
+_PROP_BET_RE = re.compile(
+    r"\b(announcer|commentator|broadcaster|host|analyst)s?\b"
+    r"|\bwill\b.{0,80}\b(say|mention|utter|reference|call)\b.{0,60}"
+    r"\b(during|in)\b.{0,40}\b(game|match|quarter|half|period|broadcast)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
 # Module-level scoreboard cache: sport_path → (fetched_at, events_list)
 # Shared across all markets in a cycle so ESPN is hit once per sport, not once per market.
 _SCOREBOARD_CACHE: dict = {}
@@ -59,6 +68,10 @@ class SportsDataSource(DataSource):
     """
 
     def can_handle(self, market: Market) -> bool:
+        # Prop/mention bets ("will announcers say X?") cannot be resolved from
+        # game scores — reject early so we don't return misleading probabilities.
+        if _PROP_BET_RE.search(market.question):
+            return False
         text = (market.question + " " + " ".join(market.tags)).lower()
         return (
             market.category.lower() in ("sports", "sport")
@@ -106,22 +119,34 @@ class SportsDataSource(DataSource):
         return None
 
     def _extract_teams(self, question: str) -> list:
-        """Extract team names from the market question."""
-        # Common patterns: "Will the X beat the Y?", "X vs Y", "X to win"
+        """Extract team names from the market question.
+
+        Returns a list whose first element is the team the question asks about
+        (the potential YES side). Each extracted name is validated to be short
+        enough to plausibly be a team name rather than a full sentence fragment.
+        """
+        # Explicit "beat/defeat/win against" pattern gives both teams cleanly
         patterns = [
             r"Will (?:the )?(.+?) (?:beat|defeat|win against) (?:the )?(.+?)[?]",
-            r"(.+?) vs\.? (.+?)(?:\?|$| to )",
-            r"(.+?) to win",
+            r"Will (?:the )?(.+?) win\b",
         ]
         for pat in patterns:
             m = re.search(pat, question, re.IGNORECASE)
             if m:
-                return [g.strip() for g in m.groups() if g]
-        # Fall back to splitting on common separators
-        for sep in (" vs ", " v ", " @ ", " at ", " beat "):
-            if sep.lower() in question.lower():
-                parts = question.lower().split(sep.lower(), 1)
-                return [p.strip() for p in parts]
+                teams = [g.strip() for g in m.groups() if g and len(g.strip()) <= 40]
+                if teams:
+                    return teams
+
+        # "X vs Y" — only accept if both sides look like short team/city names
+        for sep in (" vs. ", " vs ", " v. ", " v "):
+            idx = question.lower().find(sep)
+            if idx != -1:
+                left = question[:idx].strip()
+                right = question[idx + len(sep):].strip().split("?")[0].strip()
+                # Reject if either side is a long sentence fragment (> 35 chars)
+                if 2 <= len(left) <= 35 and 2 <= len(right) <= 35:
+                    return [left, right]
+
         return []
 
     def _fetch_events(self, sport_path: str) -> list:
@@ -211,16 +236,22 @@ class SportsDataSource(DataSource):
         reasoning = ""
 
         if completed and winner_name:
-            # Game is final – determine if YES or NO based on market question
-            # Pattern: "Will X win?" → YES if X won
+            # Game is final – determine if YES or NO based on market question.
+            # Use _extract_teams to identify the "YES team" (first extracted name).
             winner_lower = winner_name.lower()
-            if any(part in winner_lower or winner_lower in part
-                   for part in (question_lower,) if len(part) > 3):
-                ground_truth_prob = 1.0
-                reasoning = f"FINAL: {winner_name} won. Market YES resolved."
+            teams = self._extract_teams(market.question)
+            if teams:
+                yes_team = teams[0].lower()
+                # Substring match in either direction handles short/long names
+                yes_won = yes_team in winner_lower or winner_lower in yes_team
             else:
-                ground_truth_prob = 0.0
-                reasoning = f"FINAL: {winner_name} won. Market YES resolved against."
+                # No teams extracted → check if winner name appears anywhere in q
+                yes_won = winner_lower in question_lower
+            ground_truth_prob = 1.0 if yes_won else 0.0
+            reasoning = (
+                f"FINAL: {winner_name} won. "
+                f"Market YES {'resolved' if yes_won else 'resolved against'}."
+            )
             confidence = 0.95
             source_type = SourceType.HARD
         elif state == "in":

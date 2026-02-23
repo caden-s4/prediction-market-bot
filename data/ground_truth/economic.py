@@ -105,8 +105,9 @@ class EconomicDataSource(DataSource):
                 reasoning=(
                     f"FRED {indicator_name} ({series_id}): latest={latest_value:.4f} "
                     f"as of {latest_date}. "
-                    + (f"Threshold={threshold:.4f}. " if threshold is not None else "")
-                    + f"Derived prob={ground_truth_prob:.2f} confidence={confidence:.2f}."
+                    + (f"Threshold={threshold:.4f}. " if threshold is not None else "No threshold extracted. ")
+                    + (f"Derived prob={ground_truth_prob:.2f} " if ground_truth_prob is not None else "prob=None (no signal) ")
+                    + f"confidence={confidence:.2f}."
                 ),
             )
 
@@ -173,13 +174,15 @@ class EconomicDataSource(DataSource):
         value: float,
         threshold: Optional[float],
         market: Market,
-    ) -> float:
+    ) -> Optional[float]:
         """
         Estimate YES probability based on latest value vs threshold.
-        If no threshold is found, return 0.5 (uncertain).
+        Returns None when no threshold is extractable — callers treat this as
+        "no signal" rather than the 0.5 that previously leaked into tradeable
+        results and caused spurious trades on every economic market.
         """
         if threshold is None:
-            return 0.5
+            return None
 
         question_lower = market.question.lower()
         above_phrasing = any(
@@ -214,11 +217,14 @@ class EconomicDataSource(DataSource):
                 tzinfo=timezone.utc
             )
             now = datetime.now(timezone.utc)
-            # If data was released very recently (within last 48h) → high confidence
             hours_since = (now - release_dt).total_seconds() / 3600
             if hours_since < 48:
+                # Data released within last 48h — very fresh
                 return 0.95
-            # Data is older but still relevant (market may be comparing to old release)
-            return 0.80
+            if hours_since < 720:
+                # Up to 30 days old — still a relevant release cycle
+                return 0.80
+            # Older than 30 days: a newer release is probably due; don't trade on stale data
+            return 0.60
         except Exception:
             return 0.70
