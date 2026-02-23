@@ -25,6 +25,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+from collections import defaultdict
+
 from data.ground_truth.router import GroundTruthRouter
 from data.markets.base import BaseMarketClient, Market, Order, Side
 from resolution.confidence import ConfidenceScorer
@@ -41,6 +43,16 @@ logger = logging.getLogger(__name__)
 
 KELLY_FRACTION = 0.12             # 12% fractional Kelly (conservative for thin books)
 MAX_POSITION_FRACTION = 0.20      # hard cap: 20% of total bankroll per position
+
+# Max signals kept per (source_name, action) bucket.
+# Prevents correlated overexposure when a single data source (e.g. Yahoo Finance/NQ=F)
+# generates dozens of "Nasdaq below 27000" contracts all expressing the same bet.
+MAX_SIGNALS_PER_SOURCE_ACTION = 2
+
+# If the live order-book mid-price deviates more than this from the scanner price,
+# the scanner data is stale. Skip the trade rather than entering at a price that
+# no longer exists in the real order book.
+STALE_PRICE_THRESHOLD = 0.12     # 12 cents
 
 
 @dataclass
@@ -219,7 +231,31 @@ class ResolutionBot:
                 signal.ground_truth_prob = gt.ground_truth_prob
                 signal.ground_truth_result = gt  # preserve real source confidence
                 signals.append(signal)
-        return signals
+
+        # Deduplicate: cap at MAX_SIGNALS_PER_SOURCE_ACTION per (source, direction)
+        # bucket so a single instrument (e.g. Nasdaq) can't consume the whole
+        # bankroll with 40 correlated contracts expressing the same directional bet.
+        buckets: dict = defaultdict(list)
+        for sig in signals:
+            src = (
+                sig.ground_truth_result.source_name
+                if sig.ground_truth_result
+                else "unknown"
+            )
+            buckets[(src, sig.action)].append(sig)
+
+        deduped: List[GapSignal] = []
+        for bucket_sigs in buckets.values():
+            bucket_sigs.sort(key=lambda s: -s.effective_gap)
+            deduped.extend(bucket_sigs[:MAX_SIGNALS_PER_SOURCE_ACTION])
+
+        if len(deduped) < len(signals):
+            logger.info(
+                "ResolutionBot: deduplication reduced signals %d → %d "
+                "(max %d per source+direction bucket)",
+                len(signals), len(deduped), MAX_SIGNALS_PER_SOURCE_ACTION,
+            )
+        return deduped
 
     def _try_execute(self, signal: GapSignal) -> Optional[dict]:
         """
@@ -245,6 +281,23 @@ class ResolutionBot:
                 "ResolutionBot: SKIP %s – %s", mid, score.skip_reason
             )
             return None
+
+        # Stale-price guard: fetch the live order-book mid-price and verify it
+        # hasn't drifted far from the scanner price used to generate the signal.
+        # The Kalshi bulk /markets endpoint often returns stale yes_bid/yes_ask
+        # (e.g. 49/50 by default) while the real order book is at 0.99 or 0.01.
+        # Trading on a stale scanner price would open a position that immediately
+        # triggers the decay-monitor stop-loss in the same cycle.
+        live_price = self._get_current_price(market)
+        if live_price is not None:
+            drift = abs(live_price - signal.target_price)
+            if drift > STALE_PRICE_THRESHOLD:
+                logger.info(
+                    "ResolutionBot: SKIP %s – live order-book %.3f drifted %.0f¢ "
+                    "from scanner %.3f (stale bulk-API data or rapid market move)",
+                    mid, live_price, drift * 100, signal.target_price,
+                )
+                return None
 
         # Fee check: re-verify after confidence pass
         fee = self._fee_cache.get_taker_fee(market.platform, mid, force_refresh=True)
