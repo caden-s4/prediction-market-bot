@@ -182,7 +182,7 @@ class ResolutionScanner:
                     )
 
         if rejected_reasons:
-            logger.debug(
+            logger.info(
                 "ResolutionScanner: %s rejection breakdown: %s",
                 platform_name, rejected_reasons,
             )
@@ -200,7 +200,7 @@ class ResolutionScanner:
         hours_left = market.hours_to_resolution   # uses fixed timezone-aware property
         if not (0 < hours_left <= window_hours):
             return "hours"
-        if not (0.001 < market.yes_price < 0.999):
+        if not (0.05 < market.yes_price < 0.95):
             return "price"
         return None
 

@@ -94,7 +94,7 @@ class GroundTruthRouter:
             )
             return best
 
-        logger.debug("GroundTruthRouter: no data source for %s", market.market_id)
+        logger.info("GroundTruthRouter: no source could handle %s", market.market_id)
         return None
 
     def add_source(self, source: DataSource) -> None:
