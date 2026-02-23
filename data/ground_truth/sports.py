@@ -33,8 +33,12 @@ _SPORT_MAP = {
     "nhl": "hockey/nhl",
     "mls": "soccer/usa.1",
     "ncaa football": "football/college-football",
+    "college football": "football/college-football",
+    "ncaaf": "football/college-football",
     "cfb": "football/college-football",
     "ncaa basketball": "basketball/mens-college-basketball",
+    "college basketball": "basketball/mens-college-basketball",
+    "ncaabb": "basketball/mens-college-basketball",
     "cbb": "basketball/mens-college-basketball",
     "epl": "soccer/eng.1",
     "premier league": "soccer/eng.1",
@@ -108,14 +112,20 @@ class SportsDataSource(DataSource):
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _detect_sport(self, market: Market) -> Optional[str]:
-        """Identify which sport/league this market is about."""
-        text = (market.question + " " + " ".join(market.tags)).lower()
+        """Identify which sport/league this market is about.
+
+        Includes the market_id in the search text so Kalshi-style IDs like
+        'KXNCAABBGAME-...' correctly route to the NCAA basketball endpoint
+        even when the question text doesn't contain the exact keyword phrase.
+        """
+        text = (
+            market.question + " " + " ".join(market.tags) + " " + market.market_id
+        ).lower()
         for keyword, path in _SPORT_MAP.items():
             if keyword in text:
                 return path
-        # Generic sport category
-        if market.category.lower() in ("sports", "sport"):
-            return "football/nfl"  # fallback to NFL scan first
+        # Generic sport category – do NOT fall back to NFL; that produces
+        # false scoreboard lookups for non-football sports markets.
         return None
 
     def _extract_teams(self, question: str) -> list:
