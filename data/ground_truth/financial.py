@@ -4,10 +4,16 @@ data.ground_truth.financial – real-time financial instrument prices.
 Source: Yahoo Finance public API (no key required, stable since 2015).
 
 Covers:
-  - US stock indices : Nasdaq 100 (^NDX), S&P 500 (^GSPC), Dow (^DJI)
+  - US stock indices : Nasdaq 100 (NQ=F futures), S&P 500 (ES=F futures), Dow (YM=F)
   - Forex pairs      : EUR/USD, USD/JPY, GBP/USD, USD/CAD, AUD/USD
   - Treasury yields  : 10-yr (^TNX), 5-yr (^FVX), 2-yr (^IRX), 30-yr (^TYX)
   - Commodities      : Gold (GC=F), WTI Crude (CL=F), Natural Gas (NG=F)
+
+Index markets use E-mini futures (NQ=F, ES=F, YM=F) rather than spot index symbols
+(^NDX, ^GSPC, ^DJI) because futures trade 24/5 and reflect the current market
+expectation even on weekends/pre-market. Spot index symbols only update during
+regular trading hours; on Sunday evening they still show Friday's close, which
+is wrong for Kalshi markets that resolve Monday at 4pm.
 
 Confidence is a function of how far the current price sits from the market
 threshold. If current price is within 2% of the threshold we return None
@@ -37,20 +43,20 @@ _TIMEOUT = 8
 # Map text keyword → (Yahoo Finance symbol, human-readable name).
 # Sorted longest-first when searching so "nasdaq 100" matches before "nasdaq".
 _INSTRUMENT_MAP: Dict[str, Tuple[str, str]] = {
-    # ── Indices ───────────────────────────────────────────────────────────────
-    "nasdaq 100":       ("^NDX",   "Nasdaq 100"),
-    "nasdaq-100":       ("^NDX",   "Nasdaq 100"),
-    "nasdaq100":        ("^NDX",   "Nasdaq 100"),
-    "nasdaq":           ("^NDX",   "Nasdaq 100"),
-    "ndx":              ("^NDX",   "Nasdaq 100"),
-    "s&p 500":          ("^GSPC",  "S&P 500"),
-    "sp 500":           ("^GSPC",  "S&P 500"),
-    "sp500":            ("^GSPC",  "S&P 500"),
-    "s&p500":           ("^GSPC",  "S&P 500"),
-    "s&p":              ("^GSPC",  "S&P 500"),
-    "spx":              ("^GSPC",  "S&P 500"),
-    "dow jones":        ("^DJI",   "Dow Jones"),
-    "dow":              ("^DJI",   "Dow Jones"),
+    # ── Indices (E-mini futures — trade 24/5, correct pre/post-market prices) ──
+    "nasdaq 100":       ("NQ=F",  "Nasdaq 100"),
+    "nasdaq-100":       ("NQ=F",  "Nasdaq 100"),
+    "nasdaq100":        ("NQ=F",  "Nasdaq 100"),
+    "nasdaq":           ("NQ=F",  "Nasdaq 100"),
+    "ndx":              ("NQ=F",  "Nasdaq 100"),
+    "s&p 500":          ("ES=F",  "S&P 500"),
+    "sp 500":           ("ES=F",  "S&P 500"),
+    "sp500":            ("ES=F",  "S&P 500"),
+    "s&p500":           ("ES=F",  "S&P 500"),
+    "s&p":              ("ES=F",  "S&P 500"),
+    "spx":              ("ES=F",  "S&P 500"),
+    "dow jones":        ("YM=F",  "Dow Jones"),
+    "dow":              ("YM=F",  "Dow Jones"),
     # ── Forex ────────────────────────────────────────────────────────────────
     "eur/usd":          ("EURUSD=X", "EUR/USD"),
     "euro/dollar":      ("EURUSD=X", "EUR/USD"),
@@ -117,7 +123,11 @@ class FinancialDataSource(DataSource):
     """
 
     def can_handle(self, market: Market) -> bool:
-        text = (market.question + " " + " ".join(market.tags)).lower()
+        # Include market_id so Kalshi tickers like KXUSDJPY, KXEURUSD, KXNASDAQ100
+        # are caught even when the question text uses different phrasing.
+        text = (
+            market.question + " " + " ".join(market.tags) + " " + market.market_id
+        ).lower()
         return (
             market.category.lower() in ("financials", "finance")
             or any(kw in text for kw in _DETECT_KEYWORDS)
@@ -194,7 +204,11 @@ class FinancialDataSource(DataSource):
 
     def _detect_instrument(self, market: Market) -> Tuple[str, str]:
         """Return (yahoo_symbol, human_name) or ('', '') if not found."""
-        text = (market.question + " " + " ".join(market.tags)).lower()
+        # Include market_id so KXUSDJPY / KXEURUSD / KXNASDAQ100 are detected
+        # even when the question text uses a different phrasing.
+        text = (
+            market.question + " " + " ".join(market.tags) + " " + market.market_id
+        ).lower()
         # Longest keyword first so "nasdaq 100" wins over "nasdaq"
         for kw in sorted(_INSTRUMENT_MAP, key=len, reverse=True):
             if kw in text:
