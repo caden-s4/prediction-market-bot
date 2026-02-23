@@ -23,6 +23,7 @@ from data.markets.base import Market
 from .base import DataSource, GroundTruthResult
 from .economic import EconomicDataSource
 from .federal_register import FederalRegisterSource
+from .financial import FinancialDataSource
 from .sports import SportsDataSource
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ class GroundTruthRouter:
         self._sources: List[DataSource] = sources or [
             SportsDataSource(),
             EconomicDataSource(),
+            FinancialDataSource(),
             FederalRegisterSource(),
         ]
 
