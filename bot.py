@@ -104,6 +104,7 @@ class BotCoordinator:
             kalshi_window_hours=bc.kalshi_resolution_window_hours,
             poly_window_hours=bc.polymarket_resolution_window_hours,
             scan_interval=bc.resolution_scan_interval_seconds,
+            state_store=self._state,
         )
 
         logger.info(

@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional
-
 from collections import defaultdict
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
 from data.ground_truth.router import GroundTruthRouter
 from data.markets.base import BaseMarketClient, Market, Order, Side
@@ -38,6 +38,7 @@ from resolution.scanner import ResolutionScanner
 from shared.bankroll import Bankroll
 from shared.exclusion_list import ExclusionList
 from shared.fee_cache import FeeCache
+from utils.storage import StateStore
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,8 @@ class TradeRecord:
     market_id: str
     platform: str
     market: Market
-    signal: GapSignal
+    signal: Optional[GapSignal]   # None for positions restored from disk
+    action: str                   # "buy_yes" | "buy_no" – cached from signal.action
     entry_price: float
     size_usd: float
     ground_truth_prob: float
@@ -98,6 +100,7 @@ class ResolutionBot:
         kalshi_window_hours: Optional[float] = None,
         poly_window_hours: Optional[float] = None,
         scan_interval: int = 300,
+        state_store: Optional[StateStore] = None,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
@@ -106,6 +109,7 @@ class ResolutionBot:
         self._exclusions = exclusions
         self._dry_run = dry_run
         self._scan_interval = scan_interval
+        self._state = state_store
 
         self._scanner = ResolutionScanner(
             kalshi_client, poly_client, exclusions,
@@ -120,6 +124,7 @@ class ResolutionBot:
 
         # Active positions: market_id → TradeRecord
         self._positions: Dict[str, TradeRecord] = {}
+        self._load_positions()
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -333,12 +338,14 @@ class ResolutionBot:
             platform=market.platform,
             market=market,
             signal=signal,
+            action=signal.action,
             entry_price=signal.target_price,
             size_usd=size_usd,
             ground_truth_prob=gt_prob,
             source_confidence=score.source_confidence,
             order_id=order_id,
         )
+        self._save_positions()
         logger.info(
             "ResolutionBot: TRADE %s %s @ %.4f size=$%.2f (order=%s)\n  → \"%s\"",
             signal.action, mid, signal.target_price, size_usd, order_id,
@@ -439,7 +446,7 @@ class ResolutionBot:
                 ground_truth_prob=rec.ground_truth_prob,
                 size_usd=rec.size_usd,
                 source_confidence=rec.source_confidence,
-                action=rec.signal.action,
+                action=rec.action,
             ))
 
         decisions = self._decay.evaluate(open_positions)
@@ -463,6 +470,7 @@ class ResolutionBot:
         if not rec:
             return
         self._bankroll.release(market_id, realized_pnl_usd=realized_pnl_usd)
+        self._save_positions()
         if not self._dry_run:
             client = self._poly if rec.platform == "polymarket" else self._kalshi
             try:
@@ -482,3 +490,106 @@ class ResolutionBot:
             return ob.mid_price
         except Exception:
             return None
+
+    # ── Position persistence ───────────────────────────────────────────────────
+
+    def _save_positions(self) -> None:
+        """Persist all open positions to the state store (called on every open/close)."""
+        if not self._state:
+            return
+        data: dict = {}
+        for mid, rec in self._positions.items():
+            rd = rec.market.resolution_date
+            if rd.tzinfo is None:
+                rd = rd.replace(tzinfo=timezone.utc)
+            data[mid] = {
+                "market_id": rec.market_id,
+                "platform": rec.platform,
+                "action": rec.action,
+                "entry_price": rec.entry_price,
+                "size_usd": rec.size_usd,
+                "ground_truth_prob": rec.ground_truth_prob,
+                "source_confidence": rec.source_confidence,
+                "entry_time": rec.entry_time,
+                "order_id": rec.order_id,
+                "resolution_date_iso": rd.isoformat(),
+                "question": rec.market.question,
+                "category": rec.market.category,
+                "tags": rec.market.tags,
+            }
+        self._state.set("open_positions", data)
+
+    def _load_positions(self) -> None:
+        """Reload open positions from the state store on startup."""
+        if not self._state:
+            return
+        data: dict = self._state.get("open_positions", {})
+        if not data:
+            return
+
+        loaded = 0
+        skipped = 0
+        for mid, saved in data.items():
+            try:
+                rd = datetime.fromisoformat(saved["resolution_date_iso"])
+
+                # Reconstruct a minimal Market object from saved fields.
+                # yes_price is approximate (entry price); the decay monitor
+                # fetches a fresh live price from the order book every cycle.
+                market = Market(
+                    market_id=saved["market_id"],
+                    platform=saved["platform"],
+                    question=saved["question"],
+                    category=saved["category"],
+                    tags=saved["tags"],
+                    resolution_date=rd,
+                    yes_price=saved["entry_price"],
+                    no_price=round(1.0 - saved["entry_price"], 4),
+                )
+
+                if market.hours_to_resolution <= 0:
+                    logger.info(
+                        "ResolutionBot: skipping expired position %s "
+                        "(market already resolved)", mid,
+                    )
+                    skipped += 1
+                    continue
+
+                # Re-reserve capital so the bankroll accounting stays correct.
+                if not self._bankroll.reserve(mid, saved["size_usd"]):
+                    logger.warning(
+                        "ResolutionBot: cannot re-reserve $%.2f for %s "
+                        "(bankroll too low – position ignored)", saved["size_usd"], mid,
+                    )
+                    skipped += 1
+                    continue
+
+                self._positions[mid] = TradeRecord(
+                    market_id=saved["market_id"],
+                    platform=saved["platform"],
+                    market=market,
+                    signal=None,          # not needed for monitoring
+                    action=saved["action"],
+                    entry_price=saved["entry_price"],
+                    size_usd=saved["size_usd"],
+                    ground_truth_prob=saved["ground_truth_prob"],
+                    source_confidence=saved["source_confidence"],
+                    entry_time=saved.get("entry_time", time.time()),
+                    order_id=saved.get("order_id"),
+                )
+                loaded += 1
+
+            except Exception as exc:
+                logger.warning(
+                    "ResolutionBot: failed to restore position %s: %s", mid, exc,
+                )
+                skipped += 1
+
+        if loaded or skipped:
+            logger.info(
+                "ResolutionBot: restored %d open position(s) from disk "
+                "(%d skipped/expired)", loaded, skipped,
+            )
+        if skipped:
+            # Rewrite state without the entries we couldn't load
+            self._save_positions()
