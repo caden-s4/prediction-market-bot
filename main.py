@@ -33,6 +33,12 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # Python <3.9
+
+_PST = ZoneInfo("America/Los_Angeles")
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -45,7 +51,7 @@ _SEP_W = 54  # width of separator lines
 
 def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> None:
     """Print a clean, human-readable cycle summary to stdout."""
-    now = datetime.now().strftime("%H:%M:%S")
+    now = datetime.now(tz=_PST).strftime("%H:%M:%S")
     mode = "DRY RUN" if cfg.bot.dry_run else "LIVE"
 
     platforms = []
@@ -175,13 +181,14 @@ def _print_help() -> None:
     print("  LIVE COMMANDS")
     print(sep)
     print("  p  /  positions   Show all open positions (live mark-to-market)")
+    print("  s  /  scan        Run a scan cycle right now")
     print("  h  /  help        Show this help")
     print("  Ctrl-C            Stop the bot")
     print(sep)
     print()
 
 
-def _start_command_listener(coordinator: BotCoordinator) -> None:
+def _start_command_listener(coordinator: BotCoordinator, scan_event: threading.Event) -> None:
     """Spawn a daemon thread that reads commands from stdin while the bot runs."""
     if not sys.stdin.isatty():
         return  # Skip in non-interactive mode (piped input, cron, etc.)
@@ -193,6 +200,9 @@ def _start_command_listener(coordinator: BotCoordinator) -> None:
                 cmd  = line.strip().lower()
                 if cmd in ("p", "positions"):
                     _print_positions(coordinator)
+                elif cmd in ("s", "scan"):
+                    print("  Triggering scan now...")
+                    scan_event.set()
                 elif cmd in ("h", "help", "?"):
                     _print_help()
                 elif cmd:
@@ -204,7 +214,7 @@ def _start_command_listener(coordinator: BotCoordinator) -> None:
 
     t = threading.Thread(target=_listen, daemon=True, name="cmd-listener")
     t.start()
-    print("  Type 'p' for positions, 'help' for commands.\n")
+    print("  Type 'p' for positions, 's' to scan now, 'help' for commands.\n")
 
 
 def parse_args() -> argparse.Namespace:
@@ -272,7 +282,8 @@ def main() -> None:
     else:
         interval = cfg.bot.resolution_scan_interval_seconds
         logger.info("Starting continuous scan (interval=%ds)", interval)
-        _start_command_listener(coordinator)
+        scan_event = threading.Event()
+        _start_command_listener(coordinator, scan_event)
         while True:
             try:
                 result = coordinator.run_once()
@@ -282,7 +293,8 @@ def main() -> None:
                 break
             except Exception as exc:
                 logger.exception("Cycle error: %s", exc)
-            time.sleep(interval)
+            scan_event.wait(timeout=interval)
+            scan_event.clear()
 
 
 if __name__ == "__main__":

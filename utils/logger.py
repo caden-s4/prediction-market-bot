@@ -15,8 +15,15 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # Python <3.9
+
+_PST = ZoneInfo("America/Los_Angeles")
 
 _DEFAULT_LOG_FILE = "logs/bot.log"
 _MAX_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -43,7 +50,13 @@ def setup_logging(
     """
     fmt = "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
-    formatter = logging.Formatter(fmt, datefmt=datefmt)
+
+    class _PSTFormatter(logging.Formatter):
+        def formatTime(self, record, datefmt=None):
+            dt = datetime.fromtimestamp(record.created, tz=_PST)
+            return dt.strftime(datefmt) if datefmt else dt.isoformat(timespec="seconds")
+
+    formatter = _PSTFormatter(fmt, datefmt=datefmt)
 
     numeric_level = getattr(logging, level.upper(), logging.WARNING)
 
