@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -130,6 +131,82 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
             print()
 
 
+def _print_positions(coordinator: BotCoordinator) -> None:
+    """Print a live mark-to-market view of all open positions."""
+    positions = coordinator.get_open_positions()
+    sep  = "=" * _SEP_W
+    thin = "-" * _SEP_W
+    now  = datetime.now().strftime("%H:%M:%S")
+
+    print(f"\n{sep}")
+    print(f"  OPEN POSITIONS   {now}   ({len(positions)} total)")
+    print(sep)
+
+    if not positions:
+        print("  No open positions.")
+    else:
+        for p in positions:
+            action   = p["action"].replace("_", " ").upper()
+            hrs      = p.get("hours_left", 0)
+            gain     = p.get("current_gain_usd", 0.0)
+            gain_s   = f"+${gain:.2f}" if gain >= 0 else f"-${abs(gain):.2f}"
+            cap      = p.get("capture_ratio", 0.0)
+            cprice   = p.get("current_price")
+            cp_s     = f"{cprice:.3f}" if cprice is not None else "n/a"
+            conf     = p.get("source_confidence", 0.0)
+            gt       = p.get("ground_truth_prob", 0.0)
+            q        = p.get("question", "")
+
+            print(f"  {action:<10}  ${p['size_usd']:<6.0f}  "
+                  f"entry={p['entry_price']:.3f}  live={cp_s}  gt={gt:.3f}  "
+                  f"[{hrs:.1f}h left]")
+            print(f"    gain={gain_s}  capture={cap:.0%}  conf={conf:.2f}  "
+                  f"[{p['platform']}]")
+            print(f"    {q[:_SEP_W - 4]}")
+            print(f"  {thin}")
+
+    print(sep)
+    print()
+
+
+def _print_help() -> None:
+    sep = "=" * _SEP_W
+    print(f"\n{sep}")
+    print("  LIVE COMMANDS")
+    print(sep)
+    print("  p  /  positions   Show all open positions (live mark-to-market)")
+    print("  h  /  help        Show this help")
+    print("  Ctrl-C            Stop the bot")
+    print(sep)
+    print()
+
+
+def _start_command_listener(coordinator: BotCoordinator) -> None:
+    """Spawn a daemon thread that reads commands from stdin while the bot runs."""
+    if not sys.stdin.isatty():
+        return  # Skip in non-interactive mode (piped input, cron, etc.)
+
+    def _listen() -> None:
+        while True:
+            try:
+                line = input()
+                cmd  = line.strip().lower()
+                if cmd in ("p", "positions"):
+                    _print_positions(coordinator)
+                elif cmd in ("h", "help", "?"):
+                    _print_help()
+                elif cmd:
+                    print(f"  Unknown command '{cmd}'. Type 'help' for commands.")
+            except EOFError:
+                break
+            except KeyboardInterrupt:
+                break
+
+    t = threading.Thread(target=_listen, daemon=True, name="cmd-listener")
+    t.start()
+    print("  Type 'p' for positions, 'help' for commands.\n")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Resolution drift arbitrage bot"
@@ -184,6 +261,7 @@ def main() -> None:
     else:
         interval = cfg.bot.resolution_scan_interval_seconds
         logger.info("Starting continuous scan (interval=%ds)", interval)
+        _start_command_listener(coordinator)
         while True:
             try:
                 result = coordinator.run_once()

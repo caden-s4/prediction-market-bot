@@ -180,7 +180,10 @@ class KalshiClient(BaseMarketClient):
                 backoff *= 2
                 continue
             if not resp.ok:
-                logger.debug("Kalshi error body: %s", resp.text[:500])
+                logger.warning(
+                    "Kalshi HTTP %d on %s → %s",
+                    resp.status_code, path, resp.text[:500],
+                )
             resp.raise_for_status()
             return resp.json()
         # All retries exhausted
@@ -494,12 +497,27 @@ class KalshiClient(BaseMarketClient):
             return False
 
     def get_balance(self) -> Optional[float]:
-        """Fetch available cash balance from Kalshi portfolio (in USD)."""
+        """Fetch available cash balance from Kalshi portfolio (in USD).
+
+        Kalshi v2 API returns balance in cents under the key "balance".
+        We also check "available_balance" as a fallback in case the schema
+        changes between API versions.
+        """
         try:
             data = self._get("/portfolio/balance")
-            # Kalshi returns balance in cents
-            cents = data.get("balance", 0)
-            return round(float(cents) / 100.0, 2)
+            # Try the documented field names (Kalshi returns cents).
+            # Log the raw payload once at DEBUG so it's visible in the log file.
+            logger.debug("Kalshi /portfolio/balance raw: %s", data)
+            for field in ("balance", "available_balance"):
+                raw = data.get(field)
+                if raw is not None:
+                    return round(float(raw) / 100.0, 2)
+            # Field not found – log the entire response so we can see what changed.
+            logger.warning(
+                "Kalshi get_balance: unexpected response format "
+                "(no 'balance' field). Raw: %s", data
+            )
+            return None
         except Exception as exc:
             logger.warning("Kalshi get_balance failed: %s", exc)
             return None

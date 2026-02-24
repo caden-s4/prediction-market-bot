@@ -497,6 +497,41 @@ class ResolutionBot:
             "ResolutionBot: EXITED %s pnl=$%.2f", market_id, realized_pnl_usd
         )
 
+    def get_open_positions(self) -> list:
+        """Return all open positions with live mark-to-market prices."""
+        result = []
+        for mid, rec in self._positions.items():
+            current_price = self._get_current_price(rec.market)
+            if rec.action == "buy_yes":
+                theo_max = (rec.ground_truth_prob - rec.entry_price) * rec.size_usd
+                current_gain = (
+                    (current_price - rec.entry_price) * rec.size_usd
+                    if current_price is not None else 0.0
+                )
+            else:
+                theo_max = (rec.entry_price - rec.ground_truth_prob) * rec.size_usd
+                current_gain = (
+                    (rec.entry_price - current_price) * rec.size_usd
+                    if current_price is not None else 0.0
+                )
+            capture = current_gain / theo_max if theo_max > 1e-6 else 0.0
+            result.append({
+                "market_id": mid,
+                "platform": rec.platform,
+                "question": rec.market.question,
+                "action": rec.action,
+                "entry_price": rec.entry_price,
+                "current_price": current_price,
+                "size_usd": rec.size_usd,
+                "ground_truth_prob": rec.ground_truth_prob,
+                "source_confidence": rec.source_confidence,
+                "hours_left": round(rec.market.hours_to_resolution, 1),
+                "current_gain_usd": round(current_gain, 2),
+                "capture_ratio": round(capture, 3),
+                "order_id": rec.order_id,
+            })
+        return result
+
     def _get_current_price(self, market: Market) -> Optional[float]:
         try:
             client = self._poly if market.platform == "polymarket" else self._kalshi
