@@ -201,3 +201,10 @@ class BaseMarketClient(ABC):
     def get_positions(self) -> List[Order]:
         """Fetch current open positions."""
         ...
+
+    def get_balance(self) -> Optional[float]:
+        """
+        Fetch the current cash / USDC balance for this account.
+        Returns USD float, or None if unavailable (public mode, API error, etc.).
+        """
+        return None

@@ -365,6 +365,32 @@ class PolymarketClient(BaseMarketClient):
             logger.error("Polymarket cancel_order failed: %s", exc)
             return False
 
+    def get_balance(self) -> Optional[float]:
+        """Fetch USDC balance from Polymarket. Returns USD float or None if unavailable."""
+        if self._public_mode or not self._clob_client:
+            return None
+        try:
+            # py_clob_client exposes get_balance_allowance(params)
+            # Try the typed BalanceAllowanceParams API first, fall back to plain dict.
+            try:
+                from py_clob_client.clob_types import (
+                    AssetType, BalanceAllowanceParams, SignatureType,
+                )
+                result = self._clob_client.get_balance_allowance(
+                    params=BalanceAllowanceParams(
+                        asset_type=AssetType.USDC,
+                        signature_type=SignatureType.EOA,
+                    )
+                )
+            except (ImportError, TypeError):
+                result = self._clob_client.get_balance_allowance(
+                    params={"asset_type": "USDC", "signature_type": "EOA"}
+                )
+            return round(float(result.get("balance", 0)), 2)
+        except Exception as exc:
+            logger.warning("Polymarket get_balance failed: %s", exc)
+            return None
+
     def get_positions(self) -> List[Order]:
         # Positions are tracked internally by the portfolio module;
         # Polymarket doesn't have a direct "positions" endpoint like Kalshi.

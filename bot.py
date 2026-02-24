@@ -82,7 +82,35 @@ class BotCoordinator:
         self._exclusions = ExclusionList()
         self._state = StateStore()
 
-        starting_bankroll = self._state.get("bankroll", bc.bankroll_usd)
+        # Fetch live account balances; use their sum as the starting bankroll
+        # so the bot always reflects real capital rather than a config value.
+        self._platform_balances: dict = self._fetch_balances()
+        live_total = self._platform_balances.get("total_usd")
+        if live_total:
+            starting_bankroll = live_total
+            logger.info(
+                "Live balances – Kalshi: %s  Polymarket: %s  Total: $%.2f",
+                f"${self._platform_balances['kalshi_usd']:.2f}"
+                if self._platform_balances["kalshi_usd"] is not None else "n/a",
+                f"${self._platform_balances['polymarket_usd']:.2f}"
+                if self._platform_balances["polymarket_usd"] is not None else "n/a",
+                live_total,
+            )
+        else:
+            starting_bankroll = self._state.get("bankroll", bc.bankroll_usd)
+            saved_balances = self._state.get("platform_balances", {})
+            if saved_balances:
+                self._platform_balances = saved_balances
+                logger.info(
+                    "Using saved platform balances (live fetch unavailable): %s",
+                    saved_balances,
+                )
+            else:
+                logger.info(
+                    "Using configured starting bankroll $%.2f "
+                    "(live balance fetch unavailable)", starting_bankroll,
+                )
+
         self._bankroll = Bankroll(
             total_usd=starting_bankroll,
             max_daily_loss_usd=config.monitoring.max_daily_loss_usd,
@@ -130,12 +158,26 @@ class BotCoordinator:
         result = self._resolution.run_once()
         self._persist_state()
         result.update(self._bankroll.summary())
+        result["platform_balances"] = self._platform_balances
         return result
 
     # ── Internal ──────────────────────────────────────────────────────────────
+
+    def _fetch_balances(self) -> dict:
+        """Query live cash/USDC balances from each enabled platform."""
+        kalshi_bal = self._kalshi.get_balance() if self._kalshi else None
+        poly_bal = self._poly.get_balance() if self._poly else None
+        total = (kalshi_bal or 0.0) + (poly_bal or 0.0)
+        return {
+            "kalshi_usd": kalshi_bal,
+            "polymarket_usd": poly_bal,
+            "total_usd": total if (kalshi_bal is not None or poly_bal is not None) else None,
+        }
 
     def _persist_state(self) -> None:
         summary = self._bankroll.summary()
         self._state.set("bankroll", summary["total_usd"])
         self._state.set("bankroll_summary", summary)
+        if self._platform_balances:
+            self._state.set("platform_balances", self._platform_balances)
         logger.debug("BotCoordinator: state persisted %s", summary)

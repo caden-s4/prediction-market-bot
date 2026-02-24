@@ -493,6 +493,17 @@ class KalshiClient(BaseMarketClient):
             logger.error("Kalshi cancel_order failed for %s: %s", order_id, exc)
             return False
 
+    def get_balance(self) -> Optional[float]:
+        """Fetch available cash balance from Kalshi portfolio (in USD)."""
+        try:
+            data = self._get("/portfolio/balance")
+            # Kalshi returns balance in cents
+            cents = data.get("balance", 0)
+            return round(float(cents) / 100.0, 2)
+        except Exception as exc:
+            logger.warning("Kalshi get_balance failed: %s", exc)
+            return None
+
     def get_positions(self) -> List[Order]:
         try:
             data = self._get("/portfolio/positions")
