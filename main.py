@@ -27,7 +27,9 @@ While testing on demo, set RESOLUTION_WINDOW_HOURS=168 or higher.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import logging
+import platform
 import sys
 import threading
 import time
@@ -47,6 +49,30 @@ from bot import BotCoordinator
 from utils.logger import setup_logging
 
 _SEP_W = 54  # width of separator lines
+
+# Windows SetThreadExecutionState flags
+_ES_CONTINUOUS      = 0x80000000
+_ES_SYSTEM_REQUIRED = 0x00000001
+
+
+def _inhibit_sleep() -> None:
+    """Tell the OS not to sleep while the bot is running (Windows only)."""
+    if platform.system() == "Windows":
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(
+                _ES_CONTINUOUS | _ES_SYSTEM_REQUIRED
+            )
+        except Exception:
+            pass
+
+
+def _restore_sleep() -> None:
+    """Restore normal OS sleep behaviour after the bot exits (Windows only)."""
+    if platform.system() == "Windows":
+        try:
+            ctypes.windll.kernel32.SetThreadExecutionState(_ES_CONTINUOUS)
+        except Exception:
+            pass
 
 
 def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> None:
@@ -284,17 +310,21 @@ def main() -> None:
         logger.info("Starting continuous scan (interval=%ds)", interval)
         scan_event = threading.Event()
         _start_command_listener(coordinator, scan_event)
-        while True:
-            try:
-                result = coordinator.run_once()
-                _print_summary(result, cfg, show_names=args.names)
-            except KeyboardInterrupt:
-                logger.info("Stopped by user")
-                break
-            except Exception as exc:
-                logger.exception("Cycle error: %s", exc)
-            scan_event.wait(timeout=interval)
-            scan_event.clear()
+        _inhibit_sleep()
+        try:
+            while True:
+                try:
+                    result = coordinator.run_once()
+                    _print_summary(result, cfg, show_names=args.names)
+                except KeyboardInterrupt:
+                    logger.info("Stopped by user")
+                    break
+                except Exception as exc:
+                    logger.exception("Cycle error: %s", exc)
+                scan_event.wait(timeout=interval)
+                scan_event.clear()
+        finally:
+            _restore_sleep()
 
 
 if __name__ == "__main__":
