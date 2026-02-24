@@ -497,6 +497,20 @@ class ResolutionBot:
             "ResolutionBot: EXITED %s pnl=$%.2f", market_id, realized_pnl_usd
         )
 
+    def clear_positions(self) -> int:
+        """
+        Remove all in-memory positions and wipe them from the state store.
+        Returns the number of positions cleared.  Does NOT place any exit orders.
+        Use this to discard phantom positions that exist in state but not on the exchange.
+        """
+        count = len(self._positions)
+        for mid, rec in list(self._positions.items()):
+            self._bankroll.release(mid, realized_pnl_usd=0.0)
+        self._positions.clear()
+        self._save_positions()
+        logger.info("ResolutionBot: cleared %d position(s) from state", count)
+        return count
+
     def get_open_positions(self) -> list:
         """Return all open positions with live mark-to-market prices."""
         result = []
@@ -582,6 +596,18 @@ class ResolutionBot:
         skipped = 0
         for mid, saved in data.items():
             try:
+                # Drop positions that were placed in a dry-run session when we are
+                # now running live.  Dry-run order IDs are prefixed with "dry_";
+                # they were never real orders on any exchange.
+                order_id = saved.get("order_id", "")
+                if not self._dry_run and isinstance(order_id, str) and order_id.startswith("dry_"):
+                    logger.info(
+                        "ResolutionBot: skipping phantom position %s "
+                        "(saved from a dry-run session, now running live)", mid,
+                    )
+                    skipped += 1
+                    continue
+
                 rd = datetime.fromisoformat(saved["resolution_date_iso"])
 
                 # Reconstruct a minimal Market object from saved fields.

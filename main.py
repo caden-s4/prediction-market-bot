@@ -208,6 +208,7 @@ def _print_help() -> None:
     print(sep)
     print("  p  /  positions   Show all open positions (live mark-to-market)")
     print("  s  /  scan        Run a scan cycle right now")
+    print("  clear             Wipe all tracked positions (no exit orders placed)")
     print("  h  /  help        Show this help")
     print("  Ctrl-C            Stop the bot")
     print(sep)
@@ -229,6 +230,9 @@ def _start_command_listener(coordinator: BotCoordinator, scan_event: threading.E
                 elif cmd in ("s", "scan"):
                     print("  Triggering scan now...")
                     scan_event.set()
+                elif cmd == "clear":
+                    n = coordinator.clear_positions()
+                    print(f"  Cleared {n} position(s) from state.")
                 elif cmd in ("h", "help", "?"):
                     _print_help()
                 elif cmd:
