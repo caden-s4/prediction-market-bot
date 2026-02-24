@@ -125,6 +125,7 @@ class ResolutionBot:
         # Active positions: market_id → TradeRecord
         self._positions: Dict[str, TradeRecord] = {}
         self._load_positions()
+        self._reconcile_with_exchange()
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -670,3 +671,75 @@ class ResolutionBot:
         if skipped:
             # Rewrite state without the entries we couldn't load
             self._save_positions()
+
+    def _reconcile_with_exchange(self) -> None:
+        """
+        Cross-check bot-tracked positions against what the exchange actually holds.
+
+        Called once on startup after _load_positions().  Two things are fixed:
+          1. Bot tracks a position the exchange doesn't know about → drop it (phantom).
+          2. Exchange holds a position the bot isn't tracking → warn so the user knows.
+
+        Skipped in dry-run mode (dry-run positions are never real orders).
+        Skipped if the exchange API call fails (log a warning but don't touch state).
+        """
+        if self._dry_run or not self._positions:
+            return
+
+        # ── Fetch live Kalshi positions ───────────────────────────────────────
+        kalshi_live_ids: Optional[set] = None
+        if self._kalshi:
+            try:
+                live = self._kalshi.get_positions()
+                kalshi_live_ids = {p.market_id for p in live}
+                logger.info(
+                    "ResolutionBot reconcile: Kalshi reports %d open position(s): %s",
+                    len(kalshi_live_ids), sorted(kalshi_live_ids) or "(none)",
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ResolutionBot reconcile: could not fetch Kalshi positions "
+                    "(skipping reconciliation): %s", exc,
+                )
+
+        if kalshi_live_ids is None:
+            return   # API failed – don't touch anything
+
+        # ── Drop phantoms (bot knows about them, exchange doesn't) ───────────
+        phantoms = [
+            mid for mid, rec in self._positions.items()
+            if rec.platform == "kalshi" and mid not in kalshi_live_ids
+        ]
+        if phantoms:
+            logger.warning(
+                "ResolutionBot reconcile: dropping %d phantom position(s) not found "
+                "on Kalshi – they were never real orders or have already resolved: %s",
+                len(phantoms), phantoms,
+            )
+            print(
+                f"\n  [RECONCILE] Dropped {len(phantoms)} phantom position(s) "
+                f"not found on Kalshi: {phantoms}"
+            )
+            for mid in phantoms:
+                self._bankroll.release(mid, realized_pnl_usd=0.0)
+                del self._positions[mid]
+            self._save_positions()
+        else:
+            logger.info("ResolutionBot reconcile: all bot positions confirmed on Kalshi.")
+
+        # ── Warn about exchange positions the bot isn't tracking ─────────────
+        bot_kalshi_ids = {
+            mid for mid, rec in self._positions.items() if rec.platform == "kalshi"
+        }
+        untracked = kalshi_live_ids - bot_kalshi_ids
+        if untracked:
+            logger.warning(
+                "ResolutionBot reconcile: %d Kalshi position(s) exist on the exchange "
+                "but are NOT tracked by this bot (placed manually or in a prior session): %s",
+                len(untracked), sorted(untracked),
+            )
+            print(
+                f"\n  [RECONCILE] WARNING: {len(untracked)} Kalshi position(s) on "
+                f"the exchange are not tracked by the bot: {sorted(untracked)}\n"
+                f"  These were placed outside the bot. Use 'p' to inspect after the first cycle."
+            )
