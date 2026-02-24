@@ -4,15 +4,13 @@ data.markets.kalshi – Kalshi REST API v2 client.
 Kalshi is a regulated US prediction market exchange.
 Docs: https://api.elections.kalshi.com/trade-api/v2
 
-Authentication: HMAC-SHA256 signed requests using API key + secret.
+Authentication: RSA-SHA256 signed requests using API key + RSA private key.
 Weather markets on Kalshi are well categorised (series ticker prefix "KXWEATHER").
 """
 
 from __future__ import annotations
 
 import base64
-import hashlib
-import hmac
 import logging
 import re
 import time
@@ -138,24 +136,56 @@ class KalshiClient(BaseMarketClient):
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
+        # Cache the loaded RSA private key so we only parse it once.
+        self._private_key = self._load_private_key()
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
+    def _load_private_key(self):
+        """
+        Load the RSA private key from self._api_secret.
+
+        KALSHI_API_SECRET in .env should be the full PEM private key with
+        literal \\n escapes (dotenv expands these to real newlines), e.g.:
+
+            KALSHI_API_SECRET="-----BEGIN PRIVATE KEY-----\\nMIIE...\\n-----END PRIVATE KEY-----"
+
+        Alternatively, bare base64 (no PEM headers) is also accepted – the
+        code will add the standard PKCS#8 header/footer automatically.
+        """
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+        secret = self._api_secret
+        # python-dotenv >=1.0 converts \\n inside quoted values to real newlines,
+        # but handle the literal-backslash-n case as a safety net.
+        secret = secret.replace("\\n", "\n")
+
+        if "BEGIN" in secret:
+            pem_bytes = secret.encode("utf-8")
+        else:
+            # Bare base64 body – wrap it in PKCS#8 PEM headers.
+            body = "\n".join(secret[i:i + 64] for i in range(0, len(secret), 64))
+            pem_bytes = (
+                "-----BEGIN PRIVATE KEY-----\n"
+                + body
+                + "\n-----END PRIVATE KEY-----\n"
+            ).encode("utf-8")
+
+        return load_pem_private_key(pem_bytes, password=None)
+
     def _sign(self, method: str, path: str, body: str = "") -> Dict[str, str]:
         """
-        Generate Kalshi HMAC-SHA256 signature headers.
+        Generate Kalshi RSA-SHA256 signature headers.
         Timestamp is in milliseconds.
         path must be the bare path (no query string).
-        The Kalshi v2 API secret is a raw string – use it directly as the
-        HMAC key (UTF-8 encoded), do NOT base64-decode it first.
+        Message = timestamp + METHOD + path + body, signed with RSA-PKCS1v15/SHA-256.
         """
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
         ts_ms = str(int(time.time() * 1000))
-        message = ts_ms + method.upper() + path + body
-        signature = hmac.new(
-            self._api_secret.encode("utf-8"),
-            message.encode("utf-8"),
-            hashlib.sha256,
-        ).digest()
+        message = (ts_ms + method.upper() + path + body).encode("utf-8")
+        signature = self._private_key.sign(message, padding.PKCS1v15(), hashes.SHA256())
         sig_b64 = base64.b64encode(signature).decode("utf-8")
         return {
             "KALSHI-ACCESS-KEY": self._api_key,
