@@ -146,12 +146,13 @@ class KalshiClient(BaseMarketClient):
         Generate Kalshi HMAC-SHA256 signature headers.
         Timestamp is in milliseconds.
         path must be the bare path (no query string).
-        The API secret from Kalshi is base64-encoded; decode it before use.
+        The Kalshi v2 API secret is a raw string – use it directly as the
+        HMAC key (UTF-8 encoded), do NOT base64-decode it first.
         """
         ts_ms = str(int(time.time() * 1000))
         message = ts_ms + method.upper() + path + body
         signature = hmac.new(
-            base64.b64decode(self._api_secret),
+            self._api_secret.encode("utf-8"),
             message.encode("utf-8"),
             hashlib.sha256,
         ).digest()
