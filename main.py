@@ -33,6 +33,12 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # Python <3.9
+
+_PST = ZoneInfo("America/Los_Angeles")
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -45,7 +51,7 @@ _SEP_W = 54  # width of separator lines
 
 def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> None:
     """Print a clean, human-readable cycle summary to stdout."""
-    now = datetime.now().strftime("%H:%M:%S")
+    now = datetime.now(tz=_PST).strftime("%H:%M:%S")
     mode = "DRY RUN" if cfg.bot.dry_run else "LIVE"
 
     platforms = []
