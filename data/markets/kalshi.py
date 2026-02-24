@@ -178,14 +178,21 @@ class KalshiClient(BaseMarketClient):
         Generate Kalshi RSA-SHA256 signature headers.
         Timestamp is in milliseconds.
         path must be the bare path (no query string).
-        Message = timestamp + METHOD + path + body, signed with RSA-PKCS1v15/SHA-256.
+        Message = timestamp + METHOD + path + body, signed with RSA-PSS/SHA-256.
         """
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
 
         ts_ms = str(int(time.time() * 1000))
         message = (ts_ms + method.upper() + path + body).encode("utf-8")
-        signature = self._private_key.sign(message, padding.PKCS1v15(), hashes.SHA256())
+        signature = self._private_key.sign(
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
         sig_b64 = base64.b64encode(signature).decode("utf-8")
         return {
             "KALSHI-ACCESS-KEY": self._api_key,
