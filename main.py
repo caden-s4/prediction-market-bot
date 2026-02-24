@@ -59,6 +59,10 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
     daily_pnl  = result.get("daily_pnl_usd", 0.0)
     halted     = result.get("halted", False)
 
+    platform_bals = result.get("platform_balances", {})
+    kalshi_bal    = platform_bals.get("kalshi_usd")
+    poly_bal      = platform_bals.get("polymarket_usd")
+
     scanned   = result.get("markets_scanned", 0)
     pairs     = result.get("pairs_found", 0)
     signals   = result.get("signals_flagged", 0)
@@ -86,7 +90,13 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
     print(f"  Open positions           {positions:>5}")
     print(f"  Exits triggered          {exits:>5}")
     print(thin)
-    print(f"  Bankroll  ${bankroll:>10,.2f}   |   P&L today  {pnl_s:>8}   |   {elapsed_s:.1f}s")
+    if kalshi_bal is not None or poly_bal is not None:
+        k_s = f"${kalshi_bal:>9,.2f}" if kalshi_bal is not None else "        n/a"
+        p_s = f"${poly_bal:>9,.2f}"  if poly_bal  is not None else "        n/a"
+        print(f"  Kalshi    {k_s}   |   Polymarket  {p_s}")
+        print(f"  Total     ${bankroll:>9,.2f}   |   P&L today  {pnl_s:>8}   |   {elapsed_s:.1f}s")
+    else:
+        print(f"  Bankroll  ${bankroll:>9,.2f}   |   P&L today  {pnl_s:>8}   |   {elapsed_s:.1f}s")
     print(sep)
 
     if show_names and trade_details:
