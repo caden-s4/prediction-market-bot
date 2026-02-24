@@ -217,10 +217,16 @@ def parse_args() -> argparse.Namespace:
         help="Run a single scan cycle and exit (for testing)",
     )
     parser.add_argument(
+        "--info",
+        action="store_true",
+        help="Show INFO-level log lines on the console (default: WARNING+ only)",
+    )
+    parser.add_argument(
         "--log-level",
-        default="INFO",
+        default="WARNING",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging verbosity (default: INFO)",
+        help="Logging verbosity for the console (default: WARNING). "
+             "--info is a shortcut for --log-level INFO.",
     )
     parser.add_argument(
         "--log-file",
@@ -237,7 +243,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    setup_logging(level=args.log_level, log_file=args.log_file)
+    # --info is a shortcut for --log-level INFO; explicit --log-level takes priority
+    # if both are set (e.g. --info --log-level DEBUG the user gets DEBUG).
+    log_level = args.log_level
+    if args.info and args.log_level == "WARNING":
+        log_level = "INFO"
+    setup_logging(level=log_level, log_file=args.log_file)
     logger = logging.getLogger(__name__)
 
     try:
