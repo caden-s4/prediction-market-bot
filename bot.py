@@ -165,6 +165,10 @@ class BotCoordinator:
         result["session_cycle"] = self._cycle_count
         return result
 
+    def get_open_positions(self) -> list:
+        """Return all open resolution-drift positions with live mark-to-market."""
+        return self._resolution.get_open_positions()
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _fetch_balances(self) -> dict:
