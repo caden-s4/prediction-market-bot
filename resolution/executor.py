@@ -344,6 +344,14 @@ class ResolutionBot:
         # Place order
         order_id = self._place_order(market, signal, size_usd, fee)
 
+        # In live mode _place_order returns None when the order fails and has
+        # already released the bankroll reserve.  Do NOT add a phantom position.
+        if order_id is None and not self._dry_run:
+            logger.warning(
+                "ResolutionBot: order placement failed for %s – no position recorded", mid
+            )
+            return None
+
         gt_prob = (
             gt.ground_truth_prob
             if gt and gt.ground_truth_prob is not None
@@ -403,6 +411,13 @@ class ResolutionBot:
         )
         try:
             result = client.place_order(order)
+            if not result.order_id:
+                logger.warning(
+                    "ResolutionBot: order placed for %s but response had no order_id "
+                    "(treating as failure)", market.market_id
+                )
+                self._bankroll.release(market.market_id, realized_pnl_usd=0.0)
+                return None
             return result.order_id
         except Exception as exc:
             logger.warning(
