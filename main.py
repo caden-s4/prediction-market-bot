@@ -54,10 +54,11 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
         platforms.append("polymarket")
     platform_str = " + ".join(platforms) if platforms else "no platform"
 
-    elapsed_s = result.get("cycle_ms", 0) / 1000
-    bankroll   = result.get("total_usd", 0.0)
-    daily_pnl  = result.get("daily_pnl_usd", 0.0)
-    halted     = result.get("halted", False)
+    elapsed_s    = result.get("cycle_ms", 0) / 1000
+    bankroll     = result.get("total_usd", 0.0)
+    daily_pnl    = result.get("daily_pnl_usd", 0.0)
+    halted       = result.get("halted", False)
+    cycle_num    = result.get("session_cycle", 0)
 
     platform_bals = result.get("platform_balances", {})
     kalshi_bal    = platform_bals.get("kalshi_usd")
@@ -74,14 +75,19 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
     sep   = "=" * _SEP_W
     thin  = "-" * _SEP_W
     pnl_s = f"+${daily_pnl:.2f}" if daily_pnl >= 0 else f"-${abs(daily_pnl):.2f}"
-    halt_s = "  [HALTED]" if halted else ""
+    halt_s  = "  [HALTED]" if halted else ""
+    cycle_s = f"   cycle #{cycle_num}" if cycle_num else ""
 
     # Annotation tags
     signal_tag = "  <-- potential trades" if signals and not trades else ""
     trade_tag  = "  <-- trades executed!" if trades else ""
 
+    # Per-platform balance strings (always 10 chars wide, aligned)
+    k_s = f"${kalshi_bal:>9,.2f}" if kalshi_bal is not None else "       n/a"
+    p_s = f"${poly_bal:>9,.2f}"   if poly_bal  is not None else "       n/a"
+
     print(f"\n{sep}")
-    print(f"  SCAN COMPLETE   {now}   {mode}   {platform_str}{halt_s}")
+    print(f"  SCAN COMPLETE   {now}   {mode}   {platform_str}{halt_s}{cycle_s}")
     print(sep)
     print(f"  Markets scanned          {scanned:>5}")
     print(f"  Cross-platform pairs     {pairs:>5}")
@@ -90,13 +96,8 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
     print(f"  Open positions           {positions:>5}")
     print(f"  Exits triggered          {exits:>5}")
     print(thin)
-    if kalshi_bal is not None or poly_bal is not None:
-        k_s = f"${kalshi_bal:>9,.2f}" if kalshi_bal is not None else "        n/a"
-        p_s = f"${poly_bal:>9,.2f}"  if poly_bal  is not None else "        n/a"
-        print(f"  Kalshi    {k_s}   |   Polymarket  {p_s}")
-        print(f"  Total     ${bankroll:>9,.2f}   |   P&L today  {pnl_s:>8}   |   {elapsed_s:.1f}s")
-    else:
-        print(f"  Bankroll  ${bankroll:>9,.2f}   |   P&L today  {pnl_s:>8}   |   {elapsed_s:.1f}s")
+    print(f"  Kalshi    {k_s}   |   Polymarket  {p_s}")
+    print(f"  Total     ${bankroll:>9,.2f}   |   P&L today  {pnl_s:>8}   |   {elapsed_s:.1f}s")
     print(sep)
 
     if show_names and trade_details:
