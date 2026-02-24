@@ -291,18 +291,34 @@ class ResolutionBot:
         # hasn't drifted far from the scanner price used to generate the signal.
         # The Kalshi bulk /markets endpoint often returns stale yes_bid/yes_ask
         # (e.g. 49/50 by default) while the real order book is at 0.99 or 0.01.
-        # Trading on a stale scanner price would open a position that immediately
-        # triggers the decay-monitor stop-loss in the same cycle.
+        # If the scanner price is stale, recalculate the gap at the live price:
+        #   - Gap disappears  → was a stale-data artifact, skip
+        #   - Gap still real  → update signal to live price and proceed
         live_price = self._get_current_price(market)
         if live_price is not None:
             drift = abs(live_price - signal.target_price)
             if drift > STALE_PRICE_THRESHOLD:
-                logger.info(
-                    "ResolutionBot: SKIP %s – live order-book %.3f drifted %.0f¢ "
-                    "from scanner %.3f (stale bulk-API data or rapid market move)",
-                    mid, live_price, drift * 100, signal.target_price,
+                gt_prob = (
+                    gt.ground_truth_prob
+                    if gt and gt.ground_truth_prob is not None
+                    else signal.reference_price
                 )
-                return None
+                live_gap = abs(live_price - gt_prob)
+                live_effective_gap = live_gap - signal.taker_fee
+                if live_effective_gap < 0.04:
+                    logger.info(
+                        "ResolutionBot: SKIP %s – stale scanner %.3f → live %.3f, "
+                        "recalc gap %.3f below threshold (no real edge)",
+                        mid, signal.target_price, live_price, live_effective_gap,
+                    )
+                    return None
+                logger.info(
+                    "ResolutionBot: STALE corrected %s – scanner %.3f → live %.3f, "
+                    "live effective_gap=%.3f – proceeding",
+                    mid, signal.target_price, live_price, live_effective_gap,
+                )
+                signal.target_price = live_price
+                signal.effective_gap = live_effective_gap
 
         # Fee check: re-verify after confidence pass
         fee = self._fee_cache.get_taker_fee(market.platform, mid, force_refresh=True)

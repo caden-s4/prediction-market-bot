@@ -135,6 +135,8 @@ class BotCoordinator:
             state_store=self._state,
         )
 
+        self._cycle_count: int = 0
+
         logger.info(
             "BotCoordinator ready | dry_run=%s bankroll=$%.2f",
             bc.dry_run, starting_bankroll,
@@ -155,10 +157,12 @@ class BotCoordinator:
 
     def run_once(self) -> dict:
         """Run a single scan cycle (for testing / --once mode)."""
+        self._cycle_count += 1
         result = self._resolution.run_once()
         self._persist_state()
         result.update(self._bankroll.summary())
         result["platform_balances"] = self._platform_balances
+        result["session_cycle"] = self._cycle_count
         return result
 
     # ── Internal ──────────────────────────────────────────────────────────────

@@ -216,7 +216,11 @@ class FinancialDataSource(DataSource):
         return "", ""
 
     def _fetch_price(self, symbol: str) -> Optional[float]:
-        """Return current market price from Yahoo Finance with a 60-second cache."""
+        """Return current market price from Yahoo Finance with a 60-second cache.
+
+        Retries once after a 1-second backoff if the first request fails (Yahoo
+        Finance occasionally rate-limits burst requests from a single cycle).
+        """
         now = time.monotonic()
         cached = _PRICE_CACHE.get(symbol)
         if cached:
@@ -225,26 +229,28 @@ class FinancialDataSource(DataSource):
                 return price
 
         url = f"{_YAHOO_BASE}/{symbol}"
-        try:
-            resp = requests.get(
-                url,
-                params={"interval": "1d", "range": "5d"},
-                timeout=_TIMEOUT,
-                headers={"User-Agent": "Mozilla/5.0"},
-            )
-            resp.raise_for_status()
-            meta = resp.json()["chart"]["result"][0]["meta"]
-            price = float(meta["regularMarketPrice"])
-            _PRICE_CACHE[symbol] = (now, price)
-            logger.debug(
-                "FinancialSource: %s price=%.4f", symbol, price
-            )
-            return price
-        except Exception as exc:
-            logger.debug(
-                "FinancialSource: Yahoo fetch failed for %s: %s", symbol, exc
-            )
-            return None
+        for attempt in range(2):
+            try:
+                if attempt > 0:
+                    time.sleep(1.0)
+                resp = requests.get(
+                    url,
+                    params={"interval": "1d", "range": "5d"},
+                    timeout=_TIMEOUT,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                )
+                resp.raise_for_status()
+                meta = resp.json()["chart"]["result"][0]["meta"]
+                price = float(meta["regularMarketPrice"])
+                _PRICE_CACHE[symbol] = (time.monotonic(), price)
+                logger.debug("FinancialSource: %s price=%.4f", symbol, price)
+                return price
+            except Exception as exc:
+                logger.warning(
+                    "FinancialSource: Yahoo fetch failed for %s (attempt %d/2): %s",
+                    symbol, attempt + 1, exc,
+                )
+        return None
 
     def _extract_threshold_and_direction(
         self, question: str, market_id: str
