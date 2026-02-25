@@ -209,6 +209,20 @@ class BaseMarketClient(ABC):
         """
         return []
 
+    def close_position(self, market_id: str) -> None:
+        """
+        Attempt to close / cancel any open orders for a market.
+        Subclasses should override this to implement exchange-specific exit logic.
+        For fully-filled contracts the default behaviour is to log a warning and
+        let them resolve naturally (appropriate for a resolution-drift strategy).
+        """
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "close_position not implemented for platform %s – "
+            "market %s will hold to resolution",
+            self.PLATFORM, market_id,
+        )
+
     def get_balance(self) -> Optional[float]:
         """
         Fetch the current cash / USDC balance for this account.
