@@ -141,6 +141,12 @@ class FeeCache:
         """
         Kalshi includes fee_multiplier in market detail.
         Expressed as decimal (0.07 = 7%).
+
+        NOTE: As of early 2026 the Kalshi v2 /markets/{id} endpoint no longer
+        returns fee_multiplier for most market types.  Kalshi charges fees as a
+        percentage of net winnings at settlement (not a per-order taker fee), so
+        the field is not needed to place orders.  We default to 0.0 when it is
+        absent — the gap threshold acts as the real safety margin.
         """
         url = f"https://api.elections.kalshi.com/trade-api/v2/markets/{market_id}"
         resp = requests.get(url, timeout=_TIMEOUT)
@@ -149,12 +155,9 @@ class FeeCache:
         market = data.get("market", data)
         fee_multiplier = market.get("fee_multiplier")
         if fee_multiplier is None:
-            # fee_multiplier absent means no fee information — don't assume 7%.
-            # Log a warning so missing fees are visible, and treat as 0 so the
-            # gap calculation is not falsely suppressed.
-            logger.warning(
-                "FeeCache: kalshi/%s has no fee_multiplier in API response "
-                "(raw: %s) – defaulting to 0.0", market_id, market
+            logger.debug(
+                "FeeCache: kalshi/%s – fee_multiplier not in API response, using 0.0",
+                market_id,
             )
             return 0.0
         fee = float(fee_multiplier)
