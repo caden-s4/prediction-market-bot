@@ -234,6 +234,13 @@ class KalshiClient(BaseMarketClient):
         headers = self._sign("POST", self._path_prefix + path)
         url = self._base_url + path
         resp = self._session.post(url, data=body_str, headers=headers, timeout=15)
+        if not resp.ok:
+            logger.error(
+                "Kalshi POST %s HTTP %d – key=%s… body: %s",
+                path, resp.status_code,
+                self._api_key[:8],
+                resp.text[:500],
+            )
         resp.raise_for_status()
         return resp.json()
 
