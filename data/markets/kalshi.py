@@ -231,7 +231,7 @@ class KalshiClient(BaseMarketClient):
     def _post(self, path: str, body: Dict) -> Any:
         import json
         body_str = json.dumps(body)
-        headers = self._sign("POST", self._path_prefix + path, body_str)
+        headers = self._sign("POST", self._path_prefix + path)
         url = self._base_url + path
         resp = self._session.post(url, data=body_str, headers=headers, timeout=15)
         resp.raise_for_status()
