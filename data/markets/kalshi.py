@@ -523,7 +523,7 @@ class KalshiClient(BaseMarketClient):
                 "type": "limit",
                 "yes_price": int(round(order.price * 100)),
                 "count": int(order.size_usd),   # Kalshi: count = number of contracts ($1 each)
-                "time_in_force": "GTC",
+                "time_in_force": "good_til_cancelled",
             }
             resp = self._post("/portfolio/orders", body)
             order.order_id = resp.get("order", {}).get("order_id")
