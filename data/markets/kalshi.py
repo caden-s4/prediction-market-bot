@@ -524,10 +524,23 @@ class KalshiClient(BaseMarketClient):
                 "yes_price": int(round(order.price * 100)),
                 "count": int(order.size_usd),   # Kalshi: count = number of contracts ($1 each)
             }
+            logger.info(
+                "Kalshi placing order: ticker=%s side=%s yes_price=%d count=%d",
+                body["ticker"], body["side"], body["yes_price"], body["count"],
+            )
             resp = self._post("/portfolio/orders", body)
-            order.order_id = resp.get("order", {}).get("order_id")
+            raw_order = resp.get("order", {})
+            order.order_id = raw_order.get("order_id")
             order.status = OrderStatus.OPEN
-            logger.info("Kalshi order placed: %s", order.order_id)
+            logger.info(
+                "Kalshi order response: order_id=%s status=%s remaining=%s "
+                "yes_price=%s side=%s",
+                raw_order.get("order_id"),
+                raw_order.get("status"),
+                raw_order.get("remaining_count"),
+                raw_order.get("yes_price"),
+                raw_order.get("side"),
+            )
         except Exception as exc:
             logger.error("Kalshi place_order failed: %s", exc)
         return order
