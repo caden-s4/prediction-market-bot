@@ -515,14 +515,14 @@ class KalshiClient(BaseMarketClient):
             return order
 
         try:
-            # Kalshi expects price in cents.
-            # Each contract costs yes_price cents (YES) or (100-yes_price) cents (NO).
-            # To spend size_usd dollars: count = size_usd / contract_cost_usd.
+            # Kalshi expects price in cents (integer) for the API payload.
+            # Each contract costs order.price (YES) or 1-order.price (NO) in USD.
+            # Use the raw float for count to avoid rounding the cost before division.
             yes_price_cents = int(round(order.price * 100))
             if order.side == Side.YES:
-                contract_cost_usd = yes_price_cents / 100.0
+                contract_cost_usd = order.price
             else:
-                contract_cost_usd = (100 - yes_price_cents) / 100.0
+                contract_cost_usd = 1.0 - order.price
             count = int(order.size_usd / contract_cost_usd) if contract_cost_usd > 0 else 0
             body = {
                 "ticker": order.market_id,
@@ -642,12 +642,17 @@ class KalshiClient(BaseMarketClient):
             orders = []
             for o in data.get("orders", []):
                 side = Side.YES if o.get("side") == "yes" else Side.NO
+                yes_price_frac = float(o.get("yes_price", 50)) / 100.0
+                remaining = float(o.get("remaining_count", 0))
+                # remaining_count is contracts; convert to USD using per-contract cost.
+                contract_cost = yes_price_frac if side == Side.YES else (1.0 - yes_price_frac)
+                size_usd = remaining * contract_cost
                 orders.append(Order(
                     market_id=o["ticker"],
                     platform=self.PLATFORM,
                     side=side,
-                    price=float(o.get("yes_price", 50)) / 100.0,
-                    size_usd=float(o.get("remaining_count", 0)),
+                    price=yes_price_frac,
+                    size_usd=size_usd,
                     status=OrderStatus.OPEN,
                     order_id=o.get("order_id"),
                 ))
