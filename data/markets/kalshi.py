@@ -586,3 +586,24 @@ class KalshiClient(BaseMarketClient):
         except Exception as exc:
             logger.error("Kalshi get_positions failed: %s", exc)
             return []
+
+    def get_open_orders(self) -> List[Order]:
+        """Fetch all resting (unfilled) orders from Kalshi."""
+        try:
+            data = self._get("/portfolio/orders", params={"status": "open"})
+            orders = []
+            for o in data.get("orders", []):
+                side = Side.YES if o.get("side") == "yes" else Side.NO
+                orders.append(Order(
+                    market_id=o["ticker"],
+                    platform=self.PLATFORM,
+                    side=side,
+                    price=float(o.get("yes_price", 50)) / 100.0,
+                    size_usd=float(o.get("remaining_count", 0)),
+                    status=OrderStatus.OPEN,
+                    order_id=o.get("order_id"),
+                ))
+            return orders
+        except Exception as exc:
+            logger.error("Kalshi get_open_orders failed: %s", exc)
+            return []

@@ -202,6 +202,13 @@ class BaseMarketClient(ABC):
         """Fetch current open positions."""
         ...
 
+    def get_open_orders(self) -> List[Order]:
+        """
+        Fetch open (unfilled) orders resting on the book.
+        Returns an empty list if the platform client doesn't override this.
+        """
+        return []
+
     def get_balance(self) -> Optional[float]:
         """
         Fetch the current cash / USDC balance for this account.
