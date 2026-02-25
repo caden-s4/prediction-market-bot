@@ -330,15 +330,30 @@ class ResolutionBot:
             signal.target_price = live_price
             signal.effective_gap = live_effective_gap
 
-        # Fee check: re-verify after confidence pass
+        # Fee check: re-verify with live fee (fee may have changed since gap detection).
+        # Do NOT subtract fee from signal.effective_gap — the gap detector already
+        # subtracted it once.  Recompute fresh from current target price + current fee
+        # so we use one consistent fee value throughout.
         fee = self._fee_cache.get_taker_fee(market.platform, mid, force_refresh=True)
-        if signal.effective_gap - fee < 0.04:
+        gt_prob_for_gap = (
+            gt.ground_truth_prob
+            if gt and gt.ground_truth_prob is not None
+            else signal.reference_price
+        )
+        live_effective_gap = abs(signal.target_price - gt_prob_for_gap) - fee
+        if live_effective_gap < 0.04:
             logger.info(
-                "ResolutionBot: SKIP %s – gap below threshold after live fee refresh "
-                "(fee=%.4f eff_gap=%.4f)", mid, fee, signal.effective_gap,
+                "ResolutionBot: SKIP %s – live effective_gap=%.3f below threshold "
+                "(fee=%.4f target=%.3f gt=%.3f)",
+                mid, live_effective_gap, fee, signal.target_price, gt_prob_for_gap,
             )
-            self._exclusions.add_fee_surprise(market.platform, mid)
+            if fee > signal.taker_fee:
+                # Fee increased since signal generation — exclude to avoid repeat surprises
+                self._exclusions.add_fee_surprise(market.platform, mid)
             return None
+        # Update signal with live-computed values so _compute_size gets consistent data
+        signal.effective_gap = live_effective_gap
+        signal.taker_fee = fee
 
         # Size using fractional Kelly
         size_usd = self._compute_size(signal, score.source_confidence)
@@ -514,10 +529,18 @@ class ResolutionBot:
         self._save_positions()
         if not self._dry_run:
             client = self._poly if rec.platform == "polymarket" else self._kalshi
-            try:
-                client.close_position(market_id)
-            except Exception as exc:
-                logger.warning("ResolutionBot: exit order failed for %s: %s", market_id, exc)
+            if client is None:
+                logger.warning(
+                    "ResolutionBot: cannot place exit order for %s – "
+                    "%s client not initialised", market_id, rec.platform,
+                )
+            else:
+                try:
+                    client.close_position(market_id)
+                except Exception as exc:
+                    logger.warning(
+                        "ResolutionBot: exit order failed for %s: %s", market_id, exc
+                    )
         logger.info(
             "ResolutionBot: EXITED %s pnl=$%.2f", market_id, realized_pnl_usd
         )
