@@ -701,15 +701,25 @@ class ResolutionBot:
         if self._dry_run or not self._positions:
             return
 
-        # ── Fetch live Kalshi positions ───────────────────────────────────────
+        # ── Fetch live Kalshi positions AND open orders ───────────────────────
+        # A bot-tracked position is valid if it appears in EITHER:
+        #   - /portfolio/positions  (filled contracts)
+        #   - /portfolio/orders?status=open  (limit orders resting on the book)
+        # Only drop it as a phantom if it's absent from both.
         kalshi_live_ids: Optional[set] = None
         if self._kalshi:
             try:
-                live = self._kalshi.get_positions()
-                kalshi_live_ids = {p.market_id for p in live}
+                filled = self._kalshi.get_positions()
+                resting = self._kalshi.get_open_orders()
+                kalshi_live_ids = (
+                    {p.market_id for p in filled}
+                    | {o.market_id for o in resting}
+                )
                 logger.info(
-                    "ResolutionBot reconcile: Kalshi reports %d open position(s): %s",
-                    len(kalshi_live_ids), sorted(kalshi_live_ids) or "(none)",
+                    "ResolutionBot reconcile: Kalshi reports %d filled position(s) "
+                    "and %d resting order(s): %s",
+                    len(filled), len(resting),
+                    sorted(kalshi_live_ids) or "(none)",
                 )
             except Exception as exc:
                 logger.warning(
