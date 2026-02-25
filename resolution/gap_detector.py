@@ -167,16 +167,10 @@ class GapDetector:
 
         fee_poly = self._fee_cache.get_taker_fee("polymarket", poly.market_id)
         fee_kalshi = self._fee_cache.get_taker_fee("kalshi", kalshi.market_id)
-        effective_gap = raw_gap - fee_poly - fee_kalshi
 
-        if effective_gap < self._min_gap:
-            logger.debug(
-                "GapDetector: pair %s/%s eff_gap=%.3f below threshold",
-                poly.market_id, kalshi.market_id, effective_gap,
-            )
-            return None
-
-        # Determine which platform lags (lower price = underpriced YES = buy)
+        # Determine which platform lags (lower price = underpriced YES = buy).
+        # We only trade the lagging platform (hold to resolution, no hedge leg),
+        # so only the lagging platform's taker fee applies to the effective gap.
         if poly.yes_price < kalshi.yes_price:
             lagging, reference = poly, kalshi
             lagging_fee = fee_poly
@@ -186,9 +180,18 @@ class GapDetector:
             lagging_fee = fee_kalshi
             platform_label = "kalshi lags polymarket"
 
+        effective_gap = raw_gap - lagging_fee
+
+        if effective_gap < self._min_gap:
+            logger.debug(
+                "GapDetector: pair %s/%s eff_gap=%.3f below threshold",
+                poly.market_id, kalshi.market_id, effective_gap,
+            )
+            return None
+
         reasoning = (
             f"Cross-platform gap: poly={poly.yes_price:.3f} kalshi={kalshi.yes_price:.3f} "
-            f"raw_gap={raw_gap:.3f} fees={fee_poly+fee_kalshi:.3f} "
+            f"raw_gap={raw_gap:.3f} lagging_fee={lagging_fee:.3f} "
             f"effective_gap={effective_gap:.3f} ({platform_label})"
         )
         logger.info(

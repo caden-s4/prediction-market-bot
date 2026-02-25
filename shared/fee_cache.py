@@ -147,6 +147,16 @@ class FeeCache:
         resp.raise_for_status()
         data = resp.json()
         market = data.get("market", data)
-        fee = float(market.get("fee_multiplier", 0.07))
+        fee_multiplier = market.get("fee_multiplier")
+        if fee_multiplier is None:
+            # fee_multiplier absent means no fee information — don't assume 7%.
+            # Log a warning so missing fees are visible, and treat as 0 so the
+            # gap calculation is not falsely suppressed.
+            logger.warning(
+                "FeeCache: kalshi/%s has no fee_multiplier in API response "
+                "(raw: %s) – defaulting to 0.0", market_id, market
+            )
+            return 0.0
+        fee = float(fee_multiplier)
         logger.debug("FeeCache: kalshi/%s fee_multiplier=%.4f", market_id, fee)
         return fee

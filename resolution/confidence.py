@@ -69,15 +69,15 @@ LOW_CLARITY_PATTERNS = [
     r"\bworse than\b",
 ]
 
-# Oracle dispute risk: known markets where Polymarket has disputed before
-# (add market titles/keywords that historically caused problems)
+# Oracle dispute risk: market question keywords that predict Polymarket oracle disputes.
+# Kept deliberately narrow — only include phrases that are inherently subjective or
+# that Polymarket has historically contested.  Do NOT add objective economic terms like
+# "estimated", "adjusted", "revised", or "projected" — these appear in clearly-resolvable
+# FRED/BLS data questions and were causing legitimate signals to be capped at 0.50.
 ORACLE_DISPUTE_KEYWORDS = [
-    "popular vote",
-    "seat projection",
-    "projected",
-    "estimated",
-    "adjusted",
-    "revised",
+    "popular vote",        # election share disputes are common
+    "seat projection",     # probabilistic; different sources disagree
+    "polling average",     # not an official outcome
 ]
 
 

@@ -67,9 +67,9 @@ class Bankroll:
 
     def is_halted(self) -> bool:
         """True if the daily loss limit has been breached."""
-        if self._max_daily_loss <= 0:
-            return False
         with self._lock:
+            if self._max_daily_loss <= 0:
+                return False
             return -self._daily_pnl_usd >= self._max_daily_loss
 
     # ── Reservation lifecycle ─────────────────────────────────────────────────
