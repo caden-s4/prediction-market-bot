@@ -296,30 +296,39 @@ class ResolutionBot:
         #   - Gap disappears  → was a stale-data artifact, skip
         #   - Gap still real  → update signal to live price and proceed
         live_price = self._get_current_price(market)
-        if live_price is not None:
-            drift = abs(live_price - signal.target_price)
-            if drift > STALE_PRICE_THRESHOLD:
-                gt_prob = (
-                    gt.ground_truth_prob
-                    if gt and gt.ground_truth_prob is not None
-                    else signal.reference_price
-                )
-                live_gap = abs(live_price - gt_prob)
-                live_effective_gap = live_gap - signal.taker_fee
-                if live_effective_gap < 0.04:
-                    logger.info(
-                        "ResolutionBot: SKIP %s – stale scanner %.3f → live %.3f, "
-                        "recalc gap %.3f below threshold (no real edge)",
-                        mid, signal.target_price, live_price, live_effective_gap,
-                    )
-                    return None
+        if live_price is None:
+            # Empty order book — scanner price is unverifiable. Placing an order
+            # based on stale bulk-API data (e.g. Kalshi's default yes_bid=99)
+            # creates unfillable limit orders. Skip entirely.
+            logger.info(
+                "ResolutionBot: SKIP %s – order book empty, cannot verify scanner "
+                "price %.3f (would create unfillable limit order)",
+                mid, signal.target_price,
+            )
+            return None
+        drift = abs(live_price - signal.target_price)
+        if drift > STALE_PRICE_THRESHOLD:
+            gt_prob = (
+                gt.ground_truth_prob
+                if gt and gt.ground_truth_prob is not None
+                else signal.reference_price
+            )
+            live_gap = abs(live_price - gt_prob)
+            live_effective_gap = live_gap - signal.taker_fee
+            if live_effective_gap < 0.04:
                 logger.info(
-                    "ResolutionBot: STALE corrected %s – scanner %.3f → live %.3f, "
-                    "live effective_gap=%.3f – proceeding",
+                    "ResolutionBot: SKIP %s – stale scanner %.3f → live %.3f, "
+                    "recalc gap %.3f below threshold (no real edge)",
                     mid, signal.target_price, live_price, live_effective_gap,
                 )
-                signal.target_price = live_price
-                signal.effective_gap = live_effective_gap
+                return None
+            logger.info(
+                "ResolutionBot: STALE corrected %s – scanner %.3f → live %.3f, "
+                "live effective_gap=%.3f – proceeding",
+                mid, signal.target_price, live_price, live_effective_gap,
+            )
+            signal.target_price = live_price
+            signal.effective_gap = live_effective_gap
 
         # Fee check: re-verify after confidence pass
         fee = self._fee_cache.get_taker_fee(market.platform, mid, force_refresh=True)
