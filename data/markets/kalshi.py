@@ -515,18 +515,27 @@ class KalshiClient(BaseMarketClient):
             return order
 
         try:
-            # Kalshi expects price in cents
+            # Kalshi expects price in cents.
+            # Each contract costs yes_price cents (YES) or (100-yes_price) cents (NO).
+            # To spend size_usd dollars: count = size_usd / contract_cost_usd.
+            yes_price_cents = int(round(order.price * 100))
+            if order.side == Side.YES:
+                contract_cost_usd = yes_price_cents / 100.0
+            else:
+                contract_cost_usd = (100 - yes_price_cents) / 100.0
+            count = int(order.size_usd / contract_cost_usd) if contract_cost_usd > 0 else 0
             body = {
                 "ticker": order.market_id,
                 "action": "buy",
                 "side": order.side.value.lower(),
                 "type": "limit",
-                "yes_price": int(round(order.price * 100)),
-                "count": int(order.size_usd),   # Kalshi: count = number of contracts ($1 each)
+                "yes_price": yes_price_cents,
+                "count": count,
             }
             logger.info(
-                "Kalshi placing order: ticker=%s side=%s yes_price=%d count=%d",
+                "Kalshi placing order: ticker=%s side=%s yes_price=%d count=%d (spend≈$%.2f)",
                 body["ticker"], body["side"], body["yes_price"], body["count"],
+                count * contract_cost_usd,
             )
             resp = self._post("/portfolio/orders", body)
             raw_order = resp.get("order", {})
@@ -552,6 +561,32 @@ class KalshiClient(BaseMarketClient):
         except Exception as exc:
             logger.error("Kalshi cancel_order failed for %s: %s", order_id, exc)
             return False
+
+    def close_position(self, market_id: str) -> None:
+        """
+        Cancel any resting (unfilled) orders for this market.
+        Filled contracts are held to resolution — Kalshi has no direct
+        'close position' endpoint; exiting a filled position would require
+        a counter-order which is not implemented here.
+        """
+        try:
+            open_orders = self.get_open_orders()
+            relevant = [o for o in open_orders if o.market_id == market_id]
+            if not relevant:
+                logger.info(
+                    "Kalshi close_position %s: no resting orders to cancel "
+                    "(position already filled – will resolve naturally)", market_id
+                )
+                return
+            for o in relevant:
+                if o.order_id:
+                    cancelled = self.cancel_order(o.order_id, market_id)
+                    logger.info(
+                        "Kalshi close_position %s: cancel order %s → %s",
+                        market_id, o.order_id, "OK" if cancelled else "FAILED",
+                    )
+        except Exception as exc:
+            logger.warning("Kalshi close_position failed for %s: %s", market_id, exc)
 
     def get_balance(self) -> Optional[float]:
         """Fetch available cash balance from Kalshi portfolio (in USD).
