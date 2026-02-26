@@ -124,6 +124,10 @@ class ResolutionBot:
 
         # Active positions: market_id → TradeRecord
         self._positions: Dict[str, TradeRecord] = {}
+        # Per-cycle circuit breaker: set True when Kalshi's backend returns
+        # "service unavailable" so remaining signals skip immediately rather
+        # than each burning ~14s on retries.
+        self._kalshi_backend_down: bool = False
         self._load_positions()
         self._reconcile_with_exchange()
 
@@ -143,6 +147,7 @@ class ResolutionBot:
     def run_once(self) -> dict:
         """Execute one full scan-and-evaluate cycle. Returns summary dict."""
         logger.info("=== ResolutionBot cycle start ===")
+        self._kalshi_backend_down = False   # reset circuit breaker each cycle
         cycle_start = time.monotonic()
         summary = {
             "markets_scanned": 0,
@@ -466,6 +471,17 @@ class ResolutionBot:
         if not client:
             return None
 
+        # Circuit breaker: if a prior order this cycle hit Kalshi's "service
+        # unavailable" error, skip all subsequent orders immediately rather
+        # than each burning 14s of retries on a backend that's already known down.
+        if self._kalshi_backend_down and market.platform == "kalshi":
+            logger.warning(
+                "ResolutionBot: Kalshi backend down this cycle – skipping %s",
+                market.market_id,
+            )
+            self._bankroll.release(market.market_id, realized_pnl_usd=0.0)
+            return None
+
         side = Side.YES if signal.action == "buy_yes" else Side.NO
         order = Order(
             market_id=market.market_id,
@@ -485,9 +501,24 @@ class ResolutionBot:
                 return None
             return result.order_id
         except Exception as exc:
-            logger.warning(
-                "ResolutionBot: order failed for %s: %s", market.market_id, exc
-            )
+            # Detect Kalshi backend routing failures ("service unavailable")
+            # and open the circuit breaker so remaining signals skip fast.
+            _detail = ""
+            if hasattr(exc, "response") and exc.response is not None:
+                try:
+                    _detail = exc.response.json().get("error", {}).get("details", "")
+                except Exception:
+                    pass
+            if "service unavailable" in _detail and market.platform == "kalshi":
+                self._kalshi_backend_down = True
+                logger.warning(
+                    "ResolutionBot: Kalshi backend unavailable – circuit breaker "
+                    "open for remainder of this cycle"
+                )
+            else:
+                logger.warning(
+                    "ResolutionBot: order failed for %s: %s", market.market_id, exc
+                )
             self._bankroll.release(market.market_id, realized_pnl_usd=0.0)
             return None
 
