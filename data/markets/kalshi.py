@@ -585,6 +585,7 @@ class KalshiClient(BaseMarketClient):
             )
         except Exception as exc:
             logger.error("Kalshi place_order failed: %s", exc)
+            raise   # propagate so callers (e.g. executor circuit breaker) can handle it
         return order
 
     def cancel_order(self, order_id: str, market_id: str) -> bool:
