@@ -622,6 +622,15 @@ class KalshiClient(BaseMarketClient):
         except Exception as exc:
             logger.warning("Kalshi close_position failed for %s: %s", market_id, exc)
 
+    def get_market(self, market_id: str) -> Optional[Market]:
+        """Fetch a single market by ID."""
+        try:
+            data = self._get(f"/markets/{market_id}")
+            return self._parse_market(data.get("market", {}))
+        except Exception as exc:
+            logger.warning("Kalshi get_market failed for %s: %s", market_id, exc)
+            return None
+
     def get_balance(self) -> Optional[float]:
         """Fetch available cash balance from Kalshi portfolio (in USD).
 

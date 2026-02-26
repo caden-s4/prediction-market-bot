@@ -826,6 +826,8 @@ class ResolutionBot:
         #   - /portfolio/orders?status=open  (limit orders resting on the book)
         # Only drop it as a phantom if it's absent from both.
         kalshi_live_ids: Optional[set] = None
+        filled: list = []
+        resting: list = []
         if self._kalshi:
             try:
                 filled = self._kalshi.get_positions()
@@ -871,19 +873,141 @@ class ResolutionBot:
         else:
             logger.info("ResolutionBot reconcile: all bot positions confirmed on Kalshi.")
 
-        # ── Warn about exchange positions the bot isn't tracking ─────────────
+        # ── Auto-adopt exchange positions the bot isn't tracking ─────────────
+        # This happens when an order was accepted by Kalshi but the bot crashed /
+        # errored before saving the TradeRecord — the classic cause of the
+        # "4 trades on exchange, 3 tracked by bot" discrepancy.
         bot_kalshi_ids = {
             mid for mid, rec in self._positions.items() if rec.platform == "kalshi"
         }
         untracked = kalshi_live_ids - bot_kalshi_ids
         if untracked:
             logger.warning(
-                "ResolutionBot reconcile: %d Kalshi position(s) exist on the exchange "
-                "but are NOT tracked by this bot (placed manually or in a prior session): %s",
+                "ResolutionBot reconcile: %d Kalshi position(s) on the exchange "
+                "are NOT tracked by this bot – attempting auto-adopt: %s",
                 len(untracked), sorted(untracked),
             )
-            print(
-                f"\n  [RECONCILE] WARNING: {len(untracked)} Kalshi position(s) on "
-                f"the exchange are not tracked by the bot: {sorted(untracked)}\n"
-                f"  These were placed outside the bot. Use 'p' to inspect after the first cycle."
+            fill_map = {o.market_id: o for o in filled}
+            rest_map = {o.market_id: o for o in resting}
+            adopted = []
+            for mid in sorted(untracked):
+                if self._adopt_exchange_position(
+                    mid, fill_map.get(mid), rest_map.get(mid)
+                ):
+                    adopted.append(mid)
+            if adopted:
+                self._save_positions()
+                logger.info(
+                    "ResolutionBot reconcile: auto-adopted %d position(s): %s",
+                    len(adopted), adopted,
+                )
+                print(
+                    f"\n  [RECONCILE] Auto-adopted {len(adopted)} untracked "
+                    f"Kalshi position(s): {adopted}"
+                )
+            failed = sorted(set(untracked) - set(adopted))
+            if failed:
+                logger.warning(
+                    "ResolutionBot reconcile: could not auto-adopt %d position(s): %s "
+                    "(market fetch failed or already expired)",
+                    len(failed), failed,
+                )
+                print(
+                    f"\n  [RECONCILE] WARNING: {len(failed)} Kalshi position(s) could "
+                    f"not be auto-adopted (market fetch failed or expired): {failed}"
+                )
+
+    def _adopt_exchange_position(
+        self,
+        market_id: str,
+        fill_order: Optional[Order],
+        rest_order: Optional[Order],
+    ) -> bool:
+        """
+        Reconstruct a TradeRecord for a Kalshi position that the exchange holds
+        but the bot is not tracking.
+
+        This happens when an order was accepted by Kalshi but the bot
+        crashed / errored before saving the TradeRecord — the classic
+        "N trades on exchange, N-1 tracked in bot" discrepancy.
+
+        Returns True if successfully adopted and added to self._positions.
+        """
+        if not self._kalshi:
+            return False
+
+        # Fetch market details (resolution_date, question, etc.)
+        market = self._kalshi.get_market(market_id)
+        if market is None:
+            logger.warning(
+                "ResolutionBot: cannot auto-adopt %s – market fetch failed", market_id
             )
+            return False
+        if market.hours_to_resolution <= 0:
+            logger.info(
+                "ResolutionBot: skipping adopt of already-expired market %s", market_id
+            )
+            return False
+
+        # Prefer resting order data (has a clean USD size and order_id).
+        # Fall back to filled position data.
+        source = rest_order or fill_order
+        if source is None:
+            logger.warning(
+                "ResolutionBot: cannot auto-adopt %s – no order/position data", market_id
+            )
+            return False
+
+        action = "buy_yes" if source.side == Side.YES else "buy_no"
+        order_id = rest_order.order_id if rest_order else None
+
+        if rest_order:
+            # size_usd is correctly computed in get_open_orders()
+            # (remaining_contracts × per-contract cost in USD).
+            size_usd = rest_order.size_usd
+            entry_price = rest_order.price      # already a [0–1] fraction
+        else:
+            # get_positions() stores contract_count in size_usd (not dollars).
+            # Estimate the USD cost from contract_count × current market price.
+            n_contracts = abs(fill_order.size_usd)
+            if source.side == Side.YES:
+                entry_price = market.yes_price
+                size_usd = round(n_contracts * entry_price, 2)
+            else:
+                entry_price = max(1.0 - market.yes_price, 0.01)
+                size_usd = round(n_contracts * entry_price, 2)
+
+        size_usd = round(size_usd, 2)
+
+        # Reserve capital so bankroll accounting stays consistent.
+        # If the bankroll is too tight, track the position with $0 reserved —
+        # the money is already spent on the exchange; tracking without reservation
+        # is better than not tracking at all.
+        if size_usd > 0 and not self._bankroll.reserve(market_id, size_usd):
+            logger.warning(
+                "ResolutionBot: bankroll too low to reserve $%.2f for adopted "
+                "position %s – tracking without capital reserve", size_usd, market_id,
+            )
+            size_usd = 0.0
+
+        self._positions[market_id] = TradeRecord(
+            market_id=market_id,
+            platform="kalshi",
+            market=market,
+            signal=None,
+            action=action,
+            entry_price=entry_price,
+            size_usd=size_usd,
+            # Conservative default: assume current price ≈ fair value
+            # (we don't know the original ground-truth probability).
+            ground_truth_prob=entry_price,
+            source_confidence=0.8,
+            order_id=order_id,
+        )
+        logger.info(
+            "ResolutionBot reconcile: auto-adopted Kalshi %s %s "
+            "action=%s entry=%.3f size=$%.2f order_id=%s",
+            "resting-order" if rest_order else "filled-position",
+            market_id, action, entry_price, size_usd, order_id,
+        )
+        return True
