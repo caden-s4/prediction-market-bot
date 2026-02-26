@@ -490,7 +490,7 @@ class KalshiClient(BaseMarketClient):
             ]
             yes_asks = [
                 PriceLevel(price=(100.0 - float(a[0])) / 100.0, size=float(a[1]))
-                for a in sorted(book.get("no") or [], key=lambda x: x[0])
+                for a in sorted(book.get("no") or [], key=lambda x: -x[0])
             ]
             return OrderBook(
                 market_id=market_id,
