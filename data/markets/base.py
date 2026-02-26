@@ -223,6 +223,15 @@ class BaseMarketClient(ABC):
             self.PLATFORM, market_id,
         )
 
+    def get_market(self, market_id: str) -> Optional[Market]:
+        """
+        Fetch a single market by ID.
+        Returns None if not found, the platform doesn't support it, or the
+        fetch fails.  Subclasses should override this for platforms that
+        expose a per-market endpoint.
+        """
+        return None
+
     def get_balance(self) -> Optional[float]:
         """
         Fetch the current cash / USDC balance for this account.
