@@ -231,18 +231,51 @@ class KalshiClient(BaseMarketClient):
     def _post(self, path: str, body: Dict) -> Any:
         import json
         body_str = json.dumps(body)
-        headers = self._sign("POST", self._path_prefix + path)
         url = self._base_url + path
-        resp = self._session.post(url, data=body_str, headers=headers, timeout=15)
-        if not resp.ok:
-            logger.error(
-                "Kalshi POST %s HTTP %d – key=%s… body: %s",
-                path, resp.status_code,
-                self._api_key[:8],
-                resp.text[:500],
-            )
-        resp.raise_for_status()
-        return resp.json()
+        full_path = self._path_prefix + path
+        backoff = 2.0
+        last_resp = None
+        for attempt in range(4):
+            headers = self._sign("POST", full_path)
+            headers["Content-Type"] = "application/json"
+            resp = self._session.post(url, data=body_str, headers=headers, timeout=15)
+            last_resp = resp
+            if resp.status_code == 429:
+                logger.warning(
+                    "Kalshi 429 rate limit on POST %s – waiting %.0fs (attempt %d/4)",
+                    path, backoff, attempt + 1,
+                )
+                time.sleep(backoff)
+                backoff *= 2
+                continue
+            # Retry on transient "service unavailable" errors that Kalshi surfaces
+            # as 401 authentication_error (backend routing failure, not a bad key).
+            if resp.status_code == 401:
+                try:
+                    detail = resp.json().get("error", {}).get("details", "")
+                except Exception:
+                    detail = ""
+                if "service unavailable" in detail and attempt < 3:
+                    logger.warning(
+                        "Kalshi POST %s – transient 401 (service unavailable) "
+                        "waiting %.0fs (attempt %d/4)",
+                        path, backoff, attempt + 1,
+                    )
+                    time.sleep(backoff)
+                    backoff *= 2
+                    continue
+            if not resp.ok:
+                logger.error(
+                    "Kalshi POST %s HTTP %d – key=%s… body: %s",
+                    path, resp.status_code,
+                    self._api_key[:8],
+                    resp.text[:500],
+                )
+            resp.raise_for_status()
+            return resp.json()
+        # All retries exhausted
+        last_resp.raise_for_status()
+        return last_resp.json()  # unreachable
 
     def _delete(self, path: str) -> Any:
         headers = self._sign("DELETE", self._path_prefix + path)
