@@ -288,15 +288,15 @@ class ResolutionBot:
             )
             return None
 
-        # Stale-price guard: fetch the live order-book mid-price and verify it
-        # hasn't drifted far from the scanner price used to generate the signal.
-        # The Kalshi bulk /markets endpoint often returns stale yes_bid/yes_ask
-        # (e.g. 49/50 by default) while the real order book is at 0.99 or 0.01.
+        # Stale-price guard: fetch the live order book and verify the scanner
+        # price hasn't drifted far from reality.  The Kalshi bulk /markets
+        # endpoint often returns stale yes_bid/yes_ask (e.g. 49/50 by default)
+        # while the real order book is at 0.99 or 0.01.
         # If the scanner price is stale, recalculate the gap at the live price:
         #   - Gap disappears  → was a stale-data artifact, skip
         #   - Gap still real  → update signal to live price and proceed
-        live_price = self._get_current_price(market)
-        if live_price is None:
+        ob_live = self._get_live_book(market)
+        if ob_live is None:
             # Empty order book — scanner price is unverifiable. Placing an order
             # based on stale bulk-API data (e.g. Kalshi's default yes_bid=99)
             # creates unfillable limit orders. Skip entirely.
@@ -306,6 +306,7 @@ class ResolutionBot:
                 mid, signal.target_price,
             )
             return None
+        live_price = ob_live.mid_price
         drift = abs(live_price - signal.target_price)
         if drift > STALE_PRICE_THRESHOLD:
             gt_prob = (
@@ -361,12 +362,48 @@ class ResolutionBot:
             logger.info("ResolutionBot: SKIP %s – size too small ($%.2f)", mid, size_usd)
             return None
 
+        # Determine taker limit price from the live order book.
+        #
+        # Using signal.target_price (the scanner mid) as the limit creates
+        # resting orders whenever the spread is non-zero — the mid is always
+        # below the ask.  A market that drifted only 8¢ in YES-space (below
+        # the 12¢ stale-price threshold) can be 8× wrong in NO-price space
+        # near 0%/100%, producing 1¢ NO bids that never fill.
+        #
+        # Fix: bid at the live ask (BUY_YES) or live bid (BUY_NO) so the
+        # order crosses the spread and executes as a taker immediately.
+        if signal.action == "buy_yes":
+            limit_price = ob_live.best_yes_ask
+            if limit_price is None:
+                logger.info(
+                    "ResolutionBot: SKIP %s – no YES ask in order book "
+                    "(no sellers to fill against)", mid
+                )
+                return None
+        else:
+            # BUY_NO: order.price is the YES price field for Kalshi.
+            # Using best_yes_bid places our NO bid at (1 - best_yes_bid),
+            # which exactly matches the current NO ask → taker fill.
+            limit_price = ob_live.best_yes_bid
+            if limit_price is None:
+                logger.info(
+                    "ResolutionBot: SKIP %s – no YES bid in order book "
+                    "(no NO sellers to fill against)", mid
+                )
+                return None
+        logger.info(
+            "ResolutionBot: limit_price=%.4f (action=%s ask=%.4f bid=%.4f) for %s",
+            limit_price, signal.action,
+            ob_live.best_yes_ask or 0.0, ob_live.best_yes_bid or 0.0, mid,
+        )
+
         # Reserve capital
         if not self._bankroll.reserve(mid, size_usd):
             return None
 
         # Place order
-        order_id = self._place_order(market, signal, size_usd, fee)
+        order_id = self._place_order(market, signal, size_usd, fee,
+                                     limit_price=limit_price)
 
         # In live mode _place_order returns None when the order fails and has
         # already released the bankroll reserve.  Do NOT add a phantom position.
@@ -412,12 +449,16 @@ class ResolutionBot:
         }
 
     def _place_order(
-        self, market: Market, signal: GapSignal, size_usd: float, fee: float
+        self, market: Market, signal: GapSignal, size_usd: float, fee: float,
+        limit_price: Optional[float] = None,
     ) -> Optional[str]:
+        # limit_price: the taker limit (live ask for YES, live bid for NO).
+        # Falls back to signal.target_price only when not provided (dry-run log).
+        order_price = limit_price if limit_price is not None else signal.target_price
         if self._dry_run:
             logger.info(
                 "ResolutionBot [DRY]: %s %s @ %.4f size=$%.2f fee=%.4f",
-                signal.action, market.market_id, signal.target_price, size_usd, fee,
+                signal.action, market.market_id, order_price, size_usd, fee,
             )
             return f"dry_{market.market_id}_{int(time.time())}"
 
@@ -430,7 +471,7 @@ class ResolutionBot:
             market_id=market.market_id,
             platform=market.platform,
             side=side,
-            price=signal.target_price,
+            price=order_price,
             size_usd=size_usd,
         )
         try:
@@ -593,6 +634,21 @@ class ResolutionBot:
                 "order_id": rec.order_id,
             })
         return result
+
+    def _get_live_book(self, market):
+        """
+        Fetch the live order book.  Returns None if the book is empty
+        (mid_price is None) or if the fetch fails — both are treated as
+        'unverifiable price, skip the trade'.
+        """
+        try:
+            client = self._poly if market.platform == "polymarket" else self._kalshi
+            if not client:
+                return None
+            ob = client.get_order_book(market.market_id)
+            return ob if ob.mid_price is not None else None
+        except Exception:
+            return None
 
     def _get_current_price(self, market: Market) -> Optional[float]:
         try:
