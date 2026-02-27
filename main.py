@@ -111,8 +111,12 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
     halt_s  = "  [HALTED]" if halted else ""
     cycle_s = f"   cycle #{cycle_num}" if cycle_num else ""
 
-    # Annotation tags
-    signal_tag = "  <-- potential trades" if signals and not trades else ""
+    # Annotation tags — signals means gap candidates (confidence gate may still block them)
+    confidence_blocked = result.get("confidence_blocked", 0)
+    signal_tag = "  <-- would execute!" if signals and not trades else (
+        f"  <-- {confidence_blocked} blocked by confidence gate"
+        if confidence_blocked and not signals and not trades else ""
+    )
     trade_tag  = "  <-- trades executed!" if trades else ""
 
     # Per-platform balance strings (always 10 chars wide, aligned)
@@ -124,7 +128,7 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
     print(sep)
     print(f"  Markets scanned          {scanned:>5}")
     print(f"  Cross-platform pairs     {pairs:>5}")
-    print(f"  Signals found            {signals:>5}{signal_tag}")
+    print(f"  Gap signals detected     {signals:>5}{signal_tag}")
     print(f"  Trades fired             {trades:>5}{trade_tag}")
     print(f"  Open positions           {positions:>5}")
     print(f"  Exits triggered          {exits:>5}")
@@ -183,7 +187,7 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
             if len(q) > 80:
                 print(f"    {q[80:]}")
         print()
-    elif show_names and not trade_details and not (dry_run and signal_details):
+    elif show_names and not trade_details and not (dry_run and signal_details) and not (dry_run and confidence_blocked):
         sample = result.get("scanned_sample", [])
         if sample:
             print(f"\n  No trades – first {len(sample)} markets scanned:")
