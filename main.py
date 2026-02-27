@@ -154,8 +154,18 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
     # see what the bot is considering even when 0 orders are placed.
     dry_run = cfg.bot.dry_run
     signal_details = result.get("signals_detail", [])
+    confidence_blocked = result.get("confidence_blocked", 0)
+    if dry_run and confidence_blocked and not signal_details and not trade_details:
+        # Signals were detected but all blocked by the confidence gate –
+        # show a clear summary instead of silently printing nothing.
+        total = result.get("signals_flagged", confidence_blocked)
+        print(
+            f"\n  {total} gap signal(s) detected, all blocked by confidence gate"
+            f" (time-decay or source quality below 0.80 threshold)."
+        )
+        print()
     if dry_run and signal_details and not trade_details:
-        print(f"\n  Potential trades (signals found, dry-run – not executed):")
+        print(f"\n  Potential trades (would execute in live mode):")
         print(f"  {'─' * (_SEP_W - 2)}")
         for d in signal_details:
             action  = d["action"].replace("_", " ").upper()

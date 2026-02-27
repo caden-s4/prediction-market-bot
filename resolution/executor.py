@@ -191,6 +191,38 @@ class ResolutionBot:
         all_signals = cross_signals + info_signals
         self._last_signals = all_signals  # expose for dry-run display / CLI
         summary["signals_flagged"] = len(all_signals)
+        logger.info(
+            "ResolutionBot: %d cross-platform + %d info signals = %d total",
+            len(cross_signals), len(info_signals), len(all_signals),
+        )
+
+        # ── Step 3b: Pre-screen through confidence gate for the display list ──
+        # signals_detail must only contain signals that would actually execute so
+        # the dry-run "Potential trades" display is accurate.  _try_execute re-runs
+        # the full gate (stale-price, fee recheck, etc.) — this pre-screen uses the
+        # already-cached GT so no extra API calls are made.
+        display_signals: List[GapSignal] = []
+        confidence_blocked = 0
+        for signal in all_signals:
+            mid = signal.market_to_buy.market_id
+            if (
+                mid in self._positions
+                or self._exclusions.is_excluded(signal.market_to_buy.platform, mid)
+            ):
+                continue
+            gt = signal.ground_truth_result  # cached; no re-fetch here
+            score = self._confidence.score(signal.market_to_buy, gt, signal)
+            if score.passes:
+                display_signals.append(signal)
+            else:
+                confidence_blocked += 1
+
+        summary["confidence_blocked"] = confidence_blocked
+        logger.info(
+            "ResolutionBot: confidence gate: %d pass, %d blocked",
+            len(display_signals), confidence_blocked,
+        )
+
         summary["signals_detail"] = [
             {
                 "question":     s.market_to_buy.question,
@@ -209,12 +241,8 @@ class ResolutionBot:
                     else "cross-platform"
                 ),
             }
-            for s in all_signals
+            for s in display_signals
         ]
-        logger.info(
-            "ResolutionBot: %d cross-platform + %d info signals = %d total",
-            len(cross_signals), len(info_signals), len(all_signals),
-        )
 
         # ── Step 4 + 5: Confidence score and execute ──────────────────────
         for signal in all_signals:
