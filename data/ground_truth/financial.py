@@ -103,6 +103,24 @@ _DETECT_KEYWORDS = tuple(_INSTRUMENT_MAP.keys()) + (
 _PRICE_CACHE: dict = {}
 _CACHE_TTL = 60  # one request per symbol per minute max
 
+# Time-decay for financial information signals.
+#
+# Spot/futures prices are highly predictive of settlement in the final hour
+# but become unreliable over multi-hour horizons — NQ can move 3-5% in a day.
+# We reduce source confidence linearly as hours-to-resolution grows, capping it
+# at 0.55 beyond _MAX_SIGNAL_HOURS.  Because ConfidenceScorer requires both
+# dimensions ≥ 0.80, no financial signal fires once time_confidence < 0.80.
+#
+# Calibration:
+#   ≤ 1h  → 1.00  (spot ≈ settlement; full confidence)
+#   2h    → 0.91  (fires for any spatial-confident signal)
+#   3h    → 0.82  (fires only for ≥5%-margin signals)
+#   4h    → 0.73  (BLOCKED — time_conf < 0.80 gate)
+#   8h+   → 0.55  (BLOCKED — floor)
+_MAX_SIGNAL_HOURS: float = 8.0
+_FULL_SIGNAL_HOURS: float = 1.0
+_TIME_CONF_FLOOR: float = 0.55
+
 # Regex to extract threshold and direction from a market question.
 _ABOVE_RE = re.compile(
     r"(?:above|over|exceed|higher than|greater than|close above|settle above|at least)\s*"
@@ -119,6 +137,13 @@ _BELOW_RE = re.compile(
 # threshold — the -B{val} Kalshi suffix means "bucket at val", NOT "below val".
 _RANGE_RE = re.compile(
     r"\$\s*([\d,]+\.?\d*)\s*[-–]\s*\$?\s*([\d,]+\.?\d*)",
+    re.IGNORECASE,
+)
+# Detects "between X and Y" / "from X to Y" phrasing WITHOUT a leading dollar sign
+# (e.g. "Will the Nasdaq-100 be between 25500 and 25599.99 at 4pm?").
+# These are range/bucket markets that cannot be handled with a single threshold.
+_BETWEEN_RE = re.compile(
+    r"\b(?:between|from)\s+\$?\s*[\d,]+\.?\d*\s+(?:and|to)\s+\$?\s*[\d,]+\.?\d*",
     re.IGNORECASE,
 )
 
@@ -162,7 +187,7 @@ class FinancialDataSource(DataSource):
                 )
                 return None
 
-            ground_truth_prob, confidence = self._compute_prob_and_confidence(
+            ground_truth_prob, spatial_conf = self._compute_prob_and_confidence(
                 current_price, threshold, is_above
             )
             if ground_truth_prob is None:
@@ -172,6 +197,21 @@ class FinancialDataSource(DataSource):
                     current_price, threshold, market.market_id,
                 )
                 return None
+
+            # Time-decay: reduce confidence for markets far from resolution.
+            # Spot/futures prices are not reliable predictors of settlement when
+            # hours_to_resolution is large — so we cap source confidence using a
+            # linear decay.  Signals with time_conf < 0.80 won't clear the
+            # ConfidenceScorer threshold and will be silently skipped.
+            time_conf = self._time_confidence(market.hours_to_resolution)
+            confidence = min(spatial_conf, time_conf)
+            if time_conf < 1.0:
+                logger.debug(
+                    "FinancialSource: time-adjusted confidence %.2f "
+                    "(spatial=%.2f, time=%.2f, hours_left=%.1f) for %s",
+                    confidence, spatial_conf, time_conf,
+                    market.hours_to_resolution, market.market_id,
+                )
 
             margin_pct = abs(current_price - threshold) / abs(threshold) * 100
             direction_str = "above" if is_above else "below"
@@ -196,8 +236,11 @@ class FinancialDataSource(DataSource):
                 reasoning=(
                     f"{instrument_name}: current={current_price:.4f}, "
                     f"threshold={threshold:.4f} ({direction_str}), "
-                    f"margin={margin_pct:.1f}%. "
-                    f"→ {outcome_str} confidence={confidence:.2f}"
+                    f"margin={margin_pct:.1f}%, "
+                    f"hours_left={market.hours_to_resolution:.1f}. "
+                    f"→ {outcome_str} "
+                    f"confidence={confidence:.2f} "
+                    f"(spatial={spatial_conf:.2f} time={time_conf:.2f})"
                 ),
             )
 
@@ -273,9 +316,11 @@ class FinancialDataSource(DataSource):
         for range contracts, NOT "below val" — misreading it as "below" caused
         WTI bucket markets to receive a wrong ground-truth direction.
         """
-        # Bail out early on range markets: "$X-$Y" in the question means this is
-        # a price-bucket contract.  We have no valid single-threshold logic for it.
-        if _RANGE_RE.search(question):
+        # Bail out early on range/bucket markets: "$X-$Y" or "between X and Y"
+        # cannot be reduced to a single above/below threshold.  The Kalshi -B{val}
+        # suffix means "bucket at val" not "below val" — misreading it produces
+        # wildly wrong signals (e.g. BUY YES on a $100-range band 20h from close).
+        if _RANGE_RE.search(question) or _BETWEEN_RE.search(question):
             logger.debug(
                 "FinancialSource: price-range question detected, skipping %s", market_id
             )
@@ -301,6 +346,27 @@ class FinancialDataSource(DataSource):
             return _parse_float(m.group(1)), False  # B = "below bucket"
 
         return None, True
+
+    @staticmethod
+    def _time_confidence(hours_to_resolution: float) -> float:
+        """
+        Returns how much we trust the current spot price as a predictor of the
+        settlement price given the time remaining.
+
+        Full confidence (1.0) within the final hour; linearly decays to
+        _TIME_CONF_FLOOR at _MAX_SIGNAL_HOURS.  The floor (0.55) sits below the
+        ConfidenceScorer threshold (0.80), ensuring no financial signal fires
+        beyond _MAX_SIGNAL_HOURS regardless of how large the spatial margin is.
+        """
+        if hours_to_resolution <= _FULL_SIGNAL_HOURS:
+            return 1.0
+        if hours_to_resolution >= _MAX_SIGNAL_HOURS:
+            return _TIME_CONF_FLOOR
+        frac = (
+            (hours_to_resolution - _FULL_SIGNAL_HOURS)
+            / (_MAX_SIGNAL_HOURS - _FULL_SIGNAL_HOURS)
+        )
+        return round(1.0 - frac * (1.0 - _TIME_CONF_FLOOR), 4)
 
     def _compute_prob_and_confidence(
         self, current: float, threshold: float, is_above: bool
