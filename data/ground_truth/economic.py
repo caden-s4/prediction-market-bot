@@ -17,6 +17,7 @@ Confidence: 0.95 for published data releases; 0.0 before release.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
@@ -29,7 +30,40 @@ from .base import DataSource, GroundTruthResult, SourceType
 logger = logging.getLogger(__name__)
 
 _FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv"
+_FRED_API_BASE = "https://api.stlouisfed.org/fred"
 _TIMEOUT = 10
+
+# Optional FRED API key — required for the release calendar check.
+# Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html
+_FRED_API_KEY: str = os.environ.get("FRED_API_KEY", "")
+
+# Per-series staleness windows: (fresh_hours, max_hours).
+# fresh_hours  → confidence 0.95
+# max_hours    → confidence 0.80
+# > max_hours  → None (too stale)
+#
+# The defaults (24h fresh, 168h/7d max) are chosen for monthly releases.
+# Weekly series (ICSA) have tighter windows; quarterly series (GDP) have
+# wider ones so we don't reject data that's legitimately 60+ days old.
+_SERIES_STALENESS: Dict[str, Tuple[int, int]] = {
+    # Daily / near-real-time
+    "DFF":      (24,    72),   # Fed Funds Rate: daily; stale after 3 days
+    # Weekly
+    "ICSA":     (24,   168),   # Initial Claims: weekly; stale after 7 days
+    # Monthly
+    "UNRATE":   (24,  1080),   # Unemployment: monthly; allow up to 45 days
+    "PAYEMS":   (24,   744),   # Nonfarm Payroll: monthly
+    "CPIAUCSL": (24,   744),   # CPI: monthly
+    "PPIACO":   (24,   744),   # PPI: monthly
+    "PCE":      (24,   744),   # PCE: monthly
+    "PCEPILFE": (24,   744),   # Core PCE: monthly
+    "RSAFS":    (24,   744),   # Retail Sales: monthly
+    "HOUST":    (24,   744),   # Housing Starts: monthly
+    "BOPGSTB":  (24,  1440),   # Trade Balance: monthly, often 60-day lag
+    "NAPM":     (24,   744),   # ISM PMI: monthly
+    # Quarterly
+    "GDP":      (24,  2208),   # GDP: quarterly; allow up to 92 days
+}
 
 # Map keyword → (FRED series ID, human name)
 _INDICATOR_MAP: Dict[str, Tuple[str, str]] = {
@@ -84,15 +118,27 @@ class EconomicDataSource(DataSource):
             if latest_value is None:
                 return None
 
+            # Suppress the signal if the next scheduled release is within 24 hours.
+            # Trading on 6-day-old data the day before the monthly release is
+            # pointless — the market has already anticipated the update.
+            if self._next_release_within_hours(series_id, 24):
+                logger.info(
+                    "EconSource: %s has a scheduled release within 24h — "
+                    "suppressing stale signal for %s",
+                    series_id, market.market_id,
+                )
+                return None
+
             # Determine if the latest release is "fresh" (within the market window)
             threshold = self._extract_threshold(market.question, indicator_key)
             ground_truth_prob = self._compute_prob(latest_value, threshold, market)
-            confidence = self._compute_confidence(latest_date, market)
+            confidence = self._compute_confidence(latest_date, market, series_id)
 
             if confidence is None:
+                fresh_h, max_h = _SERIES_STALENESS.get(series_id, (24, 168))
                 logger.debug(
-                    "EconSource: %s data from %s is older than 7 days — skipping %s",
-                    series_id, latest_date, market.market_id,
+                    "EconSource: %s data from %s exceeds max staleness (%dh) — skipping %s",
+                    series_id, latest_date, max_h, market.market_id,
                 )
                 return None
 
@@ -227,15 +273,20 @@ class EconomicDataSource(DataSource):
             question, re.IGNORECASE,
         ))
 
-    def _compute_confidence(self, latest_date: Optional[str], market: Market) -> Optional[float]:
+    def _compute_confidence(
+        self,
+        latest_date: Optional[str],
+        market: Market,
+        series_id: str = "",
+    ) -> Optional[float]:
         """
         Return confidence based on how recently the data was released, or None
         if the data is too stale to trade on.
 
-        Windows:
-          < 24 hours  → 0.95  (data released today — maximum freshness)
-          < 7 days    → 0.80  (recent release cycle, still relevant)
-          ≥ 7 days    → None  (market has already priced this in; skip)
+        Per-series windows (from _SERIES_STALENESS) override the defaults:
+          < fresh_hours → 0.95  (data released very recently)
+          < max_hours   → 0.80  (within the relevant release cycle)
+          ≥ max_hours   → None  (market has already priced this in; skip)
 
         Exception: questions that reference a specific historical period
         ("in Q3 2024", "for fiscal year 2022") are about a fixed past value
@@ -255,11 +306,58 @@ class EconomicDataSource(DataSource):
             )
             now = datetime.now(timezone.utc)
             hours_since = (now - release_dt).total_seconds() / 3600
-            if hours_since < 24:
+
+            # Use series-specific window if available, otherwise fall back to defaults
+            fresh_hours, max_hours = _SERIES_STALENESS.get(series_id, (24, 168))
+
+            if hours_since < fresh_hours:
                 return 0.95
-            if hours_since < 168:  # 7 days
+            if hours_since < max_hours:
                 return 0.80
-            # Older than 7 days: almost certainly priced in by now — don't trade
             return None
         except Exception:
             return None
+
+    def _next_release_within_hours(self, series_id: str, hours: int = 24) -> bool:
+        """
+        Return True if the next scheduled FRED release for this series is within
+        `hours` hours.  Requires a FRED API key (FRED_API_KEY env var).
+
+        Without a key this always returns False (suppression is disabled).
+        The FRED release calendar API:
+          GET /fred/series/release/dates?series_id=X&api_key=KEY&sort_order=desc
+        """
+        if not _FRED_API_KEY:
+            return False
+        try:
+            resp = requests.get(
+                f"{_FRED_API_BASE}/series/release/dates",
+                params={
+                    "series_id": series_id,
+                    "api_key": _FRED_API_KEY,
+                    "file_type": "json",
+                    "sort_order": "desc",
+                    "limit": 5,
+                    "include_release_dates_with_no_data": "false",
+                },
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+            release_dates = resp.json().get("release_dates", [])
+            now = datetime.now(timezone.utc)
+            for rd in release_dates:
+                date_str = rd.get("date", "")
+                if not date_str:
+                    continue
+                try:
+                    release_dt = datetime.strptime(date_str, "%Y-%m-%d").replace(
+                        tzinfo=timezone.utc
+                    )
+                    hours_until = (release_dt - now).total_seconds() / 3600
+                    if 0 < hours_until < hours:
+                        return True
+                except ValueError:
+                    continue
+        except Exception as exc:
+            logger.debug("EconSource: FRED release calendar check failed: %s", exc)
+        return False

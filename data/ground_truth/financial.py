@@ -29,9 +29,15 @@ import logging
 import os
 import re
 import time
+from datetime import date, datetime
 from typing import Dict, Optional, Tuple
 
 import requests
+
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:          # Python < 3.9
+    from backports.zoneinfo import ZoneInfo  # type: ignore
 
 from data.markets.base import Market
 from .base import DataSource, GroundTruthResult, SourceType
@@ -154,6 +160,20 @@ _DETECT_KEYWORDS = tuple(_INSTRUMENT_MAP.keys()) + (
 _PRICE_CACHE: dict = {}
 _CACHE_TTL = 60  # one request per symbol per minute max
 
+# Futures symbols that roll quarterly (March/June/September/December).
+# Around the rollover window (2nd–3rd week of the expiry month) the
+# continuous-contract price can gap at the changeover.
+_FUTURES_SYMBOLS = frozenset({"NQ=F", "ES=F", "YM=F", "GC=F", "CL=F", "NG=F"})
+_ROLLOVER_MONTHS = frozenset({3, 6, 9, 12})
+
+# Regex that identifies questions specifically about a closing/settlement price.
+# These should only trade when the official session is open; pre-market prices
+# don't predict what the close will be.
+_CLOSE_QUESTION_RE = re.compile(
+    r"\b(close|closing price|settlement price|end of day|eod|4[:\s]?00\s*(?:pm|et))\b",
+    re.IGNORECASE,
+)
+
 # Time-decay for financial information signals.
 #
 # Spot/futures prices are highly predictive of settlement in the final hour
@@ -229,6 +249,18 @@ class FinancialDataSource(DataSource):
             if current_price is None:
                 return None
 
+            # Close-price questions need the official session price, not
+            # extended-hours quotes.  Before 9:30am ET the "current price" is
+            # a pre-market print that has nothing to do with where the stock
+            # will actually close — skip rather than guess.
+            if self._is_close_question(market.question) and not self._us_equity_session_open():
+                logger.debug(
+                    "FinancialSource: %s is a close-price question but market is "
+                    "outside regular hours — pre-market price unreliable, skipping",
+                    market.market_id,
+                )
+                return None
+
             threshold, is_above = self._extract_threshold_and_direction(
                 market.question, market.market_id
             )
@@ -267,6 +299,14 @@ class FinancialDataSource(DataSource):
             margin_pct = abs(current_price - threshold) / abs(threshold) * 100
             direction_str = "above" if is_above else "below"
             outcome_str = "YES" if ground_truth_prob == 1.0 else "NO"
+            near_rollover = self._near_futures_rollover(symbol)
+            if near_rollover:
+                logger.warning(
+                    "FinancialSource: %s (%s) is within the quarterly rollover window "
+                    "— continuous-contract price may gap at contract changeover; "
+                    "flagged in raw_data",
+                    symbol, instrument_name,
+                )
             return GroundTruthResult(
                 ground_truth_prob=ground_truth_prob,
                 confidence=confidence,
@@ -283,6 +323,7 @@ class FinancialDataSource(DataSource):
                     "threshold": threshold,
                     "direction": direction_str,
                     "margin_pct": round(margin_pct, 2),
+                    "near_futures_rollover": near_rollover,
                 },
                 reasoning=(
                     f"{instrument_name}: current={current_price:.4f}, "
@@ -300,6 +341,48 @@ class FinancialDataSource(DataSource):
                 "FinancialSource: error for %s: %s", market.market_id, exc
             )
             return None
+
+    # ── Guard helpers ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_close_question(question: str) -> bool:
+        """True if the question is about a closing or settlement price."""
+        return bool(_CLOSE_QUESTION_RE.search(question))
+
+    @staticmethod
+    def _us_equity_session_open() -> bool:
+        """
+        True if US equity markets are currently in regular session (9:30–16:00 ET).
+
+        Pre-market prices are NOT a reliable predictor of the official close price
+        — the session hasn't happened yet.  Post-market prices (after 16:00 ET)
+        are the settled close and ARE usable, so we only block pre-market.
+        """
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if now_et.weekday() >= 5:          # Saturday / Sunday
+            return False
+        t = (now_et.hour, now_et.minute)
+        return (9, 30) <= t < (16, 0)
+
+    @staticmethod
+    def _near_futures_rollover(symbol: str) -> bool:
+        """
+        True if within the typical quarterly rollover window for E-mini futures.
+
+        Futures roll during the 2nd–3rd week of March/June/September/December.
+        Around this window Yahoo Finance's continuous-contract price (NQ=F etc.)
+        can gap as the front month changes, which could look like a massive price
+        move and flip our ground_truth_prob from 1.0 to 0.0 spuriously.
+        We flag the result rather than blocking it — the gap size still needs to
+        be ≥5% to trade, which filters most rollover-induced noise.
+        """
+        if symbol not in _FUTURES_SYMBOLS:
+            return False
+        today = date.today()
+        if today.month not in _ROLLOVER_MONTHS:
+            return False
+        week_of_month = (today.day - 1) // 7 + 1   # 1-indexed
+        return week_of_month in (2, 3)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 

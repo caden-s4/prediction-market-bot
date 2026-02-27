@@ -13,18 +13,22 @@ signals
 
 orders
     id, ts, platform, market_id, side, expected_price, size_usd,
-    order_id, status
+    order_id, status, fee_rate_bps, fee_paid_usd
 
 fills
     id, order_id, ts, fill_price, fill_size, slippage
 
 pnl
     id, ts, market_id, platform, entry_price, exit_price,
-    size_usd, pnl_usd, holding_seconds
+    size_usd, pnl_usd, holding_seconds, entry_fee_usd, exit_fee_usd
 
 summary_snapshots
     id, ts, bankroll, total_exposure, open_positions,
     daily_pnl, total_pnl
+
+order_book_snapshots
+    id, ts, platform, market_id, best_yes_ask, best_yes_bid,
+    bids_json, asks_json
 
 All writes are synchronous and use WAL mode for safe concurrent access.
 """
@@ -86,7 +90,9 @@ class EventDB:
                     expected_price REAL,
                     size_usd       REAL,
                     order_id       TEXT,
-                    status         TEXT
+                    status         TEXT,
+                    fee_rate_bps   INTEGER DEFAULT 0,
+                    fee_paid_usd   REAL    DEFAULT 0.0
                 );
 
                 CREATE TABLE IF NOT EXISTS fills (
@@ -107,7 +113,20 @@ class EventDB:
                     exit_price       REAL,
                     size_usd         REAL,
                     pnl_usd          REAL,
-                    holding_seconds  REAL
+                    holding_seconds  REAL,
+                    entry_fee_usd    REAL    DEFAULT 0.0,
+                    exit_fee_usd     REAL    DEFAULT 0.0
+                );
+
+                CREATE TABLE IF NOT EXISTS order_book_snapshots (
+                    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts             TEXT    NOT NULL,
+                    platform       TEXT,
+                    market_id      TEXT,
+                    best_yes_ask   REAL,
+                    best_yes_bid   REAL,
+                    bids_json      TEXT,
+                    asks_json      TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS summary_snapshots (
@@ -124,6 +143,8 @@ class EventDB:
                 CREATE INDEX IF NOT EXISTS idx_signals_market   ON signals(market_id);
                 CREATE INDEX IF NOT EXISTS idx_orders_ts        ON orders(ts);
                 CREATE INDEX IF NOT EXISTS idx_pnl_ts           ON pnl(ts);
+                CREATE INDEX IF NOT EXISTS idx_ob_snapshots_ts  ON order_book_snapshots(ts);
+                CREATE INDEX IF NOT EXISTS idx_ob_snapshots_mkt ON order_book_snapshots(market_id);
             """)
 
     def _conn(self) -> sqlite3.Connection:
@@ -168,17 +189,20 @@ class EventDB:
         size_usd: float,
         order_id: Optional[str] = None,
         status: str = "SUBMITTED",
+        fee_rate_bps: int = 0,
+        fee_paid_usd: float = 0.0,
     ) -> int:
         """Log an outbound order.  Returns row ID."""
         with self._conn() as conn:
             cur = conn.execute(
                 """INSERT INTO orders
                    (ts, platform, market_id, side, expected_price,
-                    size_usd, order_id, status)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                    size_usd, order_id, status, fee_rate_bps, fee_paid_usd)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
                     self._now(), platform, market_id, side,
                     expected_price, size_usd, order_id, status,
+                    fee_rate_bps, fee_paid_usd,
                 ),
             )
             return cur.lastrowid
@@ -234,24 +258,54 @@ class EventDB:
         size_usd: float,
         pnl_usd: float,
         holding_seconds: float,
+        entry_fee_usd: float = 0.0,
+        exit_fee_usd: float = 0.0,
     ) -> None:
         """Log a closed trade's P&L."""
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO pnl
                    (ts, market_id, platform, entry_price, exit_price,
-                    size_usd, pnl_usd, holding_seconds)
-                   VALUES (?,?,?,?,?,?,?,?)""",
+                    size_usd, pnl_usd, holding_seconds, entry_fee_usd, exit_fee_usd)
+                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
                 (
                     self._now(), market_id, platform,
                     entry_price, exit_price,
                     size_usd, pnl_usd, holding_seconds,
+                    entry_fee_usd, exit_fee_usd,
                 ),
             )
         logger.info(
-            "EventDB: PnL closed %s %s pnl=$%.2f hold=%.0fs",
+            "EventDB: PnL closed %s %s pnl=$%.2f hold=%.0fs fees=$%.4f",
             platform, market_id, pnl_usd, holding_seconds,
+            entry_fee_usd + exit_fee_usd,
         )
+
+    # ── Order book snapshot logging ────────────────────────────────────────────
+
+    def log_order_book_snapshot(
+        self,
+        platform: str,
+        market_id: str,
+        best_yes_ask: Optional[float],
+        best_yes_bid: Optional[float],
+        bids: list,
+        asks: list,
+    ) -> None:
+        """Log an order book snapshot for post-trade analysis."""
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT INTO order_book_snapshots
+                   (ts, platform, market_id, best_yes_ask, best_yes_bid,
+                    bids_json, asks_json)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (
+                    self._now(), platform, market_id,
+                    best_yes_ask, best_yes_bid,
+                    json.dumps(bids, default=str),
+                    json.dumps(asks, default=str),
+                ),
+            )
 
     # ── Portfolio snapshots ────────────────────────────────────────────────────
 

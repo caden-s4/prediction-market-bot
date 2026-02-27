@@ -161,6 +161,10 @@ class Order:
     filled_size: Optional[float] = None
     created_at: datetime = field(default_factory=datetime.utcnow)
     dry_run: bool = False
+    # Polymarket EIP-712: feeRateBps MUST be included in the signed payload.
+    # Omitting it causes silent order rejection on fee-enabled markets.
+    # Set this from FeeCache before calling place_order on Polymarket.
+    fee_rate_bps: int = 0
 
 
 class BaseMarketClient(ABC):

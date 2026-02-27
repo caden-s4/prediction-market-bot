@@ -45,6 +45,17 @@ logger = logging.getLogger(__name__)
 KELLY_FRACTION = 0.12             # 12% fractional Kelly (conservative for thin books)
 MAX_POSITION_FRACTION = 0.20      # hard cap: 20% of total bankroll per position
 
+# Do not enter new positions during the first 60 seconds after startup.
+# On restart the in-memory state is freshly loaded from disk but the
+# market scanner hasn't run yet — gap calculations in the first cycle may
+# use stale price data from the last run.  Position monitoring still runs
+# during this window so open positions are tracked from the first second.
+STARTUP_STABILIZATION_SECONDS = 60
+
+# Warn when a scan cycle takes more than 80% of the scan interval — it means
+# the VPS is struggling to keep up and the next cycle will start late.
+CYCLE_DURATION_WARN_FRACTION = 0.80
+
 # Max signals kept per (source_name, action) bucket.
 # Prevents correlated overexposure when a single data source (e.g. Yahoo Finance/NQ=F)
 # generates dozens of "Nasdaq below 27000" contracts all expressing the same bet.
@@ -131,6 +142,10 @@ class ResolutionBot:
         # Signals from the most recent cycle — used by get_last_signals() so
         # the dry-run summary and the 'signals' CLI command can display them.
         self._last_signals: List[GapSignal] = []
+        # Timestamp of when this instance was created — used by the startup
+        # stabilization guard to delay new trade entry until the first full
+        # scan cycle has completed and in-memory state is populated.
+        self._startup_time: float = time.time()
         self._load_positions()
         self._reconcile_with_exchange()
 
@@ -163,7 +178,30 @@ class ResolutionBot:
         }
 
         if self._bankroll.is_halted():
-            logger.warning("ResolutionBot: bankroll HALTED – skipping cycle")
+            logger.warning(
+                "ResolutionBot: bankroll HALTED – skipping new entries; "
+                "monitoring open positions"
+            )
+            exits = self._monitor_positions()
+            summary["exits_triggered"] = exits
+            elapsed = (time.monotonic() - cycle_start) * 1000
+            summary["cycle_ms"] = round(elapsed)
+            return summary
+
+        # Startup stabilization: skip new trade entry for the first
+        # STARTUP_STABILIZATION_SECONDS so in-memory state is fully populated
+        # before we scan for opportunities.  Position monitoring still runs.
+        startup_elapsed = time.time() - self._startup_time
+        if startup_elapsed < STARTUP_STABILIZATION_SECONDS:
+            logger.info(
+                "ResolutionBot: startup stabilization (%ds remaining) – "
+                "monitoring open positions only",
+                int(STARTUP_STABILIZATION_SECONDS - startup_elapsed),
+            )
+            exits = self._monitor_positions()
+            summary["exits_triggered"] = exits
+            elapsed = (time.monotonic() - cycle_start) * 1000
+            summary["cycle_ms"] = round(elapsed)
             return summary
 
         # ── Step 1: Scan ──────────────────────────────────────────────────
@@ -261,6 +299,13 @@ class ResolutionBot:
             "ResolutionBot: cycle done in %.0fms | %s",
             elapsed, summary,
         )
+        if elapsed > self._scan_interval * 1000 * CYCLE_DURATION_WARN_FRACTION:
+            logger.warning(
+                "ResolutionBot: cycle took %.0fms — exceeds %.0f%% of scan "
+                "interval (%ds). VPS may be under load; consider reducing scan "
+                "scope or upgrading instance.",
+                elapsed, CYCLE_DURATION_WARN_FRACTION * 100, self._scan_interval,
+            )
         return summary
 
     # ── Signal execution ──────────────────────────────────────────────────────
@@ -563,12 +608,18 @@ class ResolutionBot:
             return None
 
         side = Side.YES if signal.action == "buy_yes" else Side.NO
+        # Convert the taker fee rate to basis points for the Polymarket EIP-712
+        # signed payload.  fee is already in decimal (e.g. 0.02 = 2%), so
+        # multiply by 10_000 to get bps.  This must be in the Order so the
+        # CLOB client can include it in the signature — not just the request header.
+        fee_bps = int(round(fee * 10_000)) if market.platform == "polymarket" else 0
         order = Order(
             market_id=market.market_id,
             platform=market.platform,
             side=side,
             price=order_price,
             size_usd=size_usd,
+            fee_rate_bps=fee_bps,
         )
         try:
             result = client.place_order(order)

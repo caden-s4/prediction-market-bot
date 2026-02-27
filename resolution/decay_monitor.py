@@ -43,6 +43,13 @@ STOP_LOSS_MIN_HOURS = 4.0          # only apply stop-loss if > 4h to resolution
 APPROACH_THRESHOLD_HOURS = 0.25    # < 15 min to resolution = "approaching"
 HIGH_CONFIDENCE_HOLD_THRESHOLD = 0.90  # hold through resolution only if this confident
 
+# Time-based escalation: if a position is 30%+ adverse AND resolution is
+# approaching fast (< 45 min), escalate to an urgent stop-loss exit regardless
+# of the standard STOP_LOSS_MIN_HOURS gate.  With under 45 minutes left there
+# is almost no time to recover, so cutting the loss early is strictly better.
+URGENT_STOP_LOSS_RATIO = 0.30      # 30% adverse triggers escalation (softer threshold)
+URGENT_STOP_LOSS_MAX_HOURS = 0.75  # escalation only active when < 45 min to resolution
+
 
 class DecayAction(str, Enum):
     HOLD = "HOLD"
@@ -138,6 +145,24 @@ class DecayMonitor:
                     f"Position moved {abs(capture_ratio):.0%} adverse "
                     f"(${current_gain:.2f}) with {hours_left:.1f}h left. "
                     f"Data source may be wrong or market has new information."
+                ),
+            )
+
+        # ── Rule 2b: Time-based escalation (30% adverse, < 45 min) ────────
+        # With under 45 minutes to resolution there is almost no time to
+        # recover a 30%+ adverse move.  Escalate to an urgent exit regardless
+        # of the STOP_LOSS_MIN_HOURS gate that normally protects long-horizon
+        # positions from premature stop-outs.
+        if hours_left < URGENT_STOP_LOSS_MAX_HOURS and capture_ratio <= -URGENT_STOP_LOSS_RATIO:
+            return DecayDecision(
+                position=pos,
+                action=DecayAction.STOP_LOSS,
+                capture_ratio=capture_ratio,
+                current_gain_usd=current_gain,
+                reason=(
+                    f"Urgent exit: position {abs(capture_ratio):.0%} adverse "
+                    f"(${current_gain:.2f}) with only {hours_left * 60:.0f}min left — "
+                    f"insufficient time to recover; cutting loss."
                 ),
             )
 

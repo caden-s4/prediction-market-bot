@@ -23,6 +23,11 @@ Rate limiting
 -------------
 The manager enforces a minimum interval between repeated alerts of the same
 type to prevent flooding (configurable, default 5 minutes).
+
+When a message is suppressed by the rate limiter, the most recent version is
+queued.  On the next allowed send slot the queued message is delivered instead
+of being silently dropped.  This prevents important alerts (e.g. drawdown
+escalation) from disappearing entirely during a rate-limit window.
 """
 
 from __future__ import annotations
@@ -30,7 +35,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import requests
 
@@ -69,6 +74,9 @@ class AlertManager:
         self._drawdown_pct = daily_drawdown_pct
         self._edge_threshold = alert_edge_threshold
         self._last_alert_ts: Dict[str, float] = {}   # category → last send time
+        # Queue: category → (queued_at, message).  Holds the most recent
+        # rate-suppressed message so it can be delivered on the next allowed slot.
+        self._queued: Dict[str, Tuple[float, str]] = {}
 
         if not self._tg_token and not self._discord_url:
             logger.info(
@@ -141,12 +149,41 @@ class AlertManager:
     # ── Delivery layer ─────────────────────────────────────────────────────────
 
     def _send(self, category: str, message: str) -> None:
-        """Send to all configured channels, respecting rate limits."""
+        """
+        Send to all configured channels, respecting rate limits.
+
+        When rate-limited, the message is queued (replacing any previously
+        queued message for the same category).  On the next call when the
+        rate limit has cleared, the queued message is delivered first, then
+        the new message (if different) is sent immediately after.
+        """
         now = time.monotonic()
         last = self._last_alert_ts.get(category, 0.0)
+
         if now - last < _RATE_LIMIT_SECONDS:
-            logger.debug("Alert rate-limited: category=%s", category)
+            # Still within the rate-limit window — queue this message.
+            self._queued[category] = (now, message)
+            logger.debug(
+                "Alert rate-limited (queued): category=%s", category
+            )
             return
+
+        # Rate limit has cleared.  Deliver any previously queued message first.
+        queued = self._queued.pop(category, None)
+        if queued is not None:
+            _queued_at, queued_msg = queued
+            logger.info(
+                "ALERT [%s] (queued): %s", category,
+                queued_msg.replace("\n", " | "),
+            )
+            if self._tg_token and self._tg_chat:
+                self._send_telegram(queued_msg)
+            if self._discord_url:
+                self._send_discord(queued_msg)
+            # If the queued message IS the current message, we're done.
+            if queued_msg == message:
+                self._last_alert_ts[category] = now
+                return
 
         self._last_alert_ts[category] = now
         logger.info("ALERT [%s]: %s", category, message.replace("\n", " | "))
