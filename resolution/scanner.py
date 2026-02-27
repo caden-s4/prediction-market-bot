@@ -200,10 +200,11 @@ class ResolutionScanner:
         hours_left = market.hours_to_resolution   # uses fixed timezone-aware property
         if not (0 < hours_left <= window_hours):
             return "hours"
-        # Require at least 10 cents of room on both sides.  YES < 10¢ means we'd
-        # be buying NO at 90¢+ for a max gain of <10¢ — the absolute edge is too
-        # thin regardless of the probability gap (e.g. WTI bucket NO @ 94¢).
-        if not (0.10 < market.yes_price < 0.90):
+        # Only exclude markets that are literally fully resolved (price at 0 or 1).
+        # Near-certain prices (e.g. YES=0.93) are the core of the resolution-drift
+        # strategy: the real-world outcome is known but the market hasn't caught up.
+        # The gap detector's MIN_GAP_THRESHOLD enforces the minimum tradeable edge.
+        if not (0.0 < market.yes_price < 1.0):
             return "price"
         return None
 
