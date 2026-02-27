@@ -123,6 +123,39 @@ class ResolutionScanner:
         logger.info("ResolutionScanner: %d cross-platform pairs found", len(pairs))
         return pairs
 
+    def refresh_markets(self, markets: List[Market]) -> List[Market]:
+        """
+        Re-fetch current data for a set of already-known markets.
+
+        Uses the per-market ``get_market(market_id)`` endpoint where the
+        platform client supports it.  If the client returns ``None`` (endpoint
+        not implemented or market not found) the last-known ``Market`` object
+        is kept unchanged so callers always get a full list back.
+
+        Fails silently per market: a single failed refresh only loses freshness
+        for that market, not the whole batch.  The executor's ``_try_execute``
+        always re-validates prices from the live order book before placement, so
+        slightly stale prices here only affect the initial gap-detection pass.
+
+        Returns a list the same length as ``markets``.
+        """
+        refreshed: List[Market] = []
+        for market in markets:
+            client = self._kalshi if market.platform == "kalshi" else self._poly
+            if client is None:
+                refreshed.append(market)
+                continue
+            try:
+                fresh = client.get_market(market.market_id)
+                refreshed.append(fresh if fresh is not None else market)
+            except Exception as exc:
+                logger.debug(
+                    "ResolutionScanner: refresh failed for %s/%s: %s",
+                    market.platform, market.market_id, exc,
+                )
+                refreshed.append(market)
+        return refreshed
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _scan_platform(
