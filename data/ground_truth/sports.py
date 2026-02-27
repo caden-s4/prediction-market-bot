@@ -282,6 +282,30 @@ class SportsDataSource(DataSource):
         period = status.get("period", 1)
         clock_str = status.get("displayClock", "")
 
+        # Postponed, suspended, or cancelled games are NOT the same as pre-game.
+        # Returning None tells the caller to skip this market entirely rather
+        # than treating it as "scheduled" — the market resolution date may not
+        # shift with the game, so we cannot use pre-game logic here.
+        _suspended_keywords = ("postponed", "suspended", "cancelled", "canceled", "delayed")
+        if any(kw in description.lower() for kw in _suspended_keywords):
+            logger.info(
+                "SportsSource: %s game status is '%s' — treating as None (not pre-game)",
+                market.market_id, description,
+            )
+            return None
+
+        # Overtime: ESPN uses period > regulation total for OT periods.
+        # Log it explicitly so it's visible in debugging, but the formula
+        # handles OT correctly — progress is capped at 1.0 → time_weight = 2.0,
+        # maximally amplifying the lead signal.
+        sport_key_ot = sport_path.split("/")[0]
+        _total_periods_ot, _ = self._SPORT_TIMING.get(sport_key_ot, (4, 15))
+        if state == "in" and period > _total_periods_ot:
+            logger.debug(
+                "SportsSource: %s game in OT (period %d, regulation=%d)",
+                market.market_id, period, _total_periods_ot,
+            )
+
         competitions = event.get("competitions", [{}])
         comp = competitions[0] if competitions else {}
         competitors = comp.get("competitors", [])

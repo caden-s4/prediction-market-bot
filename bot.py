@@ -14,7 +14,10 @@ Shared infrastructure:
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Optional
+
+import requests
 
 from config import AppConfig
 from data.markets.kalshi import KalshiClient
@@ -137,6 +140,12 @@ class BotCoordinator:
 
         self._cycle_count: int = 0
 
+        # Check for system clock drift at startup.  A VPS whose clock is more
+        # than 2 seconds ahead of / behind real UTC will produce stale-looking
+        # timestamps, cause order-book freshness checks to mis-fire, and can
+        # trigger EIP-712 nonce rejections on Polymarket.
+        self._check_clock_drift()
+
         logger.info(
             "BotCoordinator ready | dry_run=%s bankroll=$%.2f",
             bc.dry_run, starting_bankroll,
@@ -189,6 +198,41 @@ class BotCoordinator:
             "polymarket_usd": poly_bal,
             "total_usd": total if (kalshi_bal is not None or poly_bal is not None) else None,
         }
+
+    def _check_clock_drift(self, warn_seconds: float = 2.0) -> None:
+        """
+        Compare system UTC time against worldtimeapi.org and warn if the
+        drift exceeds `warn_seconds`.  Failure to reach the NTP server is
+        logged at DEBUG and does not block startup.
+        """
+        try:
+            resp = requests.get(
+                "http://worldtimeapi.org/api/timezone/Etc/UTC",
+                timeout=5,
+            )
+            resp.raise_for_status()
+            server_dt_str = resp.json().get("datetime", "")
+            # worldtimeapi returns ISO-8601 with offset, e.g. "2024-01-15T12:34:56.789+00:00"
+            server_dt = datetime.fromisoformat(server_dt_str)
+            local_dt = datetime.now(timezone.utc)
+            drift_s = abs((local_dt - server_dt).total_seconds())
+            if drift_s > warn_seconds:
+                logger.warning(
+                    "BotCoordinator: CLOCK DRIFT detected — system clock is "
+                    "%.1fs off UTC (threshold=%.0fs). "
+                    "Run 'sudo ntpdate -u pool.ntp.org' to resync. "
+                    "Drift can cause order-book staleness false-positives and "
+                    "EIP-712 nonce rejections.",
+                    drift_s, warn_seconds,
+                )
+            else:
+                logger.info(
+                    "BotCoordinator: clock drift check OK (drift=%.2fs)", drift_s
+                )
+        except Exception as exc:
+            logger.debug(
+                "BotCoordinator: clock drift check skipped (NTP unreachable): %s", exc
+            )
 
     def _persist_state(self) -> None:
         summary = self._bankroll.summary()

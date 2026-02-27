@@ -282,6 +282,8 @@ class PolymarketClient(BaseMarketClient):
             logger.warning("CLOB order book failed for %s: %s", market_id, exc)
             return self._get_order_book_http(market_id)
 
+    _ORDERBOOK_STALE_SECONDS = 10  # discard snapshots older than this
+
     def _get_order_book_http(self, market_id: str) -> OrderBook:
         try:
             resp = self._session.get(
@@ -291,6 +293,31 @@ class PolymarketClient(BaseMarketClient):
             )
             resp.raise_for_status()
             data = resp.json()
+
+            # Validate the order book timestamp when the API returns one.
+            # Polymarket occasionally returns stale snapshots during high-
+            # volatility periods.  A snapshot older than 10 seconds should
+            # be treated as empty rather than as current market state.
+            book_ts = data.get("timestamp") or data.get("last_updated")
+            if book_ts:
+                try:
+                    book_age_s = (
+                        datetime.now(timezone.utc)
+                        - datetime.fromtimestamp(float(book_ts), tz=timezone.utc)
+                    ).total_seconds()
+                    if book_age_s > self._ORDERBOOK_STALE_SECONDS:
+                        logger.warning(
+                            "Polymarket: stale order book for %s (age=%.1fs > %ds threshold) "
+                            "— returning empty book",
+                            market_id, book_age_s, self._ORDERBOOK_STALE_SECONDS,
+                        )
+                        return OrderBook(
+                            market_id=market_id, platform=self.PLATFORM,
+                            yes_bids=[], yes_asks=[],
+                        )
+                except (ValueError, TypeError, OSError):
+                    pass  # Unparseable timestamp — proceed with the data
+
             bids = [
                 PriceLevel(price=float(b["price"]), size=float(b["size"]))
                 for b in sorted(data.get("bids", []), key=lambda x: -float(x["price"]))
@@ -336,16 +363,25 @@ class PolymarketClient(BaseMarketClient):
     def _place_order_clob(self, order: Order) -> Order:
         try:
             from py_clob_client.clob_types import OrderArgs, OrderType
+            # feeRateBps must be included in the EIP-712 signed payload.
+            # If it's omitted the signature is technically valid but the CLOB
+            # rejects the order on fee-enabled markets — no error is raised,
+            # the order is simply dropped.  Pass 0 only when no fee applies.
+            fee_bps = order.fee_rate_bps if order.fee_rate_bps > 0 else None
             args = OrderArgs(
                 token_id=order.market_id,
                 price=order.price,
                 size=order.size_usd,
                 side=order.side.value,
+                **({"fee_rate_bps": fee_bps} if fee_bps is not None else {}),
             )
             resp = self._clob_client.create_and_post_order(args)
             order.order_id = resp.get("orderID")
             order.status = OrderStatus.OPEN
-            logger.info("Polymarket order placed: %s", order.order_id)
+            logger.info(
+                "Polymarket order placed: %s (fee_rate_bps=%s)",
+                order.order_id, fee_bps,
+            )
         except Exception as exc:
             logger.error("Polymarket place_order failed: %s", exc)
         return order
