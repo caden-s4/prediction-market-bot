@@ -111,12 +111,18 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
     halt_s  = "  [HALTED]" if halted else ""
     cycle_s = f"   cycle #{cycle_num}" if cycle_num else ""
 
-    # Annotation tags — signals means gap candidates (confidence gate may still block them)
+    # Annotation tags — use post-gate signal count so "would execute" is only
+    # shown when signals actually passed the confidence gate.
     confidence_blocked = result.get("confidence_blocked", 0)
-    signal_tag = "  <-- would execute!" if signals and not trades else (
-        f"  <-- {confidence_blocked} blocked by confidence gate"
-        if confidence_blocked and not signals and not trades else ""
-    )
+    passed_gate = len(result.get("signals_detail", []))
+    if trades:
+        signal_tag = ""  # trade_tag covers this
+    elif passed_gate and not trades:
+        signal_tag = "  <-- would execute!"
+    elif confidence_blocked and not passed_gate:
+        signal_tag = f"  <-- {confidence_blocked} blocked by confidence gate"
+    else:
+        signal_tag = ""
     trade_tag  = "  <-- trades executed!" if trades else ""
 
     # Per-platform balance strings (always 10 chars wide, aligned)
