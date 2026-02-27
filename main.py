@@ -305,10 +305,14 @@ def main() -> None:
 
     coordinator = BotCoordinator(config=cfg)
 
+    # In dry-run mode always show trade details so it's obvious what would have
+    # fired.  --names also forces it in live mode (or overrides are additive).
+    show_names = args.names or cfg.bot.dry_run
+
     if args.once:
         logger.info("Running single scan cycle (--once mode)")
         result = coordinator.run_once()
-        _print_summary(result, cfg, show_names=args.names)
+        _print_summary(result, cfg, show_names=show_names)
     else:
         interval = cfg.bot.resolution_scan_interval_seconds
         logger.info("Starting continuous scan (interval=%ds)", interval)
@@ -319,7 +323,7 @@ def main() -> None:
             while True:
                 try:
                     result = coordinator.run_once()
-                    _print_summary(result, cfg, show_names=args.names)
+                    _print_summary(result, cfg, show_names=show_names)
                 except KeyboardInterrupt:
                     logger.info("Stopped by user")
                     break
