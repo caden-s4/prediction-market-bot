@@ -21,6 +21,8 @@ Sizing:
 from __future__ import annotations
 
 import logging
+import math
+import random
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -29,12 +31,14 @@ from typing import Dict, List, Optional
 
 from data.ground_truth.router import GroundTruthRouter
 from data.markets.base import BaseMarketClient, Market, Order, Side
+from data.markets.polymarket_ws import PolymarketWSManager
 from resolution.confidence import ConfidenceScorer
 from resolution.decay_monitor import (
     DecayAction, DecayMonitor, OpenResolutionPosition,
 )
 from resolution.gap_detector import GapDetector, GapSignal
 from resolution.scanner import ResolutionScanner
+from resolution.tier_registry import TierRegistry
 from shared.bankroll import Bankroll
 from shared.exclusion_list import ExclusionList
 from shared.fee_cache import FeeCache
@@ -45,6 +49,25 @@ logger = logging.getLogger(__name__)
 KELLY_FRACTION = 0.12             # 12% fractional Kelly (conservative for thin books)
 MAX_POSITION_FRACTION = 0.20      # hard cap: 20% of total bankroll per position
 
+# ── Tiered scan intervals ──────────────────────────────────────────────────────
+# The main loop sleeps TIER_1_INTERVAL between cycles.  Within each cycle,
+# only the tiers that are "due" based on elapsed time actually run.
+
+TIER_1_INTERVAL = 15       # seconds – active-watch markets (<2h remaining)
+TIER_2_INTERVAL = 300      # seconds – regular-scan markets (2–24h remaining)
+TIER_3_INTERVAL = 1800     # seconds – discovery markets (>24h remaining)
+
+# Full platform fetch to discover markets not yet in the registry.
+# Runs at the same cadence as Tier 3 (30 min) by default.
+DISCOVERY_INTERVAL = 1800  # seconds
+
+# Stagger API calls within a tier batch to avoid burst patterns that
+# look like abuse to rate limiters.
+TIER_REQUEST_STAGGER_S = 0.15    # base sleep between per-market calls
+TIER_STAGGER_JITTER_S  = 0.10    # max random addition to stagger
+
+# ── Other constants ────────────────────────────────────────────────────────────
+
 # Do not enter new positions during the first 60 seconds after startup.
 # On restart the in-memory state is freshly loaded from disk but the
 # market scanner hasn't run yet — gap calculations in the first cycle may
@@ -52,8 +75,8 @@ MAX_POSITION_FRACTION = 0.20      # hard cap: 20% of total bankroll per position
 # during this window so open positions are tracked from the first second.
 STARTUP_STABILIZATION_SECONDS = 60
 
-# Warn when a scan cycle takes more than 80% of the scan interval — it means
-# the VPS is struggling to keep up and the next cycle will start late.
+# Warn when a Tier-1 cycle takes more than 80% of TIER_1_INTERVAL — it means
+# the VPS is struggling and the next cycle will start late.
 CYCLE_DURATION_WARN_FRACTION = 0.80
 
 # Max signals kept per (source_name, action) bucket.
@@ -133,6 +156,25 @@ class ResolutionBot:
         self._confidence = ConfidenceScorer()
         self._decay = DecayMonitor()
 
+        # ── Tiered market registry ─────────────────────────────────────────────
+        # Tracks every known market and which scan tier it belongs to.
+        # Populated on the first discovery cycle and kept current thereafter.
+        self._registry = TierRegistry()
+
+        # When each tier / discovery scan last ran (monotonic seconds).
+        self._last_discovery_at: float = 0.0   # force discovery on first cycle
+        self._last_tier2_at: float = 0.0
+        self._last_tier3_at: float = 0.0
+
+        # Cursor positions for rotating tier batches (avoid burst patterns).
+        # key: tier number → index into the sorted tier-entry list.
+        self._tier_cursors: Dict[int, int] = {2: 0, 3: 0}
+
+        # Optional Polymarket WebSocket manager for Tier 1 markets.
+        # Delivers sub-second order-book updates without burning REST budget.
+        self._ws = PolymarketWSManager(poly_client)
+
+        # ── Other state ────────────────────────────────────────────────────────
         # Active positions: market_id → TradeRecord
         self._positions: Dict[str, TradeRecord] = {}
         # Per-cycle circuit breaker: set True when Kalshi's backend returns
@@ -152,22 +194,43 @@ class ResolutionBot:
     # ── Main loop ─────────────────────────────────────────────────────────────
 
     def run_forever(self) -> None:
-        logger.info("ResolutionBot: starting (dry_run=%s)", self._dry_run)
-        while True:
-            try:
-                self.run_once()
-            except KeyboardInterrupt:
-                break
-            except Exception as exc:
-                logger.exception("ResolutionBot: cycle error: %s", exc)
-            time.sleep(self._scan_interval)
+        logger.info(
+            "ResolutionBot: starting tiered scan "
+            "(T1=%ds T2=%ds T3=%ds discovery=%ds dry_run=%s)",
+            TIER_1_INTERVAL, TIER_2_INTERVAL, TIER_3_INTERVAL,
+            DISCOVERY_INTERVAL, self._dry_run,
+        )
+        self._ws.start()
+        try:
+            while True:
+                try:
+                    self.run_once()
+                except KeyboardInterrupt:
+                    break
+                except Exception as exc:
+                    logger.exception("ResolutionBot: cycle error: %s", exc)
+                time.sleep(TIER_1_INTERVAL)
+        finally:
+            self._ws.stop()
 
     def run_once(self) -> dict:
-        """Execute one full scan-and-evaluate cycle. Returns summary dict."""
-        logger.info("=== ResolutionBot cycle start ===")
+        """
+        Execute one tiered scan cycle.  Returns summary dict.
+
+        Called every TIER_1_INTERVAL (15s) by run_forever().  Within each call
+        only the work that is actually *due* in this cycle runs:
+
+          Always:     Tier 1 market refresh + gap detection (small fast set)
+                      Rotating Tier 2 batch (covers all T2 in TIER_2_INTERVAL)
+                      Rotating Tier 3 batch (covers all T3 in TIER_3_INTERVAL)
+                      Position monitoring
+          Periodically: Discovery scan (full platform fetch, every DISCOVERY_INTERVAL)
+        """
+        logger.debug("=== ResolutionBot tier-1 cycle start ===")
         self._kalshi_backend_down = False   # reset circuit breaker each cycle
         cycle_start = time.monotonic()
-        summary = {
+        now_mono = time.monotonic()
+        summary: dict = {
             "markets_scanned": 0,
             "pairs_found": 0,
             "signals_flagged": 0,
@@ -175,8 +238,10 @@ class ResolutionBot:
             "trade_details": [],
             "positions_monitored": len(self._positions),
             "exits_triggered": 0,
+            "registry": self._registry.stats(),
         }
 
+        # ── Halt: monitor open positions but skip new entry ────────────────
         if self._bankroll.is_halted():
             logger.warning(
                 "ResolutionBot: bankroll HALTED – skipping new entries; "
@@ -188,9 +253,7 @@ class ResolutionBot:
             summary["cycle_ms"] = round(elapsed)
             return summary
 
-        # Startup stabilization: skip new trade entry for the first
-        # STARTUP_STABILIZATION_SECONDS so in-memory state is fully populated
-        # before we scan for opportunities.  Position monitoring still runs.
+        # ── Startup stabilization: monitor only, no new trades ────────────
         startup_elapsed = time.time() - self._startup_time
         if startup_elapsed < STARTUP_STABILIZATION_SECONDS:
             logger.info(
@@ -204,9 +267,59 @@ class ResolutionBot:
             summary["cycle_ms"] = round(elapsed)
             return summary
 
-        # ── Step 1: Scan ──────────────────────────────────────────────────
-        markets = self._scanner.scan()
-        summary["markets_scanned"] = len(markets)
+        # ── Discovery scan (every DISCOVERY_INTERVAL) ──────────────────────
+        # Full platform fetch: finds new markets and seeds/refreshes the registry.
+        if now_mono - self._last_discovery_at >= DISCOVERY_INTERVAL:
+            self._run_discovery()
+            self._last_discovery_at = time.monotonic()
+
+        # Promote markets that have crossed tier boundaries since last cycle.
+        self._registry.evict_expired()
+        promoted = self._registry.promote_due()
+        if promoted:
+            logger.info("TierRegistry: %d market(s) promoted to a higher tier", promoted)
+
+        # Sync Polymarket WebSocket subscriptions with current Tier 1 set.
+        t1_ids = {e.market_id for e in self._registry.get_tier(1)}
+        self._ws.sync_subscriptions(t1_ids)
+
+        # ── Tier 1: refresh all active-watch markets (every cycle) ─────────
+        t1_entries = self._registry.get_tier(1)
+        if t1_entries:
+            # Pull any order-book updates from the WebSocket first (free, fast).
+            ws_prices = self._ws.get_pending_updates()
+            t1_raw = [e.market for e in t1_entries]
+            t1_markets = self._scanner.refresh_markets(t1_raw)
+            for m in t1_markets:
+                # Apply WebSocket price override where available.
+                if m.market_id in ws_prices:
+                    m.yes_price = ws_prices[m.market_id]
+                self._registry.ingest(m)
+            self._stagger()
+        else:
+            t1_markets = []
+
+        # ── Tier 2: rotating batch (full set covered every TIER_2_INTERVAL) ─
+        t2_batch_raw = self._next_tier_batch(2)
+        if t2_batch_raw:
+            t2_markets = self._scanner.refresh_markets(t2_batch_raw)
+            for m in t2_markets:
+                self._registry.ingest(m)
+            self._stagger()
+        else:
+            t2_markets = []
+
+        # ── Tier 3: rotating batch (refresh + promote; no GT eval) ──────────
+        t3_batch_raw = self._next_tier_batch(3)
+        if t3_batch_raw:
+            t3_markets = self._scanner.refresh_markets(t3_batch_raw)
+            for m in t3_markets:
+                self._registry.ingest(m)   # ingest recomputes tier → may promote
+
+        # Active markets for this cycle = Tier 1 (all) + Tier 2 batch.
+        # These are the only markets that get full gap detection + GT evaluation.
+        active_markets = t1_markets + t2_markets
+        summary["markets_scanned"] = len(active_markets)
         summary["scanned_sample"] = [
             {
                 "question": m.question,
@@ -214,31 +327,49 @@ class ResolutionBot:
                 "hours_left": round(m.hours_to_resolution, 1),
                 "yes_price": m.yes_price,
                 "market_id": m.market_id,
+                "tier": 1 if m in t1_markets else 2,
             }
-            for m in markets[:3]
+            for m in (t1_markets[:2] + t2_markets[:1])
         ]
 
-        # ── Step 2: Cross-platform gap detection ──────────────────────────
-        pairs = self._scanner.scan_cross_platform_pairs(markets)
+        # ── Cross-platform gap detection (Tier 1 + all Tier 2) ─────────────
+        # Use ALL Tier 2 entries (not just the batch) so cross-platform pairs
+        # across tiers are detected even when only one side was refreshed.
+        all_t2_markets = [e.market for e in self._registry.get_tier(2)]
+        pair_eligible = t1_markets + all_t2_markets
+        pairs = self._scanner.scan_cross_platform_pairs(pair_eligible)
         summary["pairs_found"] = len(pairs)
         cross_signals = self._gap_detector.detect_cross_platform(pairs)
 
-        # ── Step 3: Information signals (single-platform + ground truth) ──
-        info_signals = self._fetch_info_signals(markets)
+        # Urgent-promote markets with detected cross-platform gaps.
+        for sig in cross_signals:
+            self._registry.mark_urgent(sig.market_to_buy.market_id)
+
+        # ── Information signals (GT fetch for active markets) ───────────────
+        info_signals = self._fetch_info_signals(active_markets)
+
+        # Urgent-promote markets with detected info gaps.
+        for sig in info_signals:
+            self._registry.mark_urgent(sig.market_to_buy.market_id)
 
         all_signals = cross_signals + info_signals
-        self._last_signals = all_signals  # expose for dry-run display / CLI
+        self._last_signals = all_signals
         summary["signals_flagged"] = len(all_signals)
         logger.info(
-            "ResolutionBot: %d cross-platform + %d info signals = %d total",
+            "ResolutionBot: %d cross-platform + %d info signals = %d total "
+            "(T1=%d T2_batch=%d/%d total_t2=%d)",
             len(cross_signals), len(info_signals), len(all_signals),
+            len(t1_markets), len(t2_markets),
+            len(self._registry.get_tier(2)), len(all_t2_markets),
         )
 
-        # ── Step 3b: Pre-screen through confidence gate for the display list ──
-        # signals_detail must only contain signals that would actually execute so
-        # the dry-run "Potential trades" display is accurate.  _try_execute re-runs
-        # the full gate (stale-price, fee recheck, etc.) — this pre-screen uses the
-        # already-cached GT so no extra API calls are made.
+        # ── Clear urgent flag for markets where the gap has closed ──────────
+        active_signal_ids = {s.market_to_buy.market_id for s in all_signals}
+        for entry in list(self._registry.get_tier(1)):
+            if entry.signal_urgent and entry.market_id not in active_signal_ids:
+                self._registry.clear_urgent(entry.market_id)
+
+        # ── Confidence gate pre-screen (for display/logging only) ───────────
         display_signals: List[GapSignal] = []
         confidence_blocked = 0
         for signal in all_signals:
@@ -248,7 +379,7 @@ class ResolutionBot:
                 or self._exclusions.is_excluded(signal.market_to_buy.platform, mid)
             ):
                 continue
-            gt = signal.ground_truth_result  # cached; no re-fetch here
+            gt = signal.ground_truth_result
             score = self._confidence.score(signal.market_to_buy, gt, signal)
             if score.passes:
                 display_signals.append(signal)
@@ -260,17 +391,16 @@ class ResolutionBot:
             "ResolutionBot: confidence gate: %d pass, %d blocked",
             len(display_signals), confidence_blocked,
         )
-
         summary["signals_detail"] = [
             {
-                "question":     s.market_to_buy.question,
-                "market_id":    s.market_to_buy.market_id,
-                "platform":     s.market_to_buy.platform,
-                "action":       s.action,
-                "price":        s.target_price,
+                "question":      s.market_to_buy.question,
+                "market_id":     s.market_to_buy.market_id,
+                "platform":      s.market_to_buy.platform,
+                "action":        s.action,
+                "price":         s.target_price,
                 "effective_gap": round(s.effective_gap, 4),
-                "signal_type":  s.signal_type,
-                "hours_left":   round(s.market_to_buy.hours_to_resolution, 1),
+                "signal_type":   s.signal_type,
+                "hours_left":    round(s.market_to_buy.hours_to_resolution, 1),
                 "source": (
                     s.ground_truth_result.source_name
                     if s.ground_truth_result
@@ -282,31 +412,98 @@ class ResolutionBot:
             for s in display_signals
         ]
 
-        # ── Step 4 + 5: Confidence score and execute ──────────────────────
+        # ── Execute signals ──────────────────────────────────────────────────
         for signal in all_signals:
             detail = self._try_execute(signal)
             if detail is not None:
                 summary["trades_fired"] += 1
                 summary["trade_details"].append(detail)
 
-        # ── Step 6: Monitor open positions ────────────────────────────────
+        # ── Monitor open positions ───────────────────────────────────────────
         exits = self._monitor_positions()
         summary["exits_triggered"] = exits
 
         elapsed = (time.monotonic() - cycle_start) * 1000
         summary["cycle_ms"] = round(elapsed)
-        logger.info(
-            "ResolutionBot: cycle done in %.0fms | %s",
-            elapsed, summary,
-        )
-        if elapsed > self._scan_interval * 1000 * CYCLE_DURATION_WARN_FRACTION:
+        logger.debug("ResolutionBot: cycle done in %.0fms | %s", elapsed, summary)
+        if elapsed > TIER_1_INTERVAL * 1000 * CYCLE_DURATION_WARN_FRACTION:
             logger.warning(
-                "ResolutionBot: cycle took %.0fms — exceeds %.0f%% of scan "
+                "ResolutionBot: cycle took %.0fms — exceeds %.0f%% of Tier-1 "
                 "interval (%ds). VPS may be under load; consider reducing scan "
                 "scope or upgrading instance.",
-                elapsed, CYCLE_DURATION_WARN_FRACTION * 100, self._scan_interval,
+                elapsed, CYCLE_DURATION_WARN_FRACTION * 100, TIER_1_INTERVAL,
             )
         return summary
+
+    # ── Tiered scan helpers ───────────────────────────────────────────────────
+
+    def _run_discovery(self) -> None:
+        """
+        Full platform fetch — discovers new markets and refreshes the registry.
+
+        Called every DISCOVERY_INTERVAL.  Uses the existing scanner which is
+        already configured with the correct per-platform window hours.  All
+        returned markets are ingested into the tier registry; the registry
+        assigns tiers based on hours_to_resolution.
+        """
+        logger.info("ResolutionBot: running discovery scan (full platform fetch)")
+        try:
+            markets = self._scanner.scan()
+            counts = self._registry.ingest_many(markets)
+            logger.info(
+                "ResolutionBot: discovery ingested %d markets → T1=%d T2=%d T3=%d "
+                "(registry total=%d)",
+                sum(counts.values()),
+                counts.get(1, 0), counts.get(2, 0), counts.get(3, 0),
+                len(self._registry),
+            )
+        except Exception as exc:
+            logger.warning("ResolutionBot: discovery scan failed: %s", exc)
+
+    def _next_tier_batch(self, tier: int) -> List[Market]:
+        """
+        Return the next rotating batch of markets for a given tier.
+
+        The batch size is chosen so that all markets in the tier are covered
+        within one tier interval (TIER_2_INTERVAL or TIER_3_INTERVAL), with
+        one sub-batch processed per TIER_1_INTERVAL cycle.  Requests within
+        each batch are staggered by _stagger() in the caller.
+
+        Uses a stable sort (by market_id) so the cursor advances through the
+        same order every cycle even as markets are promoted/demoted.
+        """
+        entries = self._registry.get_tier(tier)   # already sorted by market_id
+        if not entries:
+            return []
+
+        interval = TIER_2_INTERVAL if tier == 2 else TIER_3_INTERVAL
+        # How many markets to process per TIER_1_INTERVAL to cover the full
+        # tier within one tier interval.
+        cycles_per_interval = max(1, interval // TIER_1_INTERVAL)
+        batch_size = max(1, math.ceil(len(entries) / cycles_per_interval))
+
+        cursor = self._tier_cursors.get(tier, 0) % len(entries)
+        end = cursor + batch_size
+
+        if end <= len(entries):
+            batch = entries[cursor:end]
+        else:
+            # Wrap around the end of the list.
+            batch = entries[cursor:] + entries[: end - len(entries)]
+
+        self._tier_cursors[tier] = end % len(entries)
+        return [e.market for e in batch]
+
+    def _stagger(self) -> None:
+        """
+        Sleep a short, randomised interval between tier-batch API calls.
+
+        This spreads requests across the cycle window rather than firing them
+        all in a burst at the start, which avoids the pattern that rate
+        limiters flag as abusive and reduces peak memory/CPU pressure.
+        """
+        sleep_s = TIER_REQUEST_STAGGER_S + random.uniform(0, TIER_STAGGER_JITTER_S)
+        time.sleep(sleep_s)
 
     # ── Signal execution ──────────────────────────────────────────────────────
 
