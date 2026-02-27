@@ -128,6 +128,9 @@ class ResolutionBot:
         # "service unavailable" so remaining signals skip immediately rather
         # than each burning ~14s on retries.
         self._kalshi_backend_down: bool = False
+        # Signals from the most recent cycle — used by get_last_signals() so
+        # the dry-run summary and the 'signals' CLI command can display them.
+        self._last_signals: List[GapSignal] = []
         self._load_positions()
         self._reconcile_with_exchange()
 
@@ -186,7 +189,28 @@ class ResolutionBot:
         info_signals = self._fetch_info_signals(markets)
 
         all_signals = cross_signals + info_signals
+        self._last_signals = all_signals  # expose for dry-run display / CLI
         summary["signals_flagged"] = len(all_signals)
+        summary["signals_detail"] = [
+            {
+                "question":     s.market_to_buy.question,
+                "market_id":    s.market_to_buy.market_id,
+                "platform":     s.market_to_buy.platform,
+                "action":       s.action,
+                "price":        s.target_price,
+                "effective_gap": round(s.effective_gap, 4),
+                "signal_type":  s.signal_type,
+                "hours_left":   round(s.market_to_buy.hours_to_resolution, 1),
+                "source": (
+                    s.ground_truth_result.source_name
+                    if s.ground_truth_result
+                    else f"vs {s.market_reference.platform}"
+                    if s.market_reference
+                    else "cross-platform"
+                ),
+            }
+            for s in all_signals
+        ]
         logger.info(
             "ResolutionBot: %d cross-platform + %d info signals = %d total",
             len(cross_signals), len(info_signals), len(all_signals),
@@ -630,6 +654,31 @@ class ResolutionBot:
         self._save_positions()
         logger.info("ResolutionBot: cleared %d position(s) from state", count)
         return count
+
+    def get_last_signals(self) -> list:
+        """Return signal details from the most recent scan cycle."""
+        result = []
+        for s in self._last_signals:
+            m = s.market_to_buy
+            result.append({
+                "question":      m.question,
+                "market_id":     m.market_id,
+                "platform":      m.platform,
+                "action":        s.action,
+                "price":         s.target_price,
+                "effective_gap": round(s.effective_gap, 4),
+                "signal_type":   s.signal_type,
+                "hours_left":    round(m.hours_to_resolution, 1),
+                "already_held":  m.market_id in self._positions,
+                "source": (
+                    s.ground_truth_result.source_name
+                    if s.ground_truth_result
+                    else f"vs {s.market_reference.platform}"
+                    if s.market_reference
+                    else "cross-platform"
+                ),
+            })
+        return result
 
     def get_open_positions(self) -> list:
         """Return all open positions with live mark-to-market prices."""

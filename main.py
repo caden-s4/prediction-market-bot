@@ -149,7 +149,31 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
             if len(q) > 80:
                 print(f"    {q[80:]}")
         print()
-    elif show_names and not trade_details:
+
+    # In dry-run mode show the flagged signals (potential trades) so you can
+    # see what the bot is considering even when 0 orders are placed.
+    dry_run = cfg.bot.dry_run
+    signal_details = result.get("signals_detail", [])
+    if dry_run and signal_details and not trade_details:
+        print(f"\n  Potential trades (signals found, dry-run – not executed):")
+        print(f"  {'─' * (_SEP_W - 2)}")
+        for d in signal_details:
+            action  = d["action"].replace("_", " ").upper()
+            gap_pct = d["effective_gap"] * 100
+            hrs     = d.get("hours_left", 0)
+            src     = d.get("source", "")
+            stype   = "cross" if d["signal_type"] == "cross_platform" else "info"
+            held    = "  [already held]" if d.get("already_held") else ""
+            print(
+                f"  {action:<10}  @{d['price']:.2f}  gap={gap_pct:.1f}%"
+                f"  [{hrs:.1f}h]  [{stype}:{src}]{held}"
+            )
+            q = d["question"]
+            print(f"    {q[:80]}")
+            if len(q) > 80:
+                print(f"    {q[80:]}")
+        print()
+    elif show_names and not trade_details and not (dry_run and signal_details):
         sample = result.get("scanned_sample", [])
         if sample:
             print(f"\n  No trades – first {len(sample)} markets scanned:")
@@ -201,12 +225,45 @@ def _print_positions(coordinator: BotCoordinator) -> None:
     print()
 
 
+def _print_signals(coordinator: BotCoordinator) -> None:
+    """Print the gap signals detected in the most recent scan cycle."""
+    signals = coordinator.get_last_signals()
+    sep  = "=" * _SEP_W
+    thin = "-" * _SEP_W
+    now  = datetime.now().strftime("%H:%M:%S")
+
+    print(f"\n{sep}")
+    print(f"  LAST SIGNALS   {now}   ({len(signals)} total)")
+    print(sep)
+
+    if not signals:
+        print("  No signals from the last cycle (run a scan first).")
+    else:
+        for s in signals:
+            action   = s["action"].replace("_", " ").upper()
+            gap_pct  = s["effective_gap"] * 100
+            hrs      = s.get("hours_left", 0)
+            src      = s.get("source", "")
+            stype    = "cross" if s["signal_type"] == "cross_platform" else "info"
+            held_tag = "  [already held]" if s.get("already_held") else ""
+            q        = s.get("question", "")
+
+            print(f"  {action:<10}  @{s['price']:.2f}  gap={gap_pct:.1f}%  "
+                  f"[{hrs:.1f}h]  [{stype}:{src}]{held_tag}")
+            print(f"    {q[:_SEP_W - 4]}")
+            print(f"  {thin}")
+
+    print(sep)
+    print()
+
+
 def _print_help() -> None:
     sep = "=" * _SEP_W
     print(f"\n{sep}")
     print("  LIVE COMMANDS")
     print(sep)
     print("  p  /  positions   Show all open positions (live mark-to-market)")
+    print("  sig / signals     Show gap signals from the last scan cycle")
     print("  s  /  scan        Run a scan cycle right now")
     print("  clear             Wipe all tracked positions (no exit orders placed)")
     print("  h  /  help        Show this help")
@@ -227,6 +284,8 @@ def _start_command_listener(coordinator: BotCoordinator, scan_event: threading.E
                 cmd  = line.strip().lower()
                 if cmd in ("p", "positions"):
                     _print_positions(coordinator)
+                elif cmd in ("sig", "signals"):
+                    _print_signals(coordinator)
                 elif cmd in ("s", "scan"):
                     print("  Triggering scan now...")
                     scan_event.set()
