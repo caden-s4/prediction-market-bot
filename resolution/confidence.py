@@ -112,8 +112,17 @@ class ConfidenceScorer:
         signal       : the gap signal that flagged this market
         """
         # ── Source confidence ──────────────────────────────────────────────
-        if ground_truth is None:
-            # Cross-platform signal with no ground truth data
+        # Treat a result with ground_truth_prob=None the same as no ground truth:
+        # the data source found a document but could not determine YES/NO direction.
+        # Lending that result's full confidence (e.g. 0.90 from a Federal Register
+        # RULE) to source_conf is wrong — it inflated confidence for Trump approval-
+        # rating cross-platform signals that had no actual information edge.
+        gt_has_signal = (
+            ground_truth is not None
+            and ground_truth.ground_truth_prob is not None
+        )
+        if not gt_has_signal:
+            # Cross-platform signal with no usable ground truth data
             # Confidence based purely on price divergence magnitude
             if signal.signal_type == "cross_platform":
                 source_conf = 0.70 + min(signal.effective_gap * 2, 0.15)

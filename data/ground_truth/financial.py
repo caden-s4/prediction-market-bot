@@ -114,6 +114,13 @@ _BELOW_RE = re.compile(
     r"\$?\s*([\d,]+\.?\d*)",
     re.IGNORECASE,
 )
+# Detects price-range questions like "Will WTI be $63-63.99?" or "$63 to $64".
+# These are bucket/range markets that cannot be reduced to a single above/below
+# threshold — the -B{val} Kalshi suffix means "bucket at val", NOT "below val".
+_RANGE_RE = re.compile(
+    r"\$\s*([\d,]+\.?\d*)\s*[-–]\s*\$?\s*([\d,]+\.?\d*)",
+    re.IGNORECASE,
+)
 
 
 class FinancialDataSource(DataSource):
@@ -260,7 +267,20 @@ class FinancialDataSource(DataSource):
 
         Tries the question text first, then falls back to Kalshi market ID
         conventions (-T{val} = above, -B{val} = below).
+
+        Returns (None, True) for price-range questions ("$63-63.99") so that the
+        caller skips the market.  The -B{val} Kalshi suffix means "bucket at val"
+        for range contracts, NOT "below val" — misreading it as "below" caused
+        WTI bucket markets to receive a wrong ground-truth direction.
         """
+        # Bail out early on range markets: "$X-$Y" in the question means this is
+        # a price-bucket contract.  We have no valid single-threshold logic for it.
+        if _RANGE_RE.search(question):
+            logger.debug(
+                "FinancialSource: price-range question detected, skipping %s", market_id
+            )
+            return None, True
+
         m = _ABOVE_RE.search(question)
         if m:
             return _parse_float(m.group(1)), True
@@ -270,6 +290,8 @@ class FinancialDataSource(DataSource):
             return _parse_float(m.group(1)), False
 
         # Kalshi market ID suffix convention: -T{threshold} or -B{threshold}
+        # NOTE: only use the -B suffix when the question text is absent — and only
+        # when no range pattern was found above (guarded by the early return).
         m = re.search(r"-T([\d.]+)$", market_id)
         if m:
             return _parse_float(m.group(1)), True  # T = "target above"
