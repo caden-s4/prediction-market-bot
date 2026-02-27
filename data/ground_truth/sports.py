@@ -5,7 +5,23 @@ Supports:
   - NFL, NBA, MLB, NHL, MLS, NCAAF, NCAAB
   - Soccer (EPL, Champions League via ESPN)
 
-Confidence: 0.95 when a game is FINAL; 0.70 while in-progress.
+Confidence:
+  0.95  Game is FINAL — authoritative, full confidence.
+  0.65  In-progress AND in final period AND lead is substantial (≥28% edge).
+  None  In-progress but not final period or lead is too small — wait for final.
+  0.0   Pre-game — no outcome yet.
+
+In-progress probability uses a time-weighted formula:
+  prob = clip(0.5 + lead × 0.03 × time_weight, 0.08, 0.92)
+  time_weight scales from 0.5 at game start to 2.0 at game end.
+
+"Substantial" is defined as prob ≥ 0.78 or ≤ 0.22 (28%+ away from even).
+
+Rationale: a 10-point NBA lead in Q1 is very different from the same lead with
+2 minutes left. The old linear formula gave both 0.80.  By multiplying by
+time_weight (based on elapsed game time) the formula properly amplifies the
+signal late in games and dampens it early.  The hard cap [0.08, 0.92] prevents
+any in-progress game from scoring as near-certain — upsets happen.
 
 ESPN's hidden public API endpoints are widely documented and have been stable
 for years. No API key required.
@@ -103,7 +119,10 @@ class SportsDataSource(DataSource):
                 logger.debug("SportsSource: no matching event for %s", market.market_id)
                 return None
 
-            return self._build_result(match, market, sport_path)
+            result = self._build_result(match, market, sport_path)
+            # _build_result returns None for in-progress games that don't clear
+            # the final-period + substantial-lead gate.
+            return result
 
         except Exception as exc:
             logger.warning("SportsSource: error fetching for %s: %s", market.market_id, exc)
@@ -209,15 +228,59 @@ class SportsDataSource(DataSource):
 
         return None
 
+    # ── Sport configuration for time-progress calculation ─────────────────────
+
+    # (total_periods, minutes_per_period) by sport path prefix
+    _SPORT_TIMING = {
+        "basketball": (4, 12),   # NBA: 4 quarters × 12 min
+        "football": (4, 15),     # NFL/NCAAF: 4 quarters × 15 min
+        "hockey": (3, 20),       # NHL: 3 periods × 20 min
+        "soccer": (2, 45),       # EPL etc.: 2 halves × 45 min
+        "baseball": (9, 20),     # MLB: 9 innings × ~20 min (approximate)
+    }
+
+    def _game_progress(self, sport_path: str, period: int, clock_str: str) -> float:
+        """
+        Return normalised game progress [0.0, 1.0] where 0.0 = start, 1.0 = end.
+
+        Derived from the current period number and clock string ("MM:SS") from ESPN.
+        Falls back to period-only estimate if the clock can't be parsed.
+        """
+        sport_key = sport_path.split("/")[0]  # "basketball", "football", etc.
+        total_periods, period_mins = self._SPORT_TIMING.get(sport_key, (4, 15))
+        total_mins = total_periods * period_mins
+
+        # Minutes already completed from previous periods
+        elapsed = (period - 1) * period_mins
+
+        # Parse remaining time in the current period ("MM:SS" or "MM:SS.d")
+        try:
+            main = clock_str.split(".")[0]          # strip fractional seconds
+            parts = main.split(":")
+            remaining_mins = int(parts[0]) + int(parts[1]) / 60
+        except (ValueError, IndexError, AttributeError):
+            remaining_mins = period_mins / 2        # assume halfway if unparseable
+
+        elapsed += period_mins - remaining_mins
+        return min(elapsed / total_mins, 1.0)
+
     def _build_result(
         self, event: dict, market: Market, sport_path: str
-    ) -> GroundTruthResult:
-        """Parse an ESPN event into a GroundTruthResult."""
+    ) -> Optional[GroundTruthResult]:
+        """
+        Parse an ESPN event into a GroundTruthResult.
+
+        Returns None for in-progress games that don't meet the trading gate
+        (not in the final period, or lead too small) — the caller will wait
+        for the final whistle instead.
+        """
         status = event.get("status", {})
         status_type = status.get("type", {})
         state = status_type.get("state", "pre")  # pre | in | post
         completed = status_type.get("completed", False)
         description = status_type.get("description", state)
+        period = status.get("period", 1)
+        clock_str = status.get("displayClock", "")
 
         competitions = event.get("competitions", [{}])
         comp = competitions[0] if competitions else {}
@@ -247,15 +310,12 @@ class SportsDataSource(DataSource):
 
         if completed and winner_name:
             # Game is final – determine if YES or NO based on market question.
-            # Use _extract_teams to identify the "YES team" (first extracted name).
             winner_lower = winner_name.lower()
             teams = self._extract_teams(market.question)
             if teams:
                 yes_team = teams[0].lower()
-                # Substring match in either direction handles short/long names
                 yes_won = yes_team in winner_lower or winner_lower in yes_team
             else:
-                # No teams extracted → check if winner name appears anywhere in q
                 yes_won = winner_lower in question_lower
             ground_truth_prob = 1.0 if yes_won else 0.0
             reasoning = (
@@ -264,20 +324,56 @@ class SportsDataSource(DataSource):
             )
             confidence = 0.95
             source_type = SourceType.HARD
+
         elif state == "in":
-            # In-progress: use score differential as probability signal
+            # In-progress: time-weighted win probability.
+            #
+            # time_weight scales from 0.5 at game start to 2.0 at game end,
+            # so the same point lead is worth much more in the final minutes.
+            # Hard cap [0.08, 0.92] — no in-progress game is ever near-certain.
+            #
+            # Gate: only return a signal if we're in the FINAL period/quarter
+            # AND the lead is substantial (prob ≥ 0.78 or ≤ 0.22).  Otherwise
+            # return None and let the cycle wait for the final result.
+            sport_key = sport_path.split("/")[0]
+            total_periods, _ = self._SPORT_TIMING.get(sport_key, (4, 15))
+            in_final_period = period >= total_periods
+
             if len(scores) >= 2:
                 vals = sorted(scores.values(), reverse=True)
                 lead = vals[0] - vals[1]
-                # Rough live-game win probability (very simplified)
-                # Lead of 7+ points in final quarter → high probability
-                ground_truth_prob = min(0.5 + lead * 0.03, 0.90)
-                reasoning = f"Live game in progress. Score: {scores}. Lead={lead}."
+
+                progress = self._game_progress(sport_path, period, clock_str)
+                time_weight = 0.5 + progress * 1.5   # 0.5 → 2.0
+
+                raw_prob = 0.5 + lead * 0.03 * time_weight
+                prob = min(max(raw_prob, 0.08), 0.92)  # hard cap
+                substantial = prob >= 0.78 or prob <= 0.22
+
+                reasoning = (
+                    f"Live game in progress (period {period}/{total_periods}, "
+                    f"clock='{clock_str}'). Score: {scores}. Lead={lead}. "
+                    f"progress={progress:.2f} time_weight={time_weight:.2f} "
+                    f"raw_prob={raw_prob:.2f} → capped_prob={prob:.2f}."
+                )
+
+                if not in_final_period or not substantial:
+                    # Too early or too close — wait for the final result
+                    logger.debug(
+                        "SportsSource: skipping in-progress signal for %s "
+                        "(final_period=%s substantial=%s prob=%.2f)",
+                        market.market_id, in_final_period, substantial, prob,
+                    )
+                    return None
+
+                ground_truth_prob = prob
             else:
-                ground_truth_prob = 0.5
-                reasoning = "Game in progress, no score data."
-            confidence = 0.70
+                # No score data at all — can't compute anything useful
+                return None
+
+            confidence = 0.65   # In-progress is genuinely uncertain
             source_type = SourceType.HARD
+
         else:
             # Pre-game – no ground truth yet
             ground_truth_prob = None
@@ -296,6 +392,8 @@ class SportsDataSource(DataSource):
                 "state": state,
                 "completed": completed,
                 "description": description,
+                "period": period,
+                "clock": clock_str,
                 "scores": scores,
                 "winner": winner_name,
             },
