@@ -89,6 +89,13 @@ class EconomicDataSource(DataSource):
             ground_truth_prob = self._compute_prob(latest_value, threshold, market)
             confidence = self._compute_confidence(latest_date, market)
 
+            if confidence is None:
+                logger.debug(
+                    "EconSource: %s data from %s is older than 7 days — skipping %s",
+                    series_id, latest_date, market.market_id,
+                )
+                return None
+
             return GroundTruthResult(
                 ground_truth_prob=ground_truth_prob,
                 confidence=confidence,
@@ -204,13 +211,43 @@ class EconomicDataSource(DataSource):
                 return 1.0
             return 0.0
 
-    def _compute_confidence(self, latest_date: Optional[str], market: Market) -> float:
+    def _references_historical_period(self, question: str) -> bool:
         """
-        High confidence if the data release date is after the market was created
-        and the market resolves soon. Low confidence if data predates the question.
+        True if the question is about a specific fixed historical data point
+        (e.g. "Was GDP above 2% in Q3 2024?").  For such questions the latest
+        FRED observation is the definitive answer regardless of how long ago it
+        was published, so the normal staleness gate does not apply.
+        """
+        return bool(re.search(
+            r"\b(?:Q[1-4]\s+20\d{2}|20\d{2}\s+Q[1-4]"
+            r"|(?:january|february|march|april|may|june|july|august"
+            r"|september|october|november|december)\s+20\d{2}"
+            r"|(?:fiscal\s+)?year\s+20\d{2}"
+            r"|(?:20\d{2})\s+annual)\b",
+            question, re.IGNORECASE,
+        ))
+
+    def _compute_confidence(self, latest_date: Optional[str], market: Market) -> Optional[float]:
+        """
+        Return confidence based on how recently the data was released, or None
+        if the data is too stale to trade on.
+
+        Windows:
+          < 24 hours  → 0.95  (data released today — maximum freshness)
+          < 7 days    → 0.80  (recent release cycle, still relevant)
+          ≥ 7 days    → None  (market has already priced this in; skip)
+
+        Exception: questions that reference a specific historical period
+        ("in Q3 2024", "for fiscal year 2022") are about a fixed past value
+        — staleness is irrelevant because the answer cannot change.
         """
         if latest_date is None:
             return 0.0
+
+        # Historical-period questions: the data point is immutable, so staleness
+        # doesn't affect signal quality.
+        if self._references_historical_period(market.question):
+            return 0.80
 
         try:
             release_dt = datetime.strptime(latest_date, "%Y-%m-%d").replace(
@@ -218,13 +255,11 @@ class EconomicDataSource(DataSource):
             )
             now = datetime.now(timezone.utc)
             hours_since = (now - release_dt).total_seconds() / 3600
-            if hours_since < 48:
-                # Data released within last 48h — very fresh
+            if hours_since < 24:
                 return 0.95
-            if hours_since < 720:
-                # Up to 30 days old — still a relevant release cycle
+            if hours_since < 168:  # 7 days
                 return 0.80
-            # Older than 30 days: a newer release is probably due; don't trade on stale data
-            return 0.60
+            # Older than 7 days: almost certainly priced in by now — don't trade
+            return None
         except Exception:
-            return 0.70
+            return None

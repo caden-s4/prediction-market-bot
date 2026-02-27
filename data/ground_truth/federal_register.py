@@ -5,12 +5,20 @@ Source: api.federalregister.gov (free, no API key required)
 
 Covers:
   - Final rules and regulations (rule published = effective)
-  - Proposed rules (filed = proposed, not yet final)
+  - Enforcement actions with clear outcome language
+  - Interim final rules (effective but challengeable)
+  - Proposed rules (filed but not yet decided)
+  - Agency guidance documents (non-binding, no signal)
   - Executive orders
   - Presidential documents
-  - Agency notices
 
-Confidence: 0.90 for a published final rule; 0.80 for a proposed rule filing.
+Document type → confidence mapping:
+  Final Rule                                   RULE (standard)   0.90
+  Enforcement Action / Consent Order / Penalty RULE (with kws)   0.85
+  Interim Final Rule                           RULE (with kws)   0.75
+  Proposed Rule                                PRORULE           None  (outcome unknown)
+  Guidance Document / Advisory                 NOTICE (with kws) None  (non-binding)
+  Other Notice / Presidential Document         NOTICE/PRESDOCU   0.50
 
 Note on PACER (federal court filings): PACER requires login credentials and
 per-page fees. For court outcomes we use CourtListener (free public API) which
@@ -126,31 +134,86 @@ class FederalRegisterSource(DataSource):
         title = best.get("title", "")
         pub_date = best.get("publication_date", "")
         url = best.get("html_url", f"{_FR_BASE}/documents")
+        title_lower = title.lower()
 
-        # Determine outcome and confidence based on document type
+        # Classify by document type then refine by title keywords.
         if doc_type == "RULE":
-            # Final rule = decision is made and published
-            ground_truth_prob = self._rule_matches_yes(market.question, title)
-            confidence = 0.90
-            source_type = SourceType.REGULATORY
-            reasoning = (
-                f"Federal Register FINAL RULE found: '{title}' "
-                f"published {pub_date}. This is an authoritative hard source."
-            )
+            if any(kw in title_lower for kw in (
+                "interim final", "interim rule", "temporary rule",
+            )):
+                # Interim Final Rule — effective immediately but subject to
+                # challenge and withdrawal; more uncertain than a final rule.
+                ground_truth_prob = self._rule_matches_yes(market.question, title)
+                confidence = 0.75
+                source_type = SourceType.REGULATORY
+                doc_label = "INTERIM FINAL RULE"
+                reasoning = (
+                    f"Federal Register INTERIM FINAL RULE: '{title}' "
+                    f"published {pub_date}. Effective but challengeable; "
+                    f"confidence capped at 0.75."
+                )
+            elif any(kw in title_lower for kw in (
+                "enforcement", "penalty", "consent order",
+                "cease and desist", "civil money penalty",
+            )):
+                # Enforcement action with clear outcome language.  Confidence
+                # is 0.85 only when we can parse the direction; 0.50 otherwise.
+                ground_truth_prob = self._rule_matches_yes(market.question, title)
+                confidence = 0.85 if ground_truth_prob is not None else 0.50
+                source_type = SourceType.REGULATORY
+                doc_label = "ENFORCEMENT ACTION"
+                reasoning = (
+                    f"Federal Register ENFORCEMENT ACTION: '{title}' "
+                    f"published {pub_date}. "
+                    + ("Direction parsed from title." if ground_truth_prob is not None
+                       else "Direction ambiguous — prob=None, auto-trade blocked.")
+                )
+            else:
+                # Standard Final Rule — highest regulatory confidence.
+                ground_truth_prob = self._rule_matches_yes(market.question, title)
+                confidence = 0.90
+                source_type = SourceType.REGULATORY
+                doc_label = "FINAL RULE"
+                reasoning = (
+                    f"Federal Register FINAL RULE: '{title}' "
+                    f"published {pub_date}. Authoritative hard source."
+                )
+
         elif doc_type == "PRORULE":
-            # Proposed rule = filed but not yet final
-            ground_truth_prob = None  # can't determine outcome from a proposal
+            # Proposed rule — filed but outcome is not yet decided.
+            ground_truth_prob = None
             confidence = 0.60
             source_type = SourceType.REGULATORY
+            doc_label = "PROPOSED RULE"
             reasoning = (
-                f"Federal Register PROPOSED RULE found: '{title}' "
+                f"Federal Register PROPOSED RULE: '{title}' "
                 f"published {pub_date}. Outcome not yet determinable."
             )
-        else:
+
+        elif doc_type == "NOTICE":
+            if any(kw in title_lower for kw in (
+                "guidance", "guidance document", "advisory", "policy statement",
+                "frequently asked questions", "faq",
+            )):
+                # Guidance documents are non-binding and carry no predictive
+                # signal about regulatory outcomes.
+                logger.debug(
+                    "FederalRegister: guidance document, skipping %s", market.market_id
+                )
+                return None
             ground_truth_prob = None
             confidence = 0.50
             source_type = SourceType.AGGREGATED
-            reasoning = f"Federal Register notice/document found: '{title}' ({doc_type})."
+            doc_label = "NOTICE"
+            reasoning = f"Federal Register NOTICE: '{title}' published {pub_date}."
+
+        else:
+            # Presidential documents, executive orders, and other types.
+            ground_truth_prob = None
+            confidence = 0.50
+            source_type = SourceType.AGGREGATED
+            doc_label = doc_type or "DOCUMENT"
+            reasoning = f"Federal Register {doc_label}: '{title}' published {pub_date}."
 
         return GroundTruthResult(
             ground_truth_prob=ground_truth_prob,
@@ -158,7 +221,7 @@ class FederalRegisterSource(DataSource):
             source_type=source_type,
             source_name="Federal Register API",
             source_url=url,
-            raw_data=best,
+            raw_data={**best, "doc_label": doc_label},
             reasoning=reasoning,
         )
 

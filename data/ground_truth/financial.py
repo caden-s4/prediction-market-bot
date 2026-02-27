@@ -26,6 +26,7 @@ per 60 seconds regardless of how many markets reference the same instrument.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from typing import Dict, Optional, Tuple
@@ -38,7 +39,57 @@ from .base import DataSource, GroundTruthResult, SourceType
 logger = logging.getLogger(__name__)
 
 _YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
+_TD_BASE = "https://api.twelvedata.com"
+_AV_BASE = "https://www.alphavantage.co/query"
 _TIMEOUT = 8
+
+# Optional API keys — set in .env to use more reliable primary sources.
+# If absent, the source is skipped and Yahoo Finance is used as fallback.
+_TWELVE_DATA_KEY: str = os.environ.get("TWELVE_DATA_KEY", "")
+_ALPHA_VANTAGE_KEY: str = os.environ.get("ALPHA_VANTAGE_KEY", "")
+
+# Twelve Data symbol translations from Yahoo Finance symbols.
+# Twelve Data uses its own naming for futures and Forex pairs.
+_TD_SYMBOL_MAP: Dict[str, str] = {
+    # E-mini futures (continuous front-month contracts)
+    "NQ=F": "NQ",       # Nasdaq 100 E-mini
+    "ES=F": "ES",       # S&P 500 E-mini
+    "YM=F": "YM",       # Dow Jones E-mini
+    # Commodities
+    "GC=F": "GC",       # Gold futures
+    "CL=F": "CL",       # WTI Crude futures
+    "NG=F": "NG",       # Natural Gas futures
+    # Forex (Twelve Data uses standard ISO pairs)
+    "EURUSD=X": "EUR/USD",
+    "JPY=X":    "USD/JPY",
+    "GBPUSD=X": "GBP/USD",
+    "CAD=X":    "USD/CAD",
+    "AUDUSD=X": "AUD/USD",
+    "CHF=X":    "USD/CHF",
+    # Treasury yields
+    "^TNX": "US10Y",
+    "^FVX": "US5Y",
+    "^IRX": "US3M",
+    "^TYX": "US30Y",
+}
+
+# Alpha Vantage symbol translations.
+# AV supports standard equity/ETF tickers and some forex; futures require a
+# paid subscription so we only map what's available on the free tier.
+_AV_SYMBOL_MAP: Dict[str, str] = {
+    # Forex — use CURRENCY_EXCHANGE_RATE function (free tier)
+    "EURUSD=X": "EUR:USD",
+    "JPY=X":    "USD:JPY",
+    "GBPUSD=X": "GBP:USD",
+    "CAD=X":    "USD:CAD",
+    "AUDUSD=X": "AUD:USD",
+    "CHF=X":    "USD:CHF",
+    # Treasury yields — available via GLOBAL_QUOTE
+    "^TNX": "^TNX",
+    "^FVX": "^FVX",
+    "^IRX": "^IRX",
+    "^TYX": "^TYX",
+}
 
 # Map text keyword → (Yahoo Finance symbol, human-readable name).
 # Sorted longest-first when searching so "nasdaq 100" matches before "nasdaq".
@@ -266,10 +317,18 @@ class FinancialDataSource(DataSource):
         return "", ""
 
     def _fetch_price(self, symbol: str) -> Optional[float]:
-        """Return current market price from Yahoo Finance with a 60-second cache.
+        """
+        Return current market price with a 60-second module-level cache.
 
-        Retries once after a 1-second backoff if the first request fails (Yahoo
-        Finance occasionally rate-limits burst requests from a single cycle).
+        Source priority:
+          1. Twelve Data  (if TWELVE_DATA_KEY is set and symbol is mapped)
+          2. Alpha Vantage (if ALPHA_VANTAGE_KEY is set and symbol is mapped)
+          3. Yahoo Finance  (always-available fallback, unofficial but proven)
+
+        Using an unofficial source (Yahoo) as the last resort rather than the
+        only resort means a Yahoo outage doesn't kill the entire financial
+        pipeline — it degrades gracefully to whatever primary sources are
+        configured.
         """
         now = time.monotonic()
         cached = _PRICE_CACHE.get(symbol)
@@ -278,6 +337,117 @@ class FinancialDataSource(DataSource):
             if now - fetched_at < _CACHE_TTL:
                 return price
 
+        price = (
+            self._fetch_price_twelve_data(symbol)
+            or self._fetch_price_alpha_vantage(symbol)
+            or self._fetch_price_yahoo(symbol)
+        )
+
+        if price is not None:
+            _PRICE_CACHE[symbol] = (time.monotonic(), price)
+            logger.debug("FinancialSource: %s price=%.4f", symbol, price)
+        return price
+
+    def _fetch_price_twelve_data(self, yahoo_symbol: str) -> Optional[float]:
+        """
+        Fetch price from Twelve Data API (requires TWELVE_DATA_KEY env var).
+
+        Free tier: 8 calls/minute, 800/day — well within our usage given the
+        60-second symbol cache that limits us to one call per symbol per minute.
+        """
+        if not _TWELVE_DATA_KEY:
+            return None
+        td_symbol = _TD_SYMBOL_MAP.get(yahoo_symbol)
+        if not td_symbol:
+            return None
+        try:
+            resp = requests.get(
+                f"{_TD_BASE}/price",
+                params={"symbol": td_symbol, "apikey": _TWELVE_DATA_KEY},
+                timeout=_TIMEOUT,
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if "price" in data:
+                return float(data["price"])
+            # Twelve Data returns {"code": 4xx, "message": "..."} on error
+            logger.warning(
+                "FinancialSource: TwelveData unexpected response for %s: %s",
+                td_symbol, data,
+            )
+        except Exception as exc:
+            logger.warning(
+                "FinancialSource: TwelveData fetch failed for %s (%s): %s",
+                yahoo_symbol, td_symbol, exc,
+            )
+        return None
+
+    def _fetch_price_alpha_vantage(self, yahoo_symbol: str) -> Optional[float]:
+        """
+        Fetch price from Alpha Vantage API (requires ALPHA_VANTAGE_KEY env var).
+
+        Free tier: 5 calls/minute, 500/day.  Only covers forex and some indices
+        on the free plan — futures require a paid subscription so they fall
+        through to Yahoo Finance automatically.
+        """
+        if not _ALPHA_VANTAGE_KEY:
+            return None
+        av_symbol = _AV_SYMBOL_MAP.get(yahoo_symbol)
+        if not av_symbol:
+            return None
+
+        try:
+            # Forex symbols are encoded as "FROM:TO" in our map
+            if ":" in av_symbol:
+                from_ccy, to_ccy = av_symbol.split(":", 1)
+                resp = requests.get(
+                    _AV_BASE,
+                    params={
+                        "function": "CURRENCY_EXCHANGE_RATE",
+                        "from_currency": from_ccy,
+                        "to_currency": to_ccy,
+                        "apikey": _ALPHA_VANTAGE_KEY,
+                    },
+                    timeout=_TIMEOUT,
+                )
+                resp.raise_for_status()
+                rate = (
+                    resp.json()
+                    .get("Realtime Currency Exchange Rate", {})
+                    .get("5. Exchange Rate")
+                )
+                if rate:
+                    return float(rate)
+            else:
+                # Equity indices / yields via GLOBAL_QUOTE
+                resp = requests.get(
+                    _AV_BASE,
+                    params={
+                        "function": "GLOBAL_QUOTE",
+                        "symbol": av_symbol,
+                        "apikey": _ALPHA_VANTAGE_KEY,
+                    },
+                    timeout=_TIMEOUT,
+                )
+                resp.raise_for_status()
+                price = resp.json().get("Global Quote", {}).get("05. price")
+                if price:
+                    return float(price)
+        except Exception as exc:
+            logger.warning(
+                "FinancialSource: AlphaVantage fetch failed for %s (%s): %s",
+                yahoo_symbol, av_symbol, exc,
+            )
+        return None
+
+    def _fetch_price_yahoo(self, symbol: str) -> Optional[float]:
+        """
+        Fetch price from Yahoo Finance (unofficial but broadly reliable fallback).
+
+        Retries once with a 1-second backoff — Yahoo occasionally rate-limits
+        burst requests, and a single retry recovers most transient failures.
+        """
         url = f"{_YAHOO_BASE}/{symbol}"
         for attempt in range(2):
             try:
@@ -291,10 +461,7 @@ class FinancialDataSource(DataSource):
                 )
                 resp.raise_for_status()
                 meta = resp.json()["chart"]["result"][0]["meta"]
-                price = float(meta["regularMarketPrice"])
-                _PRICE_CACHE[symbol] = (time.monotonic(), price)
-                logger.debug("FinancialSource: %s price=%.4f", symbol, price)
-                return price
+                return float(meta["regularMarketPrice"])
             except Exception as exc:
                 logger.warning(
                     "FinancialSource: Yahoo fetch failed for %s (attempt %d/2): %s",
