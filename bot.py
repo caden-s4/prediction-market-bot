@@ -169,6 +169,10 @@ class BotCoordinator:
         """Return all open resolution-drift positions with live mark-to-market."""
         return self._resolution.get_open_positions()
 
+    def get_last_signals(self) -> list:
+        """Return gap signals detected in the most recent scan cycle."""
+        return self._resolution.get_last_signals()
+
     def clear_positions(self) -> int:
         """Wipe all tracked positions from memory and state (no exit orders placed)."""
         return self._resolution.clear_positions()
