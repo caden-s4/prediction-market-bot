@@ -60,6 +60,12 @@ class GapSignal:
     # executor can use the real source confidence rather than re-computing it.
     ground_truth_result: Optional[GroundTruthResult] = None
 
+    # Liquidity ratio for cross-platform signals.
+    # Populated by the executor after fetching the live order book, before the
+    # confidence gate.  Value: shallower-side book depth / max position size,
+    # capped at 1.0.  None = not yet computed; confidence scorer skips penalty.
+    depth_ratio: Optional[float] = None
+
     reasoning: str = ""
 
     @property
