@@ -200,7 +200,10 @@ class ResolutionScanner:
         hours_left = market.hours_to_resolution   # uses fixed timezone-aware property
         if not (0 < hours_left <= window_hours):
             return "hours"
-        if not (0.05 < market.yes_price < 0.95):
+        # Require at least 10 cents of room on both sides.  YES < 10¢ means we'd
+        # be buying NO at 90¢+ for a max gain of <10¢ — the absolute edge is too
+        # thin regardless of the probability gap (e.g. WTI bucket NO @ 94¢).
+        if not (0.10 < market.yes_price < 0.90):
             return "price"
         return None
 
