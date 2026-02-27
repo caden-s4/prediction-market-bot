@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional
 
@@ -60,6 +61,17 @@ class GroundTruthResult:
     source_url: Optional[str] = None
     raw_data: Dict[str, Any] = field(default_factory=dict)
     reasoning: str = ""
+    # When the underlying data was published (e.g. FRED release timestamp,
+    # game final whistle).  Used by ConfidenceScorer to apply a freshness
+    # multiplier — stale data has likely already been priced in by other traders.
+    # None means unknown; no freshness penalty is applied in that case.
+    data_published_at: Optional[datetime] = None
+    # Explicit directional assertion from the data source:
+    #   "yes"      – data clearly supports YES resolution
+    #   "no"       – data clearly supports NO resolution
+    #   "ambiguous"– data is inconclusive about which side is correct (BLOCKS trade)
+    #   None       – not assessed by this source (no directional block applied)
+    directional_confidence: Optional[str] = None
 
     @property
     def is_tradeable(self) -> bool:

@@ -337,21 +337,11 @@ class ResolutionBot:
         # re-fetch it (cross-platform signals that didn't go through the router).
         gt = signal.ground_truth_result or self._ground_truth.fetch(market)
 
-        # Confidence gate
-        score = self._confidence.score(market, gt, signal)
-        if not score.passes:
-            logger.info(
-                "ResolutionBot: SKIP %s – %s", mid, score.skip_reason
-            )
-            return None
-
-        # Stale-price guard: fetch the live order book and verify the scanner
-        # price hasn't drifted far from reality.  The Kalshi bulk /markets
-        # endpoint often returns stale yes_bid/yes_ask (e.g. 49/50 by default)
-        # while the real order book is at 0.99 or 0.01.
-        # If the scanner price is stale, recalculate the gap at the live price:
-        #   - Gap disappears  → was a stale-data artifact, skip
-        #   - Gap still real  → update signal to live price and proceed
+        # Fetch the live order book before the confidence gate so we can:
+        #   a) populate depth_ratio on cross-platform signals (liquidity penalty)
+        #   b) run the stale-price guard afterwards without a second API call
+        # The Kalshi bulk /markets endpoint often returns stale yes_bid/yes_ask
+        # (e.g. 49/50 by default) while the real order book is at 0.99 or 0.01.
         ob_live = self._get_live_book(market)
         if ob_live is None:
             # Empty order book — scanner price is unverifiable. Placing an order
@@ -363,6 +353,42 @@ class ResolutionBot:
                 mid, signal.target_price,
             )
             return None
+
+        # For cross-platform signals, populate depth_ratio now so the confidence
+        # scorer can apply the liquidity penalty before deciding to pass/skip.
+        if signal.signal_type == "cross_platform":
+            signal.depth_ratio = self._compute_depth_ratio(signal, ob_live)
+
+        # Confidence gate
+        score = self._confidence.score(market, gt, signal)
+        if not score.passes:
+            logger.info(
+                "ResolutionBot: SKIP %s – %s", mid, score.skip_reason
+            )
+            return None
+
+        # Combined floor check: both scores pass but are both marginal (< 0.85).
+        # Require order-book depth >= 3x the estimated position size before proceeding.
+        if score.requires_depth_check:
+            size_estimate = self._compute_size(
+                signal, score.source_confidence, score.resolution_clarity
+            )
+            required_depth = size_estimate * 3.0
+            avail_depth = self._book_depth_usd(signal, ob_live)
+            if avail_depth < required_depth:
+                logger.info(
+                    "ResolutionBot: SKIP %s – marginal confidence both axes "
+                    "(src=%.2f clarity=%.2f) insufficient depth "
+                    "(need $%.0f, have $%.0f)",
+                    mid, score.source_confidence, score.resolution_clarity,
+                    required_depth, avail_depth,
+                )
+                return None
+
+        # Stale-price guard: verify the scanner price hasn't drifted far from
+        # reality.  If the scanner price is stale, recalculate the gap:
+        #   - Gap disappears  → was a stale-data artifact, skip
+        #   - Gap still real  → update signal to live price and proceed
         live_price = ob_live.mid_price
         drift = abs(live_price - signal.target_price)
         if drift > STALE_PRICE_THRESHOLD:
@@ -413,8 +439,10 @@ class ResolutionBot:
         signal.effective_gap = live_effective_gap
         signal.taker_fee = fee
 
-        # Size using fractional Kelly
-        size_usd = self._compute_size(signal, score.source_confidence)
+        # Size using fractional Kelly (time-to-resolution weighting applied inside)
+        size_usd = self._compute_size(
+            signal, score.source_confidence, score.resolution_clarity
+        )
         if size_usd < 1.0:
             logger.info("ResolutionBot: SKIP %s – size too small ($%.2f)", mid, size_usd)
             return None
@@ -574,23 +602,31 @@ class ResolutionBot:
             self._bankroll.release(market.market_id, realized_pnl_usd=0.0)
             return None
 
-    def _compute_size(self, signal: GapSignal, source_confidence: float) -> float:
-        """Fractional Kelly sizing: conservative 12% of Kelly, capped at 20% bankroll."""
+    def _compute_size(
+        self,
+        signal: GapSignal,
+        source_confidence: float,
+        resolution_clarity: float = 1.0,
+    ) -> float:
+        """
+        Fractional Kelly sizing: 12% of Kelly, capped at 20% of bankroll.
+
+        Time-to-resolution weighting (Fix 6):
+        Under 2 hours to resolution the stakes of a wrong call are higher
+        (less time to exit). When either confidence dimension is below 0.85,
+        cap the Kelly fraction at 50% of normal to limit exposure.
+        At 0.90+ on both dimensions the full fraction is used even near expiry.
+        """
         # Kelly formula: f* = (b*p - (1-p)) / b
-        # Must be computed from the perspective of the side being bought.
-        #
-        # BUY YES: buy YES at target_price; wins with prob = ground_truth_prob
-        # BUY NO:  buy NO at (1 - target_price); wins with prob = 1 - ground_truth_prob
+        # Computed from the perspective of the side being bought.
         gt_prob = signal.ground_truth_prob
         if gt_prob is None:
-            # Fall back to reference_price for cross-platform signals without GT
             gt_prob = signal.reference_price
 
         if signal.action == "buy_yes":
             p = gt_prob
             entry = signal.target_price
         else:
-            # BUY NO: flip perspective — probability NO wins, NO price is entry cost
             p = 1.0 - gt_prob
             entry = 1.0 - signal.target_price
 
@@ -599,11 +635,44 @@ class ResolutionBot:
         b = (1.0 - entry) / entry
         kelly = max((b * p - (1 - p)) / b, 0.0)
 
-        # Scale Kelly fraction by source confidence (higher conf = larger fraction)
+        # Scale Kelly fraction by source confidence
         frac = KELLY_FRACTION * min(source_confidence, 1.0)
+
+        # Time-to-resolution cap: under 2h with marginal confidence → 50% Kelly
+        hours_left = signal.market_to_buy.hours_to_resolution
+        if hours_left < 2.0 and (
+            source_confidence < 0.85 or resolution_clarity < 0.85
+        ):
+            frac *= 0.50
+            logger.debug(
+                "_compute_size: time-to-resolution cap applied "
+                "(%.1fh left, src=%.2f clarity=%.2f) → frac=%.4f",
+                hours_left, source_confidence, resolution_clarity, frac,
+            )
+
         size = kelly * frac * self._bankroll.total_usd
         max_size = self._bankroll.total_usd * MAX_POSITION_FRACTION
         return round(min(size, max_size), 2)
+
+    def _compute_depth_ratio(self, signal: GapSignal, ob: "OrderBook") -> float:
+        """
+        depth_ratio = available book depth for the intended side / max position size.
+        Capped at 1.0 — we don't reward unusually deep books, only penalise thin ones.
+        Uses the top-5 price levels to represent realistic fillable liquidity.
+        """
+        depth_usd = self._book_depth_usd(signal, ob)
+        max_pos = self._bankroll.total_usd * MAX_POSITION_FRACTION
+        if max_pos <= 0:
+            return 1.0
+        return min(depth_usd / max_pos, 1.0)
+
+    def _book_depth_usd(self, signal: GapSignal, ob: "OrderBook") -> float:
+        """Sum of the top-5 book levels for the side we intend to buy."""
+        if signal.action == "buy_yes":
+            levels = ob.yes_asks[:5]
+        else:
+            levels = ob.yes_bids[:5]
+        return sum(lv.size for lv in levels)
 
     # ── Position monitoring ───────────────────────────────────────────────────
 
