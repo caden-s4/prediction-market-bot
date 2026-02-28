@@ -1078,6 +1078,16 @@ class ResolutionBot:
             })
         return result
 
+    def get_near_miss_pairs(self, n: int = 10) -> list:
+        """
+        Return the top-N near-miss cross-platform pairs from the current registry.
+
+        Uses all markets currently in the tier registry (no new API calls).
+        Run at least one scan cycle first so the registry is populated.
+        """
+        markets = self._registry.all_markets()
+        return self._scanner.score_near_miss_pairs(markets, top_n=n)
+
     def get_open_positions(self) -> list:
         """Return all open positions with live mark-to-market prices."""
         result = []
