@@ -390,7 +390,7 @@ def main() -> None:
 
     if args.once:
         logger.info("Running single scan cycle (--once mode)")
-        result = coordinator.run_once()
+        result = coordinator.run_once(skip_stabilization=True)
         _print_summary(result, cfg, show_names=show_names)
     else:
         interval = cfg.bot.resolution_scan_interval_seconds

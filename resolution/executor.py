@@ -213,7 +213,7 @@ class ResolutionBot:
         finally:
             self._ws.stop()
 
-    def run_once(self) -> dict:
+    def run_once(self, skip_stabilization: bool = False) -> dict:
         """
         Execute one tiered scan cycle.  Returns summary dict.
 
@@ -225,6 +225,12 @@ class ResolutionBot:
                       Rotating Tier 3 batch (covers all T3 in TIER_3_INTERVAL)
                       Position monitoring
           Periodically: Discovery scan (full platform fetch, every DISCOVERY_INTERVAL)
+
+        Parameters
+        ----------
+        skip_stabilization : if True, bypass the startup stabilization window
+            (intended for --once / single-shot mode so a fresh startup doesn't
+            silently scan 0 markets).
         """
         logger.debug("=== ResolutionBot tier-1 cycle start ===")
         self._kalshi_backend_down = False   # reset circuit breaker each cycle
@@ -254,8 +260,10 @@ class ResolutionBot:
             return summary
 
         # ── Startup stabilization: monitor only, no new trades ────────────
+        # Skipped in --once / single-shot mode: there is only one cycle so the
+        # stabilization window would always fire, producing an empty scan.
         startup_elapsed = time.time() - self._startup_time
-        if startup_elapsed < STARTUP_STABILIZATION_SECONDS:
+        if not skip_stabilization and startup_elapsed < STARTUP_STABILIZATION_SECONDS:
             logger.info(
                 "ResolutionBot: startup stabilization (%ds remaining) – "
                 "monitoring open positions only",

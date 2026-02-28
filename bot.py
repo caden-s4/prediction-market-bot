@@ -164,10 +164,10 @@ class BotCoordinator:
             self._persist_state()
             logger.info("BotCoordinator: shutdown complete")
 
-    def run_once(self) -> dict:
+    def run_once(self, skip_stabilization: bool = False) -> dict:
         """Run a single scan cycle (for testing / --once mode)."""
         self._cycle_count += 1
-        result = self._resolution.run_once()
+        result = self._resolution.run_once(skip_stabilization=skip_stabilization)
         self._persist_state()
         result.update(self._bankroll.summary())
         result["platform_balances"] = self._platform_balances
