@@ -9,7 +9,8 @@ Source priority (used only as tiebreaker when confidence is equal):
   1. Sports     → ESPN API (live scores, final results)
   2. Economic   → FRED / BLS (data releases, rate decisions)
   3. Financial  → Twelve Data / Alpha Vantage / Yahoo Finance (prices)
-  4. Regulatory → Federal Register / CourtListener (filings, rulings)
+  4. Congress   → Congress.gov (bill passage, signed/vetoed legislation)
+  5. Regulatory → Federal Register / CourtListener (filings, rulings)
 
 If no source can handle the market, returns None and logs per-source failure
 reasons at DEBUG level so you can track which categories need new data sources.
@@ -28,6 +29,7 @@ from typing import List, Optional
 
 from data.markets.base import Market
 from .base import DataSource, GroundTruthResult
+from .congress import CongressSource
 from .economic import EconomicDataSource
 from .federal_register import FederalRegisterSource
 from .financial import FinancialDataSource
@@ -48,7 +50,8 @@ class GroundTruthRouter:
             SportsDataSource(),
             EconomicDataSource(),
             FinancialDataSource(),
-            FederalRegisterSource(),
+            CongressSource(),        # bill passage status (specific, definitive outcomes)
+            FederalRegisterSource(), # regulatory filings (broad political/legal coverage)
         ]
 
     def fetch(self, market: Market) -> Optional[GroundTruthResult]:

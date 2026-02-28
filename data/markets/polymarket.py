@@ -172,10 +172,17 @@ class PolymarketClient(BaseMarketClient):
         category: Optional[str] = None,
         tags: Optional[List[str]] = None,
         limit: int = 100,
+        end_date_max: Optional[str] = None,
+        end_date_min: Optional[str] = None,
         **kwargs,
     ) -> List[Market]:
         """
         Fetch open Polymarket markets via the Gamma (REST) API.
+
+        end_date_max / end_date_min : ISO-8601 strings (e.g. "2026-03-01T00:00:00Z").
+            Used for same-day sweeps — pass end_date_max=<now+48h> to surface
+            markets expiring in the next 48 hours that would otherwise be
+            buried behind high-volume long-dated markets in the default sort.
         """
         params: Dict[str, Any] = {
             "active": "true",
@@ -186,6 +193,10 @@ class PolymarketClient(BaseMarketClient):
             params["category"] = category
         if tags:
             params["tag_slug"] = ",".join(tags)
+        if end_date_max:
+            params["end_date_max"] = end_date_max
+        if end_date_min:
+            params["end_date_min"] = end_date_min
 
         try:
             resp = self._session.get(

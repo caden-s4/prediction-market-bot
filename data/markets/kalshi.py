@@ -45,6 +45,24 @@ _WEATHER_SERIES_TICKERS = [
     "KXWIND", "KXHURR", "KXWEATHER",
 ]
 
+# Known Kalshi sports series tickers.  Same-day game markets are short-lived
+# and can be buried deep in the paginated general fetch.  Querying these series
+# directly ensures they surface before they expire.
+_SPORTS_SERIES_TICKERS = [
+    "KXNFL",    # NFL game results
+    "KXNBA",    # NBA game results
+    "KXMLB",    # MLB game results
+    "KXNHL",    # NHL game results
+    "KXNCAAF",  # College football
+    "KXNCAAB",  # College basketball (March Madness)
+    "KXMLS",    # MLS soccer
+    "KXSOC",    # International soccer
+    "KXUFC",    # UFC / MMA
+    "KXGOLF",   # PGA / major golf events
+    "KXTENNIS", # Grand slam tennis
+    "KXNASCAR", # NASCAR race results
+]
+
 _CITY_COORDS: Dict[str, Dict[str, float]] = {
     # Major US metros
     "new york": {"lat": 40.71, "lon": -74.01},
@@ -398,6 +416,48 @@ class KalshiClient(BaseMarketClient):
         logger.debug("Kalshi weather scan complete: %d markets found", len(results))
         if not results:
             self._log_available_series()
+        return results
+
+    def get_sports_markets(self, limit: int = 100) -> List[Market]:
+        """Fetch sports-series markets directly via series_ticker.
+
+        Mirrors get_weather_markets() — queries each known sports series
+        ticker rather than relying on the general paginated fetch.  Same-day
+        game markets are short-lived and often buried behind long-dated markets
+        when fetching by close timestamp alone.
+
+        Silently skips series that return 0 results (off-season / not offered).
+        """
+        results: List[Market] = []
+        seen: set = set()
+
+        for i, series in enumerate(_SPORTS_SERIES_TICKERS):
+            if i > 0:
+                time.sleep(0.6)  # ~1 req/s — stay under Kalshi rate limit
+            try:
+                params: Dict[str, Any] = {
+                    "status": "open",
+                    "series_ticker": series,
+                    "limit": limit,
+                }
+                data = self._get("/markets", params=params)
+                raw = data.get("markets", [])
+                logger.debug("Kalshi sports series=%s → %d markets", series, len(raw))
+                for item in raw:
+                    ticker = item.get("ticker", "")
+                    if ticker in seen:
+                        continue
+                    seen.add(ticker)
+                    m = self._parse_market(item)
+                    if m:
+                        results.append(m)
+            except Exception as exc:
+                logger.debug("Kalshi sports series=%s fetch failed: %s", series, exc)
+
+        logger.info(
+            "Kalshi sports scan: %d markets across %d series",
+            len(results), len(_SPORTS_SERIES_TICKERS),
+        )
         return results
 
     def _log_available_series(self) -> None:

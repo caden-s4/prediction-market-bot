@@ -230,31 +230,65 @@ class FederalRegisterSource(DataSource):
 
     def _rule_matches_yes(self, question: str, rule_title: str) -> Optional[float]:
         """
-        Attempt to determine if a final rule means YES or NO for the market.
+        Determine whether a published regulatory document means YES or NO for
+        the market question.
 
-        This is a best-effort heuristic. If uncertain, return None (skip the trade).
+        Previous approach: required the SAME approve/reject vocabulary to appear
+        in BOTH the question AND the document title simultaneously.  This was
+        far too strict — market questions use informal phrasing ("Will X be
+        passed?") while Federal Register titles use bureaucratic language
+        ("Final Rule: Implementation of Regulatory Framework for…").  The
+        vocabulary rarely overlaps, causing almost every Final Rule to return
+        None even when the answer was obvious.
+
+        New approach: evaluate question intent and document outcome independently.
+
+        QUESTION INTENT — what is the market asking about?
+          approve_intent : question asks whether the rule will be adopted/enacted
+          reject_intent  : question asks whether the rule will be blocked/revoked
+
+        DOCUMENT OUTCOME — what does this document represent?
+          A published FINAL RULE inherently means the rule was APPROVED/ENACTED.
+          The only exception: if the document title contains revocation/repeal
+          language, the rule was rescinded (rejection outcome).
+
+        PROBABILITY MAPPING:
+          approve_intent + approval outcome → 1.0 (rule published = YES)
+          approve_intent + rejection outcome → 0.0 (rule revoked = NO)
+          reject_intent  + approval outcome → 0.0 (rule published = NO for rejection Q)
+          reject_intent  + rejection outcome → 1.0 (rule revoked = YES for rejection Q)
+          ambiguous intent (both or neither) → None (skip trade)
         """
         q = question.lower()
         t = rule_title.lower()
 
-        # Look for approval/denial language in question vs rule title
-        approve_words = ("approve", "pass", "enact", "finalize", "adopt", "publish")
-        reject_words = ("reject", "deny", "block", "ban", "revoke", "repeal", "withdraw")
+        # ── Question intent ───────────────────────────────────────────────────
+        approve_intent = any(w in q for w in (
+            "approve", "pass", "enact", "finalize", "adopt", "publish", "sign",
+            "implement", "take effect", "go into effect", "enacted", "confirmed",
+            "ratif",  # ratify / ratified
+        ))
+        reject_intent = any(w in q for w in (
+            "reject", "deny", "block", "ban", "revoke", "repeal", "withdraw",
+            "overturn", "struck down", "vacate", "enjoin", "halt", "suspend",
+            "veto", "fail", "kill",
+        ))
 
-        q_approves = any(w in q for w in approve_words)
-        q_rejects = any(w in q for w in reject_words)
-        t_approves = any(w in t for w in approve_words)
-        t_rejects = any(w in t for w in reject_words)
+        # ── Document outcome ──────────────────────────────────────────────────
+        # A published Final Rule is an approval/enactment by default.
+        # Title revocation/repeal words flip this to a rejection outcome.
+        doc_is_rejection = any(w in t for w in (
+            "revoc", "repeal", "withdrawal", "rescission", "termination",
+            "vacatur", "removal of", "elimination of",
+        ))
+        doc_is_approval = not doc_is_rejection
 
-        if q_approves and t_approves:
-            return 1.0
-        if q_approves and t_rejects:
-            return 0.0
-        if q_rejects and t_rejects:
-            return 1.0
-        if q_rejects and t_approves:
-            return 0.0
-        # Ambiguous – a rule exists but we can't tell if it's the YES outcome
+        # ── Map to probability ────────────────────────────────────────────────
+        if approve_intent and not reject_intent:
+            return 1.0 if doc_is_approval else 0.0
+        if reject_intent and not approve_intent:
+            return 0.0 if doc_is_approval else 1.0
+        # Both signals or neither — question intent is ambiguous; skip the trade.
         return None
 
     # ── CourtListener ─────────────────────────────────────────────────────────

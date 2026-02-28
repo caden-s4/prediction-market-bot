@@ -119,6 +119,48 @@ class BotCoordinator:
             max_daily_loss_usd=config.monitoring.max_daily_loss_usd,
         )
 
+        # ── Startup sanity checks ─────────────────────────────────────────
+        _MIN_VIABLE_BANKROLL = 50.0
+        _RECOMMENDED_BANKROLL = 200.0
+        if bc.dry_run and starting_bankroll < _MIN_VIABLE_BANKROLL:
+            logger.warning(
+                "DRY RUN: effective bankroll $%.2f is too small to generate any trades. "
+                "With %.0f%% Kelly even a perfect signal produces a position of ~$%.2f "
+                "(below the $1.00 minimum floor). "
+                "Type 'bank <amount>' at the prompt to set a virtual bankroll "
+                "(e.g. 'bank 500') and see realistic signal flow.",
+                starting_bankroll,
+                bc.resolution_kelly_fraction * 100,
+                starting_bankroll * bc.resolution_kelly_fraction * 0.15,
+            )
+        elif not bc.dry_run:
+            if starting_bankroll < _MIN_VIABLE_BANKROLL:
+                logger.warning(
+                    "BANKROLL TOO LOW TO TRADE: $%.2f is below the $%.0f minimum. "
+                    "With %.0f%% Kelly a 10%%-gap signal produces a ~$%.2f position — "
+                    "below the $1.00 floor. Fund to at least $%.0f before expecting trades.",
+                    starting_bankroll,
+                    _MIN_VIABLE_BANKROLL,
+                    bc.resolution_kelly_fraction * 100,
+                    starting_bankroll * bc.resolution_kelly_fraction * (0.10 / 0.90),
+                    _RECOMMENDED_BANKROLL,
+                )
+            elif starting_bankroll < _RECOMMENDED_BANKROLL:
+                logger.warning(
+                    "Bankroll $%.2f is below the recommended $%.0f minimum. "
+                    "Signal coverage will be limited — fund to $%.0f+ for reliable operation.",
+                    starting_bankroll, _RECOMMENDED_BANKROLL, _RECOMMENDED_BANKROLL,
+                )
+
+        if config.monitoring.max_daily_loss_usd <= 0 and not bc.dry_run:
+            logger.warning(
+                "MAX_DAILY_LOSS_USD=0: daily loss circuit-breaker is DISABLED. "
+                "Set MAX_DAILY_LOSS_USD in .env (e.g. %.0f for a $%.0f bankroll) "
+                "to automatically halt trading on excessive daily losses.",
+                round(starting_bankroll * 0.10),
+                starting_bankroll,
+            )
+
         # ── Monitoring ────────────────────────────────────────────────────
         self._event_db = EventDB()
         self._alerts = AlertManager(config.monitoring)
@@ -190,12 +232,61 @@ class BotCoordinator:
         """Wipe all tracked positions from memory and state (no exit orders placed)."""
         return self._resolution.clear_positions()
 
+    def get_bankroll(self) -> float:
+        """Return the current total bankroll (virtual or live)."""
+        return self._bankroll.total_usd
+
+    def set_virtual_bankroll(self, amount_usd: float) -> None:
+        """
+        Override the trading bankroll with a virtual amount.
+
+        Only valid in dry-run mode — useful for simulating realistic
+        signal flow when the real account balance is below the $1 trade floor.
+        Persists for the session but does not write to .env or state on disk.
+        """
+        if not self._cfg.bot.dry_run:
+            raise RuntimeError(
+                "set_virtual_bankroll() is only available in dry-run mode. "
+                "Set DRY_RUN=true in .env to use virtual capital."
+            )
+        if amount_usd <= 0:
+            raise ValueError(f"Virtual bankroll must be positive, got {amount_usd}")
+        self._bankroll.set_total(amount_usd)
+        self._platform_balances["virtual_usd"] = amount_usd
+        logger.info(
+            "BotCoordinator: virtual bankroll set to $%.2f (dry-run session only)",
+            amount_usd,
+        )
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _fetch_balances(self) -> dict:
         """Query live cash/USDC balances from each enabled platform."""
         kalshi_bal = self._kalshi.get_balance() if self._kalshi else None
-        poly_bal = self._poly.get_balance() if self._poly else None
+
+        poly_bal = None
+        if self._poly:
+            poly_bal = self._poly.get_balance()
+            if poly_bal is None:
+                if getattr(self._poly, "_public_mode", False):
+                    logger.warning(
+                        "Polymarket balance: n/a — client is in PUBLIC MODE (read-only). "
+                        "Set POLYMARKET_PUBLIC_MODE=false and provide credentials "
+                        "to see your wallet balance."
+                    )
+                elif not getattr(self._poly, "_clob_client", None):
+                    logger.warning(
+                        "Polymarket balance: n/a — py-clob-client not available. "
+                        "Run: pip install py-clob-client"
+                    )
+                else:
+                    logger.warning(
+                        "Polymarket balance: n/a — get_balance() returned None. "
+                        "Verify POLYMARKET_PRIVATE_KEY, POLYMARKET_FUNDER_ADDRESS, "
+                        "and POLYMARKET_API_KEY/SECRET/PASSPHRASE in .env. "
+                        "Also confirm your wallet has USDC on Polygon mainnet (chain 137)."
+                    )
+
         total = (kalshi_bal or 0.0) + (poly_bal or 0.0)
         return {
             "kalshi_usd": kalshi_bal,
