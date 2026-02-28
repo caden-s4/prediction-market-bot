@@ -162,7 +162,11 @@ class ResolutionBot:
         self._registry = TierRegistry()
 
         # When each tier / discovery scan last ran (monotonic seconds).
-        self._last_discovery_at: float = 0.0   # force discovery on first cycle
+        # float("-inf") guarantees the discovery condition fires on the very
+        # first call regardless of how small time.monotonic() is (e.g. on a
+        # freshly booted machine where monotonic < DISCOVERY_INTERVAL = 1800s,
+        # the old 0.0 sentinel would cause discovery to be silently skipped).
+        self._last_discovery_at: float = float("-inf")   # force discovery on first cycle
         self._last_tier2_at: float = 0.0
         self._last_tier3_at: float = 0.0
 
