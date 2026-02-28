@@ -116,7 +116,7 @@ class GroundTruthRouter:
             )
             return best
 
-        logger.info("GroundTruthRouter: no source could handle %s", market.market_id)
+        logger.debug("GroundTruthRouter: no source could handle %s", market.market_id)
         if none_reasons:
             logger.debug(
                 "GroundTruthRouter: per-source failures for %s — %s",
