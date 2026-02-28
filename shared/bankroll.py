@@ -65,6 +65,12 @@ class Bankroll:
         with self._lock:
             return self._reserved_usd
 
+    def set_total(self, amount_usd: float) -> None:
+        """Override the total bankroll (for dry-run virtual capital)."""
+        with self._lock:
+            self._total_usd = amount_usd
+        logger.info("Bankroll: total overridden to $%.2f", amount_usd)
+
     def is_halted(self) -> bool:
         """True if the daily loss limit has been breached."""
         with self._lock:

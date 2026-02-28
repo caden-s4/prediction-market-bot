@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from data.markets.base import BaseMarketClient, Market
@@ -197,6 +197,33 @@ class ResolutionScanner:
                 logger.warning(
                     "ResolutionScanner: failed fetching kalshi markets: %s", exc
                 )
+
+            # Sports supplement: query sports series tickers directly.
+            # Same-day game markets (NBA tonight, NFL Sunday) are short-lived
+            # and may be buried behind long-dated markets in the general fetch.
+            # SportsDataSource needs these to generate GT signals.
+            if hasattr(client, "get_sports_markets"):
+                try:
+                    sports_markets = client.get_sports_markets()
+                    added = 0
+                    for m in sports_markets:
+                        if m.market_id not in seen:
+                            reason = self._reject_reason(m, window_hours)
+                            if reason:
+                                rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
+                            else:
+                                seen.add(m.market_id)
+                                results.append(m)
+                                added += 1
+                    if added:
+                        logger.info(
+                            "ResolutionScanner: kalshi sports supplement → %d additional markets",
+                            added,
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "ResolutionScanner: kalshi sports supplement failed: %s", exc
+                    )
         else:
             for category in SCAN_CATEGORIES:
                 try:
@@ -212,6 +239,41 @@ class ResolutionScanner:
                     logger.warning(
                         "ResolutionScanner: failed fetching %s/%s: %s",
                         platform_name, category, exc,
+                    )
+
+            # Near-term sweep: fetch same-day Polymarket markets (expiring in ≤48h)
+            # for every category.  The Gamma API default sort buries short-dated markets
+            # behind high-volume long-dated ones, so a targeted end_date_max query is
+            # the only reliable way to surface today's NBA games, economic releases, etc.
+            if hasattr(client, "get_markets"):
+                now = datetime.now(timezone.utc)
+                end_max = (now + timedelta(hours=48)).strftime("%Y-%m-%dT%H:%M:%SZ")
+                added = 0
+                for category in SCAN_CATEGORIES:
+                    try:
+                        near_markets = client.get_markets(
+                            category=category,
+                            limit=100,
+                            end_date_max=end_max,
+                        )
+                        for m in near_markets:
+                            if m.market_id not in seen:
+                                reason = self._reject_reason(m, window_hours)
+                                if not reason:
+                                    seen.add(m.market_id)
+                                    results.append(m)
+                                    added += 1
+                                elif reason:
+                                    rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
+                    except Exception as exc:
+                        logger.debug(
+                            "ResolutionScanner: near-term sweep failed %s/%s: %s",
+                            platform_name, category, exc,
+                        )
+                if added:
+                    logger.info(
+                        "ResolutionScanner: polymarket near-term sweep (≤48h) → %d additional markets",
+                        added,
                     )
 
         if rejected_reasons:

@@ -385,6 +385,7 @@ def _print_help() -> None:
     print("  sig / signals     Show gap signals from the last scan cycle")
     print("  pairs [N]         Near-miss cross-platform pairs ranked by overlap")
     print("  s  /  scan        Run a scan cycle right now")
+    print("  bank <amount>     Set virtual bankroll for this session (dry-run only)")
     print("  clear             Wipe all tracked positions (no exit orders placed)")
     print("  h  /  help        Show this help")
     print("  Ctrl-C            Stop the bot")
@@ -416,6 +417,23 @@ def _start_command_listener(coordinator: BotCoordinator, scan_event: threading.E
                 elif cmd == "clear":
                     n = coordinator.clear_positions()
                     print(f"  Cleared {n} position(s) from state.")
+                elif cmd.startswith("bank"):
+                    parts = cmd.split()
+                    if not cfg.bot.dry_run:
+                        print("  'bank' command is only available in dry-run mode.")
+                    elif len(parts) < 2:
+                        cur = coordinator.get_bankroll()
+                        print(f"  Current bankroll: ${cur:,.2f}  (usage: bank <amount>)")
+                    else:
+                        try:
+                            amount = float(parts[1].replace(",", ""))
+                            coordinator.set_virtual_bankroll(amount)
+                            print(f"  Virtual bankroll set to ${amount:,.2f}  "
+                                  f"(session only, not saved to .env)")
+                        except ValueError:
+                            print(f"  Usage: bank <amount>   e.g.  bank 500")
+                        except RuntimeError as e:
+                            print(f"  Error: {e}")
                 elif cmd in ("h", "help", "?"):
                     _print_help()
                 elif cmd:
@@ -427,7 +445,7 @@ def _start_command_listener(coordinator: BotCoordinator, scan_event: threading.E
 
     t = threading.Thread(target=_listen, daemon=True, name="cmd-listener")
     t.start()
-    print("  Type 'p' positions · 's' scan now · 'pairs' near-miss · 'help'\n")
+    print("  Type 'p' positions · 's' scan now · 'pairs' near-miss · 'bank <amount>' virtual bankroll · 'help'\n")
 
 
 def parse_args() -> argparse.Namespace:
@@ -442,14 +460,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--info",
         action="store_true",
-        help="Show INFO-level log lines on the console (default: WARNING+ only)",
+        help="Show INFO-level log lines on the console (now the default; kept for compatibility)",
     )
     parser.add_argument(
         "--log-level",
-        default="WARNING",
+        default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging verbosity for the console (default: WARNING). "
-             "--info is a shortcut for --log-level INFO.",
+        help="Logging verbosity for the console (default: INFO). "
+             "Use WARNING to suppress routine status messages.",
     )
     parser.add_argument(
         "--log-file",
@@ -469,7 +487,7 @@ def main() -> None:
     # --info is a shortcut for --log-level INFO; explicit --log-level takes priority
     # if both are set (e.g. --info --log-level DEBUG the user gets DEBUG).
     log_level = args.log_level
-    if args.info and args.log_level == "WARNING":
+    if args.info:
         log_level = "INFO"
     setup_logging(level=log_level, log_file=args.log_file)
     logger = logging.getLogger(__name__)
