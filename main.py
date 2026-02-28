@@ -393,7 +393,11 @@ def _print_help() -> None:
     print()
 
 
-def _start_command_listener(coordinator: BotCoordinator, scan_event: threading.Event) -> None:
+def _start_command_listener(
+    coordinator: BotCoordinator,
+    scan_event: threading.Event,
+    cfg: AppConfig,
+) -> None:
     """Spawn a daemon thread that reads commands from stdin while the bot runs."""
     if not sys.stdin.isatty():
         return  # Skip in non-interactive mode (piped input, cron, etc.)
@@ -442,6 +446,8 @@ def _start_command_listener(coordinator: BotCoordinator, scan_event: threading.E
                 break
             except KeyboardInterrupt:
                 break
+            except Exception as exc:  # noqa: BLE001
+                print(f"  Command error: {exc}")
 
     t = threading.Thread(target=_listen, daemon=True, name="cmd-listener")
     t.start()
@@ -518,7 +524,7 @@ def main() -> None:
         interval = cfg.bot.resolution_scan_interval_seconds
         logger.info("Starting continuous scan (interval=%ds)", interval)
         scan_event = threading.Event()
-        _start_command_listener(coordinator, scan_event)
+        _start_command_listener(coordinator, scan_event, cfg)
         _inhibit_sleep()
         try:
             while True:
