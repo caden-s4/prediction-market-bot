@@ -129,10 +129,22 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
     k_s = f"${kalshi_bal:>9,.2f}" if kalshi_bal is not None else "       n/a"
     p_s = f"${poly_bal:>9,.2f}"   if poly_bal  is not None else "       n/a"
 
+    registry = result.get("registry", {})
+    reg_t1    = registry.get("t1", 0)
+    reg_t2    = registry.get("t2", 0)
+    reg_t3    = registry.get("t3", 0)
+    reg_total = registry.get("total", 0)
+    # Show registry breakdown only when the registry has been populated.
+    reg_str = (
+        f"  Registry (discovered)    T1={reg_t1}  T2={reg_t2}  T3={reg_t3}  ({reg_total} total)\n"
+        if reg_total else ""
+    )
+
     print(f"\n{sep}")
     print(f"  SCAN COMPLETE   {now}   {mode}   {platform_str}{halt_s}{cycle_s}")
     print(sep)
-    print(f"  Markets scanned          {scanned:>5}")
+    print(f"  Markets scanned          {scanned:>5}   (T1 all + T2 rotating batch)")
+    print(f"{reg_str}", end="")
     print(f"  Cross-platform pairs     {pairs:>5}")
     print(f"  Gap signals detected     {signals:>5}{signal_tag}")
     print(f"  Trades fired             {trades:>5}{trade_tag}")
@@ -401,7 +413,16 @@ def main() -> None:
         try:
             while True:
                 try:
-                    result = coordinator.run_once()
+                    # Skip the startup stabilization guard in continuous mode.
+                    # The guard was designed for run_forever() where cycles fire
+                    # every 15s — in that context "wait 60s" prevented trading
+                    # on data that hadn't been fetched yet.  Here the scheduler
+                    # sleeps `interval` seconds (≥ 60s by default) between
+                    # cycles, so the gap is already at least one full interval.
+                    # More importantly, the discovery scan runs *inside* the
+                    # first call, so fresh prices are fetched before any gap
+                    # evaluation; there is nothing stale to guard against.
+                    result = coordinator.run_once(skip_stabilization=True)
                     _print_summary(result, cfg, show_names=show_names)
                 except KeyboardInterrupt:
                     logger.info("Stopped by user")
