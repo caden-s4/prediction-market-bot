@@ -328,6 +328,9 @@ class ResolutionBot:
         # These are the only markets that get full gap detection + GT evaluation.
         active_markets = t1_markets + t2_markets
         summary["markets_scanned"] = len(active_markets)
+        summary["t1_scanned"]      = len(t1_markets)
+        summary["t2_scanned"]      = len(t2_markets)
+        summary["t2_total"]        = len(self._registry.get_tier(2))
         summary["scanned_sample"] = [
             {
                 "question": m.question,
