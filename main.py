@@ -303,11 +303,9 @@ def _print_near_miss_pairs(coordinator: BotCoordinator, top_n: int = 10) -> None
     """
     Print the top-N near-miss cross-platform pairs ranked by word overlap.
 
-    Near-misses are (poly, kalshi) combinations that shared at least one
-    significant word but did NOT satisfy both match criteria (overlap >= 3
-    AND resolution-date delta <= 6h).  Knowing which pairs nearly matched
-    tells you whether the algorithm needs a wider time window, looser word
-    threshold, or extra synonyms.
+    Only pairs within the 6h time window are shown (the time gate is now a
+    hard pre-filter).  A near-miss is a within-window pair that failed the
+    word-count (>=3) or entity-match requirement.
     """
     pairs = coordinator.get_near_miss_pairs(top_n)
     sep  = "=" * _SEP_W
@@ -315,32 +313,36 @@ def _print_near_miss_pairs(coordinator: BotCoordinator, top_n: int = 10) -> None
     now  = datetime.now().strftime("%H:%M:%S")
 
     print(f"\n{sep}")
-    print(f"  NEAR-MISS PAIRS   {now}   (top {top_n})")
+    print(f"  NEAR-MISS PAIRS   {now}   (top {top_n}, within-6h window only)")
     print(sep)
 
     if not pairs:
-        print("  Registry is empty — run a scan first ('s') to populate it.")
-        print("  (Zero results also means zero poly×kalshi word overlap at all.)")
+        print("  No near-misses found (registry empty, no within-window pairs,")
+        print("  or all within-window pairs fully matched).")
+        print("  Run a scan first ('s') if the registry is empty.")
         print(f"{sep}\n")
         return
 
     for i, p in enumerate(pairs, 1):
-        overlap_s = ", ".join(p["overlap_words"])
-        n_words   = p["overlap_count"]
-        dt_h      = p["time_delta_hours"]
-        words_ok  = p["would_match_on_words"]
-        time_ok   = p["would_match_on_time"]
+        n_words    = p["overlap_count"]
+        dt_h       = p["time_delta_hours"]
+        words_ok   = p["would_match_on_words"]
+        entity_ok  = p.get("would_match_on_entity", p.get("has_entity_overlap", False))
+        overlap_s  = ", ".join(p["overlap_words"])
+        entity_s   = ", ".join(p.get("entity_words", [])) or "none"
 
         blockers = []
         if not words_ok:
             blockers.append(f"needs {3 - n_words} more word(s)")
-        if not time_ok:
-            blockers.append(f"Δt={dt_h:.0f}h > 6h limit")
-        blocker_s = "BLOCKED: " + " + ".join(blockers)
+        if not entity_ok:
+            blockers.append("no entity overlap")
+        blocker_s = "BLOCKED: " + " + ".join(blockers) if blockers else "BLOCKED: (unknown)"
 
         gap_s = f"  Δprice={p['price_gap']:.3f}" if p["price_gap"] else ""
 
-        print(f"  #{i:02d}  overlap={n_words}  [{overlap_s}]{gap_s}")
+        print(f"  #{i:02d}  overlap={n_words}  Δt={dt_h:.1f}h{gap_s}")
+        print(f"       words:   [{overlap_s}]")
+        print(f"       entity:  [{entity_s}]")
         print(f"       {blocker_s}")
 
         pq = p["poly_question"]
