@@ -431,6 +431,9 @@ class ResolutionBot:
         exits = self._monitor_positions()
         summary["exits_triggered"] = exits
 
+        # Refresh registry stats at end so cycle #1 reflects post-discovery state.
+        summary["registry"] = self._registry.stats()
+
         elapsed = (time.monotonic() - cycle_start) * 1000
         summary["cycle_ms"] = round(elapsed)
         logger.debug("ResolutionBot: cycle done in %.0fms | %s", elapsed, summary)
@@ -485,9 +488,13 @@ class ResolutionBot:
             return []
 
         interval = TIER_2_INTERVAL if tier == 2 else TIER_3_INTERVAL
-        # How many markets to process per TIER_1_INTERVAL to cover the full
-        # tier within one tier interval.
-        cycles_per_interval = max(1, interval // TIER_1_INTERVAL)
+        # How many markets to process per cycle to cover the full tier within
+        # one tier interval.  Use the actual configured scan interval (e.g. 60s
+        # from main.py) rather than TIER_1_INTERVAL (15s); if we used 15s here
+        # but cycles only fire every 60s, we'd cover 4× fewer markets per cycle
+        # and need 4× as long to sweep the full T2/T3 pool.
+        cycle_s = max(1, self._scan_interval)
+        cycles_per_interval = max(1, interval // cycle_s)
         batch_size = max(1, math.ceil(len(entries) / cycles_per_interval))
 
         cursor = self._tier_cursors.get(tier, 0) % len(entries)
