@@ -247,9 +247,52 @@ class ResolutionScanner:
     # ── Word-overlap helpers ──────────────────────────────────────────────────
 
     _STOP_WORDS: frozenset = frozenset({
+        # Articles, prepositions, linking verbs (original)
         "will", "the", "a", "an", "be", "is", "are", "was",
         "by", "in", "on", "at", "to", "of", "for", "and", "or",
         "yes", "no", "this", "that", "before", "after",
+        # Auxiliary and question verbs
+        "would", "does", "did", "has", "have", "been", "any",
+        # Month names — present in almost every market title, zero entity signal
+        "january", "february", "march", "april", "june", "july",
+        "august", "september", "october", "november", "december",
+        # Calendar years — same reason
+        "2024", "2025", "2026", "2027",
+        # Generic temporal qualifiers
+        "until", "during", "start", "beginning",
+    })
+
+    # Words that must appear in the overlap set for a pair to be considered
+    # the same event.  Pure date / temporal matches with no entity word score 0.
+    _ENTITY_WORDS: frozenset = frozenset({
+        # ── Named people (politics) ───────────────────────────────────────────
+        "trump", "biden", "harris", "obama", "clinton", "pence",
+        "putin", "zelensky", "netanyahu", "modi", "macron", "scholz",
+        "musk", "elon",
+        # ── US political institutions / roles ─────────────────────────────────
+        "congress", "senate", "house", "supreme", "court", "president",
+        "democrat", "democratic", "republican", "electoral", "inauguration",
+        "cabinet",
+        # ── Countries and regions ─────────────────────────────────────────────
+        "china", "russia", "ukraine", "iran", "israel", "india", "france",
+        "germany", "britain", "japan", "korea", "taiwan", "mexico", "canada",
+        "europe", "nato", "european", "union", "saudi", "arabia", "pakistan",
+        "turkey", "brazil", "australia",
+        # ── Economic indicators and institutions ──────────────────────────────
+        "federal", "reserve", "fomc", "inflation", "recession",
+        "unemployment", "payrolls", "nonfarm",
+        # ── Financial instruments / markets ───────────────────────────────────
+        "nasdaq", "bitcoin", "ethereum", "gold", "silver", "crude",
+        "treasury", "dollar", "euro", "pound",
+        # ── Major companies / brands ──────────────────────────────────────────
+        "apple", "microsoft", "nvidia", "tesla", "amazon", "google",
+        "meta", "openai", "anthropic", "spacex",
+        # ── Sports events and teams ───────────────────────────────────────────
+        "superbowl", "championship", "playoffs", "worldcup", "wimbledon",
+        "lakers", "celtics", "cowboys", "patriots", "chiefs", "eagles",
+        "yankees", "dodgers", "warriors", "knicks", "lebron", "mahomes",
+        # ── Legal / regulatory ────────────────────────────────────────────────
+        "antitrust", "verdict", "conviction", "indictment",
     })
 
     @staticmethod
@@ -262,15 +305,23 @@ class ResolutionScanner:
         }
 
     @staticmethod
+    def _has_entity_overlap(common_words: set) -> bool:
+        """Return True if at least one word in common_words is a recognised entity."""
+        return bool(common_words & ResolutionScanner._ENTITY_WORDS)
+
+    @staticmethod
     def _same_event(poly: Market, kalshi: Market) -> bool:
         """
         Heuristic to detect if two markets (different platforms) describe the
-        same real-world event.
+        same real-world event.  Three criteria, evaluated in order:
 
-        Uses question text similarity: if 3+ significant words overlap AND
-        resolution dates are within 6 hours of each other.
+        1. Time delta <= 6h    (hard gate, checked first — cheap)
+        2. 3+ significant word overlap
+        3. At least one overlapping word is a recognised entity (named person,
+           organisation, country, team, or economic indicator).  Pure
+           date/temporal overlap with no entity word scores 0.
         """
-        # Time window check
+        # ── 1. Time gate (fast, no string work) ───────────────────────────────
         try:
             dt = abs((poly.resolution_date - kalshi.resolution_date).total_seconds())
             if dt > 6 * 3600:
@@ -278,32 +329,43 @@ class ResolutionScanner:
         except Exception:
             return False
 
+        # ── 2. Word overlap ───────────────────────────────────────────────────
         p_words = ResolutionScanner._sig_words(poly.question)
         k_words = ResolutionScanner._sig_words(kalshi.question)
-        return len(p_words & k_words) >= 3
+        common  = p_words & k_words
+        if len(common) < 3:
+            return False
+
+        # ── 3. Entity requirement ─────────────────────────────────────────────
+        return ResolutionScanner._has_entity_overlap(common)
 
     def score_near_miss_pairs(
         self, markets: List[Market], top_n: int = 10
     ) -> List[dict]:
         """
-        Score all (poly × kalshi) combinations by word overlap and return the
-        top_n pairs that almost matched but didn't.
+        Score all (poly × kalshi) combinations within the 6h time window and
+        return the top_n pairs that almost matched but didn't.
 
-        A "near miss" is any pair with at least 1 overlapping significant word
-        that does NOT fully satisfy both match criteria (overlap >= 3 AND
-        time delta <= 6h).  Fully-matched pairs are excluded.
+        The time delta is checked first (hard gate, same order as _same_event)
+        so pairs 700h apart are never even text-compared.  A "near miss" is a
+        within-window pair with at least 1 overlapping significant word that
+        did NOT satisfy both the word-count (>=3) AND entity requirements.
+        Fully-matched pairs are excluded.
 
         Each result dict contains:
-          overlap_count        – number of shared significant words
-          overlap_words        – sorted list of those words
-          time_delta_hours     – absolute difference in resolution times
-          would_match_on_words – True if overlap >= 3 (words criterion met)
-          would_match_on_time  – True if time delta <= 6h (time criterion met)
+          overlap_count          – number of shared significant words
+          overlap_words          – sorted list of those words
+          entity_words           – subset of overlap_words that are entities
+          has_entity_overlap     – True if at least one entity word matched
+          time_delta_hours       – absolute difference in resolution times
+          would_match_on_words   – True if overlap >= 3
+          would_match_on_entity  – True if has_entity_overlap
           poly_question / poly_market_id / poly_hours_left / poly_yes_price
           kalshi_question / kalshi_market_id / kalshi_hours_left / kalshi_yes_price
-          price_gap            – |poly_yes - kalshi_yes|
+          price_gap              – |poly_yes - kalshi_yes|
 
-        Sorted by overlap_count descending, then time_delta_hours ascending.
+        Sorted by overlap_count desc, entity overlap (present > absent), then
+        time_delta_hours asc.
         """
         poly_markets   = [m for m in markets if m.platform == "polymarket"]
         kalshi_markets = [m for m in markets if m.platform == "kalshi"]
@@ -312,47 +374,59 @@ class ResolutionScanner:
         for pm in poly_markets:
             pw = self._sig_words(pm.question)
             for km in kalshi_markets:
-                kw     = self._sig_words(km.question)
-                common = pw & kw
-                if not common:
-                    continue
-
+                # ── 1. Time gate (pre-filter — no text work for distant pairs) ─
                 try:
                     dt_hours = abs(
                         (pm.resolution_date - km.resolution_date).total_seconds()
                     ) / 3600
                 except Exception:
-                    dt_hours = float("inf")
+                    continue  # unparseable dates — skip
+                if dt_hours > 6.0:
+                    continue
 
-                words_ok = len(common) >= 3
-                time_ok  = dt_hours <= 6.0
+                # ── 2. Word overlap ────────────────────────────────────────────
+                kw     = self._sig_words(km.question)
+                common = pw & kw
+                if not common:
+                    continue
 
-                if words_ok and time_ok:
-                    continue  # this is a full match, not a near-miss
+                # ── 3. Entity overlap ──────────────────────────────────────────
+                entity_words = sorted(common & self._ENTITY_WORDS)
+                has_entity   = bool(entity_words)
+                words_ok     = len(common) >= 3
+
+                if words_ok and has_entity:
+                    continue  # full match — not a near-miss
 
                 results.append({
-                    "overlap_count":        len(common),
-                    "overlap_words":        sorted(common),
-                    "time_delta_hours":     round(dt_hours, 1),
-                    "would_match_on_words": words_ok,
-                    "would_match_on_time":  time_ok,
-                    "poly_question":        pm.question,
-                    "poly_market_id":       pm.market_id,
-                    "poly_hours_left":      round(pm.hours_to_resolution, 1),
-                    "poly_yes_price":       pm.yes_price,
-                    "kalshi_question":      km.question,
-                    "kalshi_market_id":     km.market_id,
-                    "kalshi_hours_left":    round(km.hours_to_resolution, 1),
-                    "kalshi_yes_price":     km.yes_price,
-                    "price_gap":            round(abs(pm.yes_price - km.yes_price), 4),
+                    "overlap_count":         len(common),
+                    "overlap_words":         sorted(common),
+                    "entity_words":          entity_words,
+                    "has_entity_overlap":    has_entity,
+                    "time_delta_hours":      round(dt_hours, 1),
+                    "would_match_on_words":  words_ok,
+                    "would_match_on_entity": has_entity,
+                    "poly_question":         pm.question,
+                    "poly_market_id":        pm.market_id,
+                    "poly_hours_left":       round(pm.hours_to_resolution, 1),
+                    "poly_yes_price":        pm.yes_price,
+                    "kalshi_question":       km.question,
+                    "kalshi_market_id":      km.market_id,
+                    "kalshi_hours_left":     round(km.hours_to_resolution, 1),
+                    "kalshi_yes_price":      km.yes_price,
+                    "price_gap":             round(abs(pm.yes_price - km.yes_price), 4),
                 })
 
-        # Best near-misses first: most overlapping words; break ties by smallest
-        # time delta so "almost matched on time too" floats to the top.
-        results.sort(key=lambda r: (-r["overlap_count"], r["time_delta_hours"]))
+        # Best near-misses first: most overlapping words; entity overlap floats
+        # above non-entity; ties broken by smallest time delta.
+        results.sort(key=lambda r: (
+            -r["overlap_count"],
+            -int(r["has_entity_overlap"]),
+            r["time_delta_hours"],
+        ))
         logger.info(
-            "ResolutionScanner: near-miss analysis: %d poly × %d kalshi = %d pairs "
-            "with ≥1 overlap word, returning top %d",
+            "ResolutionScanner: near-miss analysis: %d poly × %d kalshi, "
+            "%d within-window pairs with ≥1 overlap word, returning top %d",
             len(poly_markets), len(kalshi_markets), len(results), top_n,
         )
         return results[:top_n]
