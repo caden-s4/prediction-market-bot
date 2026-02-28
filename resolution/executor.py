@@ -1078,9 +1078,9 @@ class ResolutionBot:
             })
         return result
 
-    def get_near_miss_pairs(self, n: int = 10) -> list:
+    def get_near_miss_pairs(self, n: int = 10) -> tuple:
         """
-        Return the top-N near-miss cross-platform pairs from the current registry.
+        Return (results[:n], stats) for near-miss cross-platform pairs.
 
         Uses all markets currently in the tier registry (no new API calls).
         Run at least one scan cycle first so the registry is populated.

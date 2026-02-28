@@ -341,10 +341,10 @@ class ResolutionScanner:
 
     def score_near_miss_pairs(
         self, markets: List[Market], top_n: int = 10
-    ) -> List[dict]:
+    ) -> Tuple[List[dict], dict]:
         """
         Score all (poly × kalshi) combinations within the 6h time window and
-        return the top_n pairs that almost matched but didn't.
+        return ``(results[:top_n], stats)``.
 
         The time delta is checked first (hard gate, same order as _same_event)
         so pairs 700h apart are never even text-compared.  A "near miss" is a
@@ -364,13 +364,22 @@ class ResolutionScanner:
           kalshi_question / kalshi_market_id / kalshi_hours_left / kalshi_yes_price
           price_gap              – |poly_yes - kalshi_yes|
 
+        The stats dict contains:
+          poly_count        – number of Polymarket markets in the registry
+          kalshi_count      – number of Kalshi markets in the registry
+          within_window     – pairs that passed the Δt ≤ 6h gate
+          with_word_overlap – within-window pairs with ≥1 overlapping word
+
         Sorted by overlap_count desc, entity overlap (present > absent), then
         time_delta_hours asc.
         """
         poly_markets   = [m for m in markets if m.platform == "polymarket"]
         kalshi_markets = [m for m in markets if m.platform == "kalshi"]
 
+        within_window    = 0
+        with_word_overlap = 0
         results: List[dict] = []
+
         for pm in poly_markets:
             pw = self._sig_words(pm.question)
             for km in kalshi_markets:
@@ -383,12 +392,14 @@ class ResolutionScanner:
                     continue  # unparseable dates — skip
                 if dt_hours > 6.0:
                     continue
+                within_window += 1
 
                 # ── 2. Word overlap ────────────────────────────────────────────
                 kw     = self._sig_words(km.question)
                 common = pw & kw
                 if not common:
                     continue
+                with_word_overlap += 1
 
                 # ── 3. Entity overlap ──────────────────────────────────────────
                 entity_words = sorted(common & self._ENTITY_WORDS)
@@ -424,9 +435,17 @@ class ResolutionScanner:
             -int(r["has_entity_overlap"]),
             r["time_delta_hours"],
         ))
+
+        stats = {
+            "poly_count":       len(poly_markets),
+            "kalshi_count":     len(kalshi_markets),
+            "within_window":    within_window,
+            "with_word_overlap": with_word_overlap,
+        }
         logger.info(
             "ResolutionScanner: near-miss analysis: %d poly × %d kalshi, "
-            "%d within-window pairs with ≥1 overlap word, returning top %d",
-            len(poly_markets), len(kalshi_markets), len(results), top_n,
+            "%d within-window, %d with word overlap, %d near-misses (top %d returned)",
+            len(poly_markets), len(kalshi_markets),
+            within_window, with_word_overlap, len(results), top_n,
         )
-        return results[:top_n]
+        return results[:top_n], stats
