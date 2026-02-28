@@ -527,6 +527,14 @@ class ResolutionBot:
         logger.info(
             "ResolutionBot: fetching ground truth for %d candidate markets…", total
         )
+
+        # Coverage diagnostic counters
+        n_no_source: int = 0        # GT router returned None — no data source covers this market
+        n_no_prob: int = 0          # GT source found but couldn't extract a probability
+        n_covered: int = 0          # GT source returned a usable probability
+        n_gap_too_small: int = 0    # Covered but gap < minimum trading threshold
+        coverage_sources: Dict[str, int] = {}  # source_name → count of markets covered
+
         for i, market in enumerate(candidates, 1):
             if i % 25 == 0 or i == total:
                 logger.info(
@@ -534,8 +542,15 @@ class ResolutionBot:
                     i, total, len(signals),
                 )
             gt = self._ground_truth.fetch(market)
-            if gt is None or gt.ground_truth_prob is None:
+            if gt is None:
+                n_no_source += 1
                 continue
+            if gt.ground_truth_prob is None:
+                n_no_prob += 1
+                continue
+
+            n_covered += 1
+            coverage_sources[gt.source_name] = coverage_sources.get(gt.source_name, 0) + 1
 
             signal = self._gap_detector.detect_information_signal(
                 market, gt.ground_truth_prob
@@ -544,6 +559,22 @@ class ResolutionBot:
                 signal.ground_truth_prob = gt.ground_truth_prob
                 signal.ground_truth_result = gt  # preserve real source confidence
                 signals.append(signal)
+            else:
+                n_gap_too_small += 1
+
+        # Emit a single summary line so operators can distinguish
+        # "no data sources cover these markets" from "markets are efficiently priced".
+        sources_str = (
+            ", ".join(f"{src}={cnt}" for src, cnt in sorted(coverage_sources.items()))
+            if coverage_sources else "none"
+        )
+        logger.info(
+            "ResolutionBot: GT coverage summary — "
+            "no_source=%d no_prob=%d covered=%d (sources: %s) "
+            "gap_too_small=%d actionable=%d",
+            n_no_source, n_no_prob, n_covered, sources_str,
+            n_gap_too_small, len(signals),
+        )
 
         # Deduplicate: cap at MAX_SIGNALS_PER_SOURCE_ACTION per (source, direction)
         # bucket so a single instrument (e.g. Nasdaq) can't consume the whole
