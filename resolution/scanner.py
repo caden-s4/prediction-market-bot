@@ -244,6 +244,23 @@ class ResolutionScanner:
     def _is_candidate(self, market: Market, window_hours: float) -> bool:
         return self._reject_reason(market, window_hours) is None
 
+    # ── Word-overlap helpers ──────────────────────────────────────────────────
+
+    _STOP_WORDS: frozenset = frozenset({
+        "will", "the", "a", "an", "be", "is", "are", "was",
+        "by", "in", "on", "at", "to", "of", "for", "and", "or",
+        "yes", "no", "this", "that", "before", "after",
+    })
+
+    @staticmethod
+    def _sig_words(text: str) -> set:
+        """Return the set of significant (non-stop, length > 3) words from text."""
+        stop = ResolutionScanner._STOP_WORDS
+        return {
+            w.lower() for w in text.split()
+            if len(w) > 3 and w.lower() not in stop
+        }
+
     @staticmethod
     def _same_event(poly: Market, kalshi: Market) -> bool:
         """
@@ -261,20 +278,81 @@ class ResolutionScanner:
         except Exception:
             return False
 
-        # Word overlap heuristic
-        stop = {
-            "will", "the", "a", "an", "be", "is", "are", "was",
-            "by", "in", "on", "at", "to", "of", "for", "and", "or",
-            "yes", "no", "this", "that", "before", "after",
-        }
+        p_words = ResolutionScanner._sig_words(poly.question)
+        k_words = ResolutionScanner._sig_words(kalshi.question)
+        return len(p_words & k_words) >= 3
 
-        def sig_words(text: str) -> set:
-            return {
-                w.lower() for w in text.split()
-                if len(w) > 3 and w.lower() not in stop
-            }
+    def score_near_miss_pairs(
+        self, markets: List[Market], top_n: int = 10
+    ) -> List[dict]:
+        """
+        Score all (poly × kalshi) combinations by word overlap and return the
+        top_n pairs that almost matched but didn't.
 
-        p_words = sig_words(poly.question)
-        k_words = sig_words(kalshi.question)
-        overlap = len(p_words & k_words)
-        return overlap >= 3
+        A "near miss" is any pair with at least 1 overlapping significant word
+        that does NOT fully satisfy both match criteria (overlap >= 3 AND
+        time delta <= 6h).  Fully-matched pairs are excluded.
+
+        Each result dict contains:
+          overlap_count        – number of shared significant words
+          overlap_words        – sorted list of those words
+          time_delta_hours     – absolute difference in resolution times
+          would_match_on_words – True if overlap >= 3 (words criterion met)
+          would_match_on_time  – True if time delta <= 6h (time criterion met)
+          poly_question / poly_market_id / poly_hours_left / poly_yes_price
+          kalshi_question / kalshi_market_id / kalshi_hours_left / kalshi_yes_price
+          price_gap            – |poly_yes - kalshi_yes|
+
+        Sorted by overlap_count descending, then time_delta_hours ascending.
+        """
+        poly_markets   = [m for m in markets if m.platform == "polymarket"]
+        kalshi_markets = [m for m in markets if m.platform == "kalshi"]
+
+        results: List[dict] = []
+        for pm in poly_markets:
+            pw = self._sig_words(pm.question)
+            for km in kalshi_markets:
+                kw     = self._sig_words(km.question)
+                common = pw & kw
+                if not common:
+                    continue
+
+                try:
+                    dt_hours = abs(
+                        (pm.resolution_date - km.resolution_date).total_seconds()
+                    ) / 3600
+                except Exception:
+                    dt_hours = float("inf")
+
+                words_ok = len(common) >= 3
+                time_ok  = dt_hours <= 6.0
+
+                if words_ok and time_ok:
+                    continue  # this is a full match, not a near-miss
+
+                results.append({
+                    "overlap_count":        len(common),
+                    "overlap_words":        sorted(common),
+                    "time_delta_hours":     round(dt_hours, 1),
+                    "would_match_on_words": words_ok,
+                    "would_match_on_time":  time_ok,
+                    "poly_question":        pm.question,
+                    "poly_market_id":       pm.market_id,
+                    "poly_hours_left":      round(pm.hours_to_resolution, 1),
+                    "poly_yes_price":       pm.yes_price,
+                    "kalshi_question":      km.question,
+                    "kalshi_market_id":     km.market_id,
+                    "kalshi_hours_left":    round(km.hours_to_resolution, 1),
+                    "kalshi_yes_price":     km.yes_price,
+                    "price_gap":            round(abs(pm.yes_price - km.yes_price), 4),
+                })
+
+        # Best near-misses first: most overlapping words; break ties by smallest
+        # time delta so "almost matched on time too" floats to the top.
+        results.sort(key=lambda r: (-r["overlap_count"], r["time_delta_hours"]))
+        logger.info(
+            "ResolutionScanner: near-miss analysis: %d poly × %d kalshi = %d pairs "
+            "with ≥1 overlap word, returning top %d",
+            len(poly_markets), len(kalshi_markets), len(results), top_n,
+        )
+        return results[:top_n]
