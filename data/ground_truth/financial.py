@@ -249,14 +249,15 @@ class FinancialDataSource(DataSource):
             if current_price is None:
                 return None
 
-            # Close-price questions need the official session price, not
-            # extended-hours quotes.  Before 9:30am ET the "current price" is
-            # a pre-market print that has nothing to do with where the stock
-            # will actually close — skip rather than guess.
-            if self._is_close_question(market.question) and not self._us_equity_session_open():
+            # Close-price questions: block only during pre-market (before 9:30 AM ET).
+            # Pre-market prices are speculative — the session hasn't started yet and
+            # there's no signal about where the index will close.
+            # Post-market (after 16:00 ET) the official close is already settled:
+            # Yahoo Finance returns the authoritative close price and we SHOULD fire.
+            if self._is_close_question(market.question) and self._us_equity_premarket():
                 logger.debug(
-                    "FinancialSource: %s is a close-price question but market is "
-                    "outside regular hours — pre-market price unreliable, skipping",
+                    "FinancialSource: %s is a close-price question and market is "
+                    "pre-market — current price unreliable for close prediction, skipping",
                     market.market_id,
                 )
                 return None
@@ -350,16 +351,29 @@ class FinancialDataSource(DataSource):
         return bool(_CLOSE_QUESTION_RE.search(question))
 
     @staticmethod
-    def _us_equity_session_open() -> bool:
+    def _us_equity_premarket() -> bool:
         """
-        True if US equity markets are currently in regular session (9:30–16:00 ET).
+        True if currently in the pre-market window where the session-close
+        price has NOT yet been set (weekdays before 9:30 AM ET).
 
-        Pre-market prices are NOT a reliable predictor of the official close price
-        — the session hasn't happened yet.  Post-market prices (after 16:00 ET)
-        are the settled close and ARE usable, so we only block pre-market.
+        Pre-market prices are speculative — they tell us nothing about where
+        the market will actually close. Post-market (after 16:00 ET) the
+        official close is already printed, so the current Yahoo Finance price
+        IS the authoritative settlement. We must NOT block post-market.
+
+        Returns False on weekends: equity markets don't open, so the last
+        close (Friday) is already the settled value and is usable.
         """
         now_et = datetime.now(ZoneInfo("America/New_York"))
-        if now_et.weekday() >= 5:          # Saturday / Sunday
+        if now_et.weekday() >= 5:           # Saturday / Sunday – no open session
+            return False
+        return now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)
+
+    @staticmethod
+    def _us_equity_session_open() -> bool:
+        """True if US equity markets are currently in regular session (9:30–16:00 ET)."""
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if now_et.weekday() >= 5:
             return False
         t = (now_et.hour, now_et.minute)
         return (9, 30) <= t < (16, 0)
