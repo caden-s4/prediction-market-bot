@@ -129,21 +129,31 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
     k_s = f"${kalshi_bal:>9,.2f}" if kalshi_bal is not None else "       n/a"
     p_s = f"${poly_bal:>9,.2f}"   if poly_bal  is not None else "       n/a"
 
-    registry = result.get("registry", {})
+    registry  = result.get("registry", {})
     reg_t1    = registry.get("t1", 0)
     reg_t2    = registry.get("t2", 0)
     reg_t3    = registry.get("t3", 0)
     reg_total = registry.get("total", 0)
-    # Show registry breakdown only when the registry has been populated.
+    t1_scanned = result.get("t1_scanned", 0)
+    t2_scanned = result.get("t2_scanned", 0)
+    t2_total   = result.get("t2_total", reg_t2)
+
+    # "Markets scanned" with per-tier breakdown of what was evaluated this cycle.
+    if reg_total:
+        tier_detail = f"T1={t1_scanned}/{reg_t1}  T2 batch={t2_scanned}/{t2_total}  T3={reg_t3} (watch-only)"
+    else:
+        tier_detail = "T1 all + T2 rotating batch"
+
+    # Registry discovery line — only shown once the registry is populated.
     reg_str = (
-        f"  Registry (discovered)    T1={reg_t1}  T2={reg_t2}  T3={reg_t3}  ({reg_total} total)\n"
+        f"  Registry total           T1={reg_t1}  T2={reg_t2}  T3={reg_t3}  ({reg_total} markets)\n"
         if reg_total else ""
     )
 
     print(f"\n{sep}")
     print(f"  SCAN COMPLETE   {now}   {mode}   {platform_str}{halt_s}{cycle_s}")
     print(sep)
-    print(f"  Markets scanned          {scanned:>5}   (T1 all + T2 rotating batch)")
+    print(f"  Markets scanned          {scanned:>5}   {tier_detail}")
     print(f"{reg_str}", end="")
     print(f"  Cross-platform pairs     {pairs:>5}")
     print(f"  Gap signals detected     {signals:>5}{signal_tag}")
