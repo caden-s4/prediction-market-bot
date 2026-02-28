@@ -76,10 +76,14 @@ class FederalRegisterSource(DataSource):
         # Sports markets are never resolved by government documents.
         if market.category.lower() in ("sports", "sport", "esports"):
             return False
+        # Require at least one domain-specific keyword in the question/tags.
+        # A bare category match (e.g. category="politics") is not sufficient —
+        # it causes false positives for political-figure markets ("Will Bill
+        # Clinton appear in public?") that have no Federal Register documents,
+        # burning API quota and producing confidence=0.50/prob=None noise.
         text = (market.question + " " + " ".join(market.tags)).lower()
         return (
-            market.category.lower() in ("politics", "legal", "regulatory", "law", "government")
-            or any(kw in text for kw in _REGULATORY_KEYWORDS)
+            any(kw in text for kw in _REGULATORY_KEYWORDS)
             or any(kw in text for kw in _COURT_KEYWORDS)
             or any(kw in text for kw in _SEC_KEYWORDS)
         )
