@@ -47,9 +47,10 @@ _FRED_API_KEY: str = os.environ.get("FRED_API_KEY", "")
 # wider ones so we don't reject data that's legitimately 60+ days old.
 _SERIES_STALENESS: Dict[str, Tuple[int, int]] = {
     # Daily / near-real-time
-    "DFF":      (24,    72),   # Fed Funds Rate: daily; stale after 3 days
+    "DFF":          (24,    72),   # Fed Funds Rate: daily; stale after 3 days
     # Weekly
-    "ICSA":     (24,   168),   # Initial Claims: weekly; stale after 7 days
+    "GASREGCOVW":   (24,   168),   # US avg retail gas price: weekly (EIA/Monday)
+    "ICSA":         (24,   168),   # Initial Claims: weekly; stale after 7 days
     # Monthly
     "UNRATE":   (24,  1080),   # Unemployment: monthly; allow up to 45 days
     "PAYEMS":   (24,   744),   # Nonfarm Payroll: monthly
@@ -88,6 +89,13 @@ _INDICATOR_MAP: Dict[str, Tuple[str, str]] = {
     "trade balance": ("BOPGSTB", "Trade Balance"),
     "ism manufacturing": ("NAPM", "ISM Manufacturing PMI"),
     "pmi": ("NAPM", "ISM Manufacturing PMI"),
+    # Retail gasoline — EIA/AAA weekly average (FRED: GASREGCOVW)
+    # Matches Kalshi "gas prices" markets (e.g. KXAAAGASM).
+    # The question text contains markdown formatting: "**gas prices**"
+    # so substring "gas price" still matches inside "**gas prices**".
+    "gas price": ("GASREGCOVW", "US Average Retail Gasoline Price"),
+    "gasoline price": ("GASREGCOVW", "US Average Retail Gasoline Price"),
+    "average gas": ("GASREGCOVW", "US Average Retail Gasoline Price"),
 }
 
 
