@@ -59,7 +59,10 @@ _COURT_KEYWORDS = (
 
 _SEC_KEYWORDS = (
     "sec ", "securities", "crypto etf", "bitcoin etf", "ethereum etf",
-    "etf approval", "etf rejection", "ipo",
+    "etf approval", "etf rejection",
+    # NOTE: "ipo" intentionally omitted — IPO S-1 filings live on SEC EDGAR,
+    # not on federalregister.gov.  Including "ipo" only caused false matches
+    # that returned confidence=0.50/prob=None for every IPO market.
 )
 
 
