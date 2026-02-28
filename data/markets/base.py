@@ -140,11 +140,18 @@ class Market:
         return max((rd - now).total_seconds() / 3600, 0.0)
 
     def is_weather_market(self) -> bool:
-        return (
-            self.category.lower() == "weather"
-            or any(t.lower() in ("weather", "precipitation", "rain", "snow", "temperature")
-                   for t in self.tags)
-        )
+        if self.category.lower() == "weather":
+            return True
+        if any(t.lower() in ("weather", "precipitation", "rain", "snow", "temperature")
+               for t in self.tags):
+            return True
+        # Kalshi daily high-temperature markets (e.g. KXHIGHAUS, KXHIGHCHI, KXHIGHDEN)
+        # are filed under "general" in Kalshi's API but are weather contracts.
+        # The pattern: market_id starts with KXHIGH and ends with a city code.
+        mid_upper = self.market_id.upper()
+        if mid_upper.startswith("KXHIGH") or mid_upper.startswith("KXLOW"):
+            return True
+        return False
 
 
 @dataclass
