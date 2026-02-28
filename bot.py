@@ -182,8 +182,8 @@ class BotCoordinator:
         """Return gap signals detected in the most recent scan cycle."""
         return self._resolution.get_last_signals()
 
-    def get_near_miss_pairs(self, n: int = 10) -> list:
-        """Return near-miss cross-platform pairs from the current registry."""
+    def get_near_miss_pairs(self, n: int = 10) -> tuple:
+        """Return (results, stats) for near-miss cross-platform pairs."""
         return self._resolution.get_near_miss_pairs(n)
 
     def clear_positions(self) -> int:

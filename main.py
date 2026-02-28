@@ -307,19 +307,34 @@ def _print_near_miss_pairs(coordinator: BotCoordinator, top_n: int = 10) -> None
     hard pre-filter).  A near-miss is a within-window pair that failed the
     word-count (>=3) or entity-match requirement.
     """
-    pairs = coordinator.get_near_miss_pairs(top_n)
+    pairs, stats = coordinator.get_near_miss_pairs(top_n)
     sep  = "=" * _SEP_W
     thin = "-" * _SEP_W
     now  = datetime.now().strftime("%H:%M:%S")
 
+    n_poly   = stats.get("poly_count", 0)
+    n_kalshi = stats.get("kalshi_count", 0)
+    n_window = stats.get("within_window", 0)
+    n_word   = stats.get("with_word_overlap", 0)
+
     print(f"\n{sep}")
     print(f"  NEAR-MISS PAIRS   {now}   (top {top_n}, within-6h window only)")
+    print(f"  {n_poly} poly × {n_kalshi} kalshi  →  {n_window} within 6h  →  {n_word} with word overlap")
     print(sep)
 
     if not pairs:
-        print("  No near-misses found (registry empty, no within-window pairs,")
-        print("  or all within-window pairs fully matched).")
-        print("  Run a scan first ('s') if the registry is empty.")
+        if n_poly == 0 or n_kalshi == 0:
+            print("  Registry has no markets from one or both platforms.")
+            print("  Run a scan first ('s') to populate the registry.")
+        elif n_window == 0:
+            print(f"  All {n_poly * n_kalshi:,} pairs fall outside the 6h resolution-date window.")
+            print(f"  ({n_poly} Poly markets expire >24h out; {n_kalshi} Kalshi markets expire 2–24h out.)")
+            print("  Near-miss analysis only surfaces same-day markets — this is correct.")
+        elif n_word == 0:
+            print(f"  {n_window} within-window pair(s) found, but none share any significant words")
+            print("  after filtering stopwords (months, years, aux verbs).")
+        else:
+            print(f"  {n_word} within-window pair(s) with word overlap all qualified as full matches.")
         print(f"{sep}\n")
         return
 
