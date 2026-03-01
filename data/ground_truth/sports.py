@@ -118,7 +118,10 @@ _RACING_MAP: dict = {
 }
 
 _ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
-_TIMEOUT = 8  # seconds
+_TIMEOUT = 8         # seconds — general team-sports scoreboard calls
+_RACING_TIMEOUT = 1  # seconds — NASCAR/IndyCar; ESPN racing endpoint is often slow;
+                     # a 1-second hard cap prevents one lagging call from blocking
+                     # an entire 15-second Tier-1 cycle
 
 # Broad sport keywords used as a fallback in can_handle() for markets tagged
 # [general] that are clearly about sports but lack an explicit sport category.
@@ -268,13 +271,20 @@ class SportsDataSource(DataSource):
 
         return []
 
-    def _fetch_events(self, sport_path: str) -> list:
+    def _fetch_events(self, sport_path: str, timeout: int = _TIMEOUT) -> list:
         """Fetch scoreboard events from ESPN, using a short-lived module-level cache.
 
         All markets in a single scan cycle fall back to the same sport_path
         (usually football/nfl). Without caching this hits ESPN once per market
         — 90+ redundant identical requests. The cache ensures at most one real
         HTTP call per sport per 90-second window.
+
+        Parameters
+        ----------
+        sport_path : ESPN sport/league path (e.g. "football/nfl")
+        timeout    : HTTP request timeout in seconds.  Racing callers pass
+                     _RACING_TIMEOUT (1 s) so a slow ESPN racing endpoint
+                     never blocks an entire Tier-1 cycle.
         """
         now = time.monotonic()
         cached = _SCOREBOARD_CACHE.get(sport_path)
@@ -285,7 +295,7 @@ class SportsDataSource(DataSource):
 
         url = f"{_ESPN_BASE}/{sport_path}/scoreboard"
         try:
-            resp = requests.get(url, timeout=_TIMEOUT)
+            resp = requests.get(url, timeout=timeout)
             resp.raise_for_status()
             data = resp.json()
             events = data.get("events", [])
@@ -583,7 +593,9 @@ class SportsDataSource(DataSource):
             except ValueError:
                 pass
 
-        events = self._fetch_events(sport_path)
+        # Use a short timeout: ESPN's racing scoreboard can be slow, and a
+        # 4-second hang on a NASCAR market must not stall a 15-second T1 cycle.
+        events = self._fetch_events(sport_path, timeout=_RACING_TIMEOUT)
         if not events:
             return None
 

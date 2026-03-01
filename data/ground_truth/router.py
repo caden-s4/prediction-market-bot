@@ -18,7 +18,10 @@ reasons at DEBUG level so you can track which categories need new data sources.
 A result validator runs as a post-step before returning any tradeable result:
   gap < 4%   → INFO  (small edge, likely already priced in)
   gap 4–40%  → proceed normally
-  gap > 40%  → WARNING + confidence capped at 0.70 (human review required)
+  gap > 40%  → WARNING + requires_human_review=True flag on result;
+               confidence is NOT capped so the signal can still pass the
+               0.80 gate.  Executor fires a ghost trade (dry_run) or sends
+               a Telegram alert and awaits approval (live mode).
 """
 
 from __future__ import annotations
@@ -210,8 +213,10 @@ class GroundTruthRouter:
 
         gap < 4%   → small edge; log at INFO so the operator knows
         gap 4–40%  → normal tradeable range; return as-is
-        gap > 40%  → suspicious; cap confidence at 0.70 (below 0.80 gate)
-                     so the trade requires a human to override
+        gap > 40%  → suspicious; attach requires_human_review=True flag.
+                     Confidence is left unchanged so the signal can still
+                     pass the 0.80 gate.  The executor decides what to do
+                     based on dry_run mode (ghost trade vs alert + pend).
         """
         if result.ground_truth_prob is None:
             return result
@@ -228,15 +233,25 @@ class GroundTruthRouter:
             return result
 
         if gap > 0.40:
+            # LARGE_DIVERGENCE: gap is suspicious — either a real edge or a data error.
+            # Previously this capped confidence at 0.70 (below the 0.80 gate) which
+            # created a catch-22: the signal was blocked precisely when the gap was
+            # largest, i.e. when investigation was most warranted.
+            #
+            # New behaviour: preserve the source's original confidence so the trade
+            # can still proceed through the confidence gate.  Attach
+            # requires_human_review=True so the executor can:
+            #   - In ghost/dry-run mode: fire a ghost trade for accuracy tracking.
+            #   - In live mode: send a Telegram alert and await manual approval.
             logger.warning(
                 "GroundTruthRouter: LARGE_DIVERGENCE market=%s gap=%.1f%% "
-                "ground_truth=%.2f market_price=%.2f — blocking auto-trade, human review needed",
+                "ground_truth=%.2f market_price=%.2f — flagging for human review "
+                "(confidence NOT capped; executor will decide based on dry_run mode)",
                 market.market_id, gap * 100,
                 result.ground_truth_prob, market.yes_price,
             )
             return dc_replace(
                 result,
-                confidence=min(result.confidence, 0.70),
                 raw_data={
                     **result.raw_data,
                     "requires_human_review": True,
@@ -244,7 +259,7 @@ class GroundTruthRouter:
                 },
                 reasoning=(
                     result.reasoning
-                    + f" [AUTO-TRADE BLOCKED: gap={gap*100:.1f}% requires human review]"
+                    + f" [LARGE_DIVERGENCE: gap={gap*100:.1f}% — human review flagged]"
                 ),
             )
 

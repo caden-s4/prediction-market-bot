@@ -152,6 +152,15 @@ class EconomicDataSource(DataSource):
             if latest_value is None:
                 return None
 
+            # Debug log: always emit the raw fetched value for GASREGCOVW so we can
+            # diagnose whether stale data, a unit issue, or a series mismatch is the
+            # root cause when prob=0.00 contradicts a near-certain market price.
+            if series_id == "GASREGCOVW":
+                logger.info(
+                    "GASREGCOVW raw value: %s (date: %s) for %s",
+                    latest_value, latest_date, market.market_id,
+                )
+
             # Suppress the signal if the next scheduled release is within 24 hours.
             # Trading on 6-day-old data the day before the monthly release is
             # pointless — the market has already anticipated the update.
@@ -166,6 +175,28 @@ class EconomicDataSource(DataSource):
             # Determine if the latest release is "fresh" (within the market window)
             threshold = self._extract_threshold(market.question, indicator_key)
             ground_truth_prob = self._compute_prob(latest_value, threshold, market)
+
+            # Series-mismatch buffer: GASREGCOVW (EIA Regular Conventional) excludes
+            # reformulated-fuel cities (LA, NYC, Chicago) and runs $0.10–$0.20/gal
+            # below the AAA national average that KXAAAGASW resolves against.
+            # When the threshold is within $0.20 of the fetched value — i.e. right in
+            # the zone where the AAA/EIA spread could flip the outcome — we cannot
+            # reliably determine which side is correct.  Return prob=None so the
+            # router treats this as "no signal" rather than a false 1.0 or 0.0.
+            if (
+                series_id == "GASREGCOVW"
+                and market.market_id.startswith("KXAAAGASW")
+                and threshold is not None
+                and abs(latest_value - threshold) <= 0.20
+            ):
+                logger.info(
+                    "EconSource: GASREGCOVW/KXAAAGASW series-mismatch buffer — "
+                    "threshold=%.3f is within $0.20 of fetched=%.3f; "
+                    "returning prob=None to avoid false signal for %s",
+                    threshold, latest_value, market.market_id,
+                )
+                ground_truth_prob = None
+
             confidence = self._compute_confidence(latest_date, market, series_id)
 
             if confidence is None:
