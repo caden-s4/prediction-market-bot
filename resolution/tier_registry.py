@@ -85,11 +85,20 @@ class TierRegistry:
         if urgent:
             return 1
         h = market.hours_to_resolution
-        if h <= TIER_1_MAX_HOURS:
+        if h < 0:
+            # Expired market — evict_expired() should have caught this; assign T1
+            # so it surfaces immediately and gets evicted on the next sweep.
+            logger.debug(
+                "TierRegistry: _compute_tier %s has %.1fh < 0 — expired, assigning T1",
+                market.market_id, h,
+            )
             return 1
-        if h <= TIER_2_MAX_HOURS:
-            return 2
-        return 3
+        tier = 1 if h <= TIER_1_MAX_HOURS else (2 if h <= TIER_2_MAX_HOURS else 3)
+        logger.debug(
+            "TierRegistry: tier assignment %s hours=%.1f → T%d",
+            market.market_id, h, tier,
+        )
+        return tier
 
     # ── Ingestion ──────────────────────────────────────────────────────────────
 
@@ -106,6 +115,15 @@ class TierRegistry:
         entry = self._entries.get(market.market_id)
         if entry is None:
             tier = self._compute_tier(market)
+            # Sanity check: time-based T1 assignment should only happen for
+            # markets with < 2h remaining.  Anything else is a data bug.
+            if tier == 1 and market.hours_to_resolution > TIER_1_MAX_HOURS:
+                logger.error(
+                    "TierRegistry: T1 misassignment — %s has %.1fh remaining "
+                    "(expected < %.1fh for time-based T1). "
+                    "Check hours_to_resolution calculation.",
+                    market.market_id, market.hours_to_resolution, TIER_1_MAX_HOURS,
+                )
             self._entries[market.market_id] = MarketEntry(market=market, tier=tier)
             logger.debug(
                 "TierRegistry: new market %s → T%d (%.1fh left)",
@@ -148,7 +166,8 @@ class TierRegistry:
             entry.tier = 1
             if old_tier != 1:
                 logger.info(
-                    "TierRegistry: %s T%d → T1 (gap signal urgent)", market_id, old_tier
+                    "TierRegistry: %s T%d → T1 (gap signal urgent, %.1fh remaining)",
+                    market_id, old_tier, entry.market.hours_to_resolution,
                 )
 
     def clear_urgent(self, market_id: str) -> None:

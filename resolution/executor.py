@@ -23,9 +23,10 @@ from __future__ import annotations
 import logging
 import math
 import random
+import re
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dc_replace
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -75,11 +76,11 @@ TIER_STAGGER_JITTER_S  = 0.10    # max random addition to stagger
 # during this window so open positions are tracked from the first second.
 STARTUP_STABILIZATION_SECONDS = 60
 
-# Warn when a Tier-1 cycle takes more than 120% of TIER_1_INTERVAL.
-# The market scanner alone takes ~13s, so 80% (12s) triggered constantly on
-# normal 15s cycles.  At 120% (18s) we only fire on genuinely slow cycles
-# where the GT loop itself is the bottleneck.
-CYCLE_DURATION_WARN_FRACTION = 1.20
+# Cycle duration thresholds (multiples of TIER_1_INTERVAL).
+# >100% → WARNING  (cycle exceeded the interval; next cycle starts late)
+# >150% → ERROR    (severely over-budget; T1 markets are under-surveilled)
+CYCLE_WARN_FRACTION  = 1.00
+CYCLE_ERROR_FRACTION = 1.50
 
 # Max signals kept per (source_name, action) bucket.
 # Prevents correlated overexposure when a single data source (e.g. Yahoo Finance/NQ=F)
@@ -106,6 +107,23 @@ class TradeRecord:
     source_confidence: float
     entry_time: float = field(default_factory=time.time)
     order_id: Optional[str] = None
+
+
+def _bracket_prefix(market_id: str) -> Optional[str]:
+    """Return the ticker prefix for bracket-series markets, or None for singletons.
+
+    Bracket markets share one underlying data point at different strike levels:
+      KXAAAGASW-26MAR02-2.888  →  "KXAAAGASW-26MAR02"   (bracket)
+      KXAAAGASW-26MAR02-2.898  →  "KXAAAGASW-26MAR02"   (same group)
+      KXSOME-MARKET            →  None                   (singleton)
+
+    A suffix is treated as numeric when it contains only digits and dots
+    (e.g. "2.888") — calendar codes like "26MAR02" are not matched.
+    """
+    parts = market_id.split("-")
+    if len(parts) >= 2 and re.match(r"^[\d.]+$", parts[-1]):
+        return "-".join(parts[:-1])
+    return None
 
 
 class ResolutionBot:
@@ -446,12 +464,17 @@ class ResolutionBot:
         elapsed = (time.monotonic() - cycle_start) * 1000
         summary["cycle_ms"] = round(elapsed)
         logger.debug("ResolutionBot: cycle done in %.0fms | %s", elapsed, summary)
-        if elapsed > TIER_1_INTERVAL * 1000 * CYCLE_DURATION_WARN_FRACTION:
+        t1_ms = TIER_1_INTERVAL * 1000
+        if elapsed > t1_ms * CYCLE_ERROR_FRACTION:
+            logger.error(
+                "ResolutionBot: cycle took %.0fms — severely over Tier-1 interval (%ds). "
+                "T1 markets are under-surveilled; investigate bottleneck.",
+                elapsed, TIER_1_INTERVAL,
+            )
+        elif elapsed > t1_ms * CYCLE_WARN_FRACTION:
             logger.warning(
-                "ResolutionBot: cycle took %.0fms — exceeds %.0f%% of Tier-1 "
-                "interval (%ds). VPS may be under load; consider reducing scan "
-                "scope or upgrading instance.",
-                elapsed, CYCLE_DURATION_WARN_FRACTION * 100, TIER_1_INTERVAL,
+                "ResolutionBot: cycle took %.0fms — exceeded Tier-1 interval (%ds).",
+                elapsed, TIER_1_INTERVAL,
             )
         return summary
 
@@ -462,14 +485,41 @@ class ResolutionBot:
         Full platform fetch — discovers new markets and refreshes the registry.
 
         Called every DISCOVERY_INTERVAL.  Uses the existing scanner which is
-        already configured with the correct per-platform window hours.  All
-        returned markets are ingested into the tier registry; the registry
-        assigns tiers based on hours_to_resolution.
+        already configured with the correct per-platform window hours.
+
+        Novelty prop-bet markets (announcers, word counts, etc.) are filtered
+        OUT before registry ingest and added to the persistent exclusion list
+        so they never consume T1 slots or reach the GT routing loop.
         """
         logger.info("ResolutionBot: running discovery scan (full platform fetch)")
         try:
             markets = self._scanner.scan()
-            counts = self._registry.ingest_many(markets)
+
+            # Filter novelty markets before registry ingest.
+            clean_markets = []
+            novelty_count = 0
+            for m in markets:
+                if self._ground_truth.is_novelty_market(m):
+                    # Persist the exclusion so re-discovery skips this market.
+                    # TTL expires 1 day after the market's own resolution so the
+                    # exclusion list doesn't grow unboundedly with dead entries.
+                    ttl = m.hours_to_resolution * 3600 + 86400
+                    self._exclusions.add(
+                        m.platform, m.market_id,
+                        reason="novelty_prop",
+                        ttl_seconds=ttl if ttl > 0 else None,
+                    )
+                    novelty_count += 1
+                else:
+                    clean_markets.append(m)
+            if novelty_count:
+                logger.info(
+                    "ResolutionBot: filtered %d novelty markets at ingest "
+                    "(added to exclusion list)",
+                    novelty_count,
+                )
+
+            counts = self._registry.ingest_many(clean_markets)
             logger.info(
                 "ResolutionBot: discovery ingested %d markets → T1=%d T2=%d T3=%d "
                 "(registry total=%d)",
@@ -544,13 +594,21 @@ class ResolutionBot:
             "ResolutionBot: fetching ground truth for %d candidate markets…", total
         )
 
-        # Coverage diagnostic counters
-        n_novelty: int = 0          # subjective prop bets — no GT source can ever resolve
-        n_no_source: int = 0        # GT router returned None — no data source covers this market
-        n_no_prob: int = 0          # GT source found but couldn't extract a probability
-        n_covered: int = 0          # GT source returned a usable probability
-        n_gap_too_small: int = 0    # Covered but gap < minimum trading threshold
+        # Coverage diagnostic counters — reset to 0 on every call; these are
+        # per-cycle (per-batch) counts, never cumulative across cycles.
+        n_novelty: int = 0       # novelty prop-bets filtered at ingest; always 0 here
+        n_no_source: int = 0     # no data source covers this market
+        n_no_prob: int = 0       # source found but couldn't extract a probability
+        n_covered: int = 0       # source returned a usable probability
+        n_gap_too_small: int = 0 # covered but gap < minimum trading threshold
         coverage_sources: Dict[str, int] = {}  # source_name → count of markets covered
+
+        # Bracket GT cache: maps ticker prefix → first GT result for that bracket series.
+        # Markets like KXAAAGASW-26MAR02-2.888 / -2.898 / -2.908 … all resolve against
+        # the same underlying data point.  We fetch GT once for the first market in each
+        # group, then re-derive the probability for every remaining bracket using the
+        # cached raw value — no additional API calls needed.
+        _bracket_gt: Dict[str, Optional["GroundTruthResult"]] = {}
 
         for i, market in enumerate(candidates, 1):
             if i % 25 == 0 or i == total:
@@ -558,27 +616,45 @@ class ResolutionBot:
                     "ResolutionBot: ground truth progress %d/%d (signals so far: %d)",
                     i, total, len(signals),
                 )
-            # Novelty prop-bet filter: "what will the announcers say?"-style markets
-            # are unresolvable by any data source — skip before routing.
-            if self._ground_truth.is_novelty_market(market):
-                n_novelty += 1
-                logger.debug(
-                    "ResolutionBot: excluded_novelty %s — subjective prop bet",
-                    market.market_id,
-                )
-                continue
-            # Fast pre-filter: skip the router entirely if no source can handle
-            # this market — all can_handle() calls are in-memory keyword checks.
-            if not self._ground_truth.can_any_source_handle(market):
-                n_no_source += 1
-                continue
-            gt = self._ground_truth.fetch(market)
-            if gt is None:
-                n_no_source += 1
-                continue
-            if gt.ground_truth_prob is None:
-                n_no_prob += 1
-                continue
+
+            prefix = _bracket_prefix(market.market_id)
+
+            # ── Bracket deduplication path ────────────────────────────────────
+            if prefix and prefix in _bracket_gt:
+                ref_gt = _bracket_gt[prefix]
+                if ref_gt is None:
+                    # First market in this group had no source — skip siblings too.
+                    n_no_source += 1
+                    continue
+                raw_val = (ref_gt.raw_data or {}).get("latest_value")
+                if raw_val is None:
+                    n_no_prob += 1
+                    continue
+                # Re-derive prob for this bracket's specific threshold.
+                prob = self._ground_truth.recompute_bracket_prob(raw_val, market)
+                if prob is None:
+                    n_no_prob += 1
+                    continue
+                # Build a new validated GT result with the recalculated probability.
+                new_gt = dc_replace(ref_gt, ground_truth_prob=prob)
+                gt = self._ground_truth.validate_result(new_gt, market)
+
+            # ── Normal GT fetch path ──────────────────────────────────────────
+            else:
+                if not self._ground_truth.can_any_source_handle(market):
+                    n_no_source += 1
+                    if prefix is not None:
+                        _bracket_gt[prefix] = None
+                    continue
+                gt = self._ground_truth.fetch(market)
+                if prefix is not None:
+                    _bracket_gt[prefix] = gt
+                if gt is None:
+                    n_no_source += 1
+                    continue
+                if gt.ground_truth_prob is None:
+                    n_no_prob += 1
+                    continue
 
             n_covered += 1
             coverage_sources[gt.source_name] = coverage_sources.get(gt.source_name, 0) + 1

@@ -32,6 +32,7 @@ from data.markets.base import Market
 from .base import DataSource, GroundTruthResult
 from .congress import CongressSource
 from .economic import EconomicDataSource
+from .eia import EIADataSource
 from .federal_register import FederalRegisterSource
 from .financial import FinancialDataSource
 from .sports import SportsDataSource
@@ -74,6 +75,7 @@ class GroundTruthRouter:
         self._sources: List[DataSource] = sources or [
             SportsDataSource(),
             EconomicDataSource(),
+            EIADataSource(),         # weekly gas prices (active only when EIA_API_KEY is set)
             FinancialDataSource(),
             CongressSource(),        # bill passage status (specific, definitive outcomes)
             FederalRegisterSource(), # regulatory filings (broad political/legal coverage)
@@ -83,21 +85,24 @@ class GroundTruthRouter:
         """
         Fetch ground truth for a flagged market.
 
-        Exhausts all sources rather than stopping at the first tradeable hit.
-        Returns the highest-confidence tradeable result, or the
-        highest-confidence non-tradeable candidate for logging if none trade.
+        Pre-filters to claimant sources only (those whose can_handle() returns
+        True), then exhausts them rather than stopping at the first tradeable
+        hit so we return the highest-confidence tradeable result.
         Never raises.
         """
+        # Pre-filter: only call fetch() on sources that claim this market.
+        # All can_handle() implementations are in-memory keyword checks — no I/O.
+        claimants = [s for s in self._sources if s.can_handle(market)]
+        if not claimants:
+            logger.debug("GroundTruthRouter: no source can handle %s", market.market_id)
+            return None
+
         tradeable: List[GroundTruthResult] = []
         candidates: List[GroundTruthResult] = []
         none_reasons: List[str] = []
 
-        for source in self._sources:
+        for source in claimants:
             source_name = type(source).__name__
-            if not source.can_handle(market):
-                none_reasons.append(f"{source_name}: cannot handle this market category")
-                continue
-
             logger.debug(
                 "GroundTruthRouter: trying %s for %s",
                 source_name, market.market_id,
@@ -150,6 +155,30 @@ class GroundTruthRouter:
                 "GroundTruthRouter: per-source failures for %s — %s",
                 market.market_id, "; ".join(none_reasons),
             )
+        return None
+
+    def validate_result(
+        self, result: GroundTruthResult, market: Market
+    ) -> GroundTruthResult:
+        """Public wrapper for the result validator.
+
+        Called by the executor when constructing synthetic GT results for
+        bracket markets (e.g. KXAAAGASW series) so each bracket gets its own
+        gap/confidence check even though they share a single underlying fetch.
+        """
+        return self._validate_result(result, market)
+
+    def recompute_bracket_prob(
+        self, raw_value: float, market: Market
+    ) -> Optional[float]:
+        """Re-derive YES probability for a bracket market from a cached raw value.
+
+        Delegates to the first EconomicDataSource in the source list.
+        Returns None if no EconomicDataSource is registered (e.g. custom test rigs).
+        """
+        for src in self._sources:
+            if isinstance(src, EconomicDataSource):
+                return src.compute_bracket_prob(raw_value, market)
         return None
 
     # ── Result validator ──────────────────────────────────────────────────────
