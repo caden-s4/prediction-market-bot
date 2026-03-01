@@ -57,7 +57,7 @@ _SERIES_STALENESS: Dict[str, Tuple[int, int]] = {
     # Daily / near-real-time
     "DFF":          (24,    72),   # Fed Funds Rate: daily; stale after 3 days
     # Weekly
-    "GASREGCOVW":   (24,   168),   # US avg retail gas price: weekly (EIA/Monday)
+    "GASREGCOVW":   (24,   144),   # US avg retail gas price: weekly (EIA/Monday); 6-day max
     "ICSA":         (24,   168),   # Initial Claims: weekly; stale after 7 days
     # Monthly
     "UNRATE":   (24,  1080),   # Unemployment: monthly; allow up to 45 days
@@ -160,6 +160,30 @@ class EconomicDataSource(DataSource):
                     "GASREGCOVW raw value: %s (date: %s) for %s",
                     latest_value, latest_date, market.market_id,
                 )
+                # Hard staleness cutoff for weekly series: if data is older than 6 days
+                # (144h) we are at the tail end of the weekly cycle (publication is
+                # expected the next Monday ~5pm ET).  Trading on week-old gas prices
+                # that are about to be superseded produces wrong directional signals.
+                # This check runs before _compute_prob so that even within the
+                # _compute_confidence window (< 144h) we don't bet against a near-
+                # certain market price that is anticipating the newer publication.
+                if latest_date:
+                    try:
+                        release_dt = datetime.strptime(latest_date, "%Y-%m-%d").replace(
+                            tzinfo=timezone.utc
+                        )
+                        hours_since_data = (
+                            datetime.now(timezone.utc) - release_dt
+                        ).total_seconds() / 3600
+                        if hours_since_data >= 144:
+                            logger.info(
+                                "EconSource: GASREGCOVW data from %s is %.0fh old — "
+                                "exceeds 6-day weekly-series limit; skipping %s",
+                                latest_date, hours_since_data, market.market_id,
+                            )
+                            return None
+                    except Exception:
+                        pass
 
             # Suppress the signal if the next scheduled release is within 24 hours.
             # Trading on 6-day-old data the day before the monthly release is
@@ -176,24 +200,29 @@ class EconomicDataSource(DataSource):
             threshold = self._extract_threshold(market.question, indicator_key)
             ground_truth_prob = self._compute_prob(latest_value, threshold, market)
 
-            # Series-mismatch buffer: GASREGCOVW (EIA Regular Conventional) excludes
-            # reformulated-fuel cities (LA, NYC, Chicago) and runs $0.10–$0.20/gal
-            # below the AAA national average that KXAAAGASW resolves against.
-            # When the threshold is within $0.20 of the fetched value — i.e. right in
-            # the zone where the AAA/EIA spread could flip the outcome — we cannot
-            # reliably determine which side is correct.  Return prob=None so the
-            # router treats this as "no signal" rather than a false 1.0 or 0.0.
+            # Asymmetric series-mismatch buffer: GASREGCOVW (EIA Regular Conventional)
+            # excludes reformulated-fuel cities (LA, NYC, Chicago) and reliably runs
+            # $0.10–$0.20/gal BELOW the AAA national average that KXAAAGASW resolves
+            # against.  Because AAA ≥ EIA, when the threshold is above (fetched − $0.20)
+            # the AAA price might be above the threshold even if EIA is below it — we
+            # would generate a false NO signal.  Suppress prob in that risky direction.
+            #
+            # Safe direction: when threshold < fetched − $0.20 (EIA is clearly above
+            # threshold, and AAA is even higher), return prob=1.0 as normal.
+            #
+            # threshold > fetched − 0.20  →  suppress (prob=None): too close to call
+            # threshold ≤ fetched − 0.20  →  allow:   gas is well above threshold
             if (
                 series_id == "GASREGCOVW"
                 and market.market_id.startswith("KXAAAGASW")
                 and threshold is not None
-                and abs(latest_value - threshold) <= 0.20
+                and threshold > (latest_value - 0.20)
             ):
                 logger.info(
-                    "EconSource: GASREGCOVW/KXAAAGASW series-mismatch buffer — "
-                    "threshold=%.3f is within $0.20 of fetched=%.3f; "
-                    "returning prob=None to avoid false signal for %s",
-                    threshold, latest_value, market.market_id,
+                    "EconSource: GASREGCOVW/KXAAAGASW asymmetric buffer — "
+                    "threshold=%.3f > fetched=%.3f − $0.20 (=%.3f); "
+                    "AAA/EIA spread could flip outcome; returning prob=None for %s",
+                    threshold, latest_value, latest_value - 0.20, market.market_id,
                 )
                 ground_truth_prob = None
 

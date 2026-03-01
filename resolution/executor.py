@@ -93,6 +93,11 @@ MAX_SIGNALS_PER_SOURCE_ACTION = 2
 # no longer exists in the real order book.
 STALE_PRICE_THRESHOLD = 0.12     # 12 cents
 
+# Minimum expected value per dollar risked before a trade is fired.
+# Prevents entering positions where transaction costs or small model errors
+# would eliminate any real edge (e.g. BUY NO @99¢ when the gap is < 2¢).
+MIN_EV_RATIO = 0.02
+
 
 @dataclass
 class TradeRecord:
@@ -214,6 +219,11 @@ class ResolutionBot:
         # Signals blocked for human review (LARGE_DIVERGENCE, live mode only).
         # market_id → GapSignal.  Cleared when approve_human_review() is called.
         self._pending_human_review: Dict[str, GapSignal] = {}
+        # Set of market IDs for which GT was successfully fetched in the most recent
+        # cycle (ground_truth_prob was not None).  Used by the clear_urgent guard so
+        # urgent T1 flags are only cleared when GT actually returned a usable signal
+        # (not when GT returned None due to the series-mismatch buffer or no source).
+        self._last_gt_evaluated_ids: frozenset = frozenset()
         # Timestamp of when this instance was created — used by the startup
         # stabilization guard to delay new trade entry until the first full
         # scan cycle has completed and in-memory state is populated.
@@ -405,10 +415,22 @@ class ResolutionBot:
         )
 
         # ── Clear urgent flag for markets where the gap has closed ──────────
+        # Only remove the urgent T1 override when GT was fetched and returned
+        # a usable signal this cycle (ground_truth_prob is not None) but the
+        # gap turned out to be below threshold.  If GT returned None (e.g.
+        # GASREGCOVW asymmetric buffer fired, or no source covers the market),
+        # we cannot conclude the gap has closed — keep the urgent flag alive.
         active_signal_ids = {s.market_to_buy.market_id for s in all_signals}
         for entry in list(self._registry.get_tier(1)):
             if entry.signal_urgent and entry.market_id not in active_signal_ids:
-                self._registry.clear_urgent(entry.market_id)
+                if entry.market_id in self._last_gt_evaluated_ids:
+                    self._registry.clear_urgent(entry.market_id)
+                else:
+                    logger.debug(
+                        "TierRegistry: keeping urgent for %s — GT returned None "
+                        "this cycle (buffer or no source); gap may still be open",
+                        entry.market_id,
+                    )
 
         # ── Confidence gate pre-screen (for display/logging only) ───────────
         display_signals: List[GapSignal] = []
@@ -609,6 +631,18 @@ class ResolutionBot:
         n_gap_too_small: int = 0 # covered but gap < minimum trading threshold
         coverage_sources: Dict[str, int] = {}  # source_name → count of markets covered
 
+        # Per-source aggregate timing: source_name → cumulative fetch time (s)
+        # Tracked only for the normal GT fetch path (not bracket cache hits).
+        # Used at the end to log a "slow source" summary for cycle-time diagnosis.
+        _source_timing: Dict[str, float] = {}
+        _source_fetch_count: Dict[str, int] = {}
+
+        # Markets with a valid GT signal this cycle (gt.ground_truth_prob is not None
+        # OR gap was too small).  Used by run_once to gate the clear_urgent logic:
+        # urgent T1 flags are only cleared when GT was evaluated successfully — not
+        # when GT returned None (buffer, no source, or stale data).
+        gt_evaluated: set = set()
+
         # Bracket GT cache: maps ticker prefix → first GT result for that bracket series.
         # Markets like KXAAAGASW-26MAR02-2.888 / -2.898 / -2.908 … all resolve against
         # the same underlying data point.  We fetch GT once for the first market in each
@@ -667,6 +701,11 @@ class ResolutionBot:
                         "ResolutionBot: slow GT fetch — %s took %.1fs",
                         market.market_id, _gt_elapsed,
                     )
+                # Accumulate per-source timing for the end-of-cycle summary log.
+                _src_key = gt.source_name if gt is not None else "no_source"
+                _source_timing[_src_key] = _source_timing.get(_src_key, 0.0) + _gt_elapsed
+                _source_fetch_count[_src_key] = _source_fetch_count.get(_src_key, 0) + 1
+
                 if prefix is not None:
                     _bracket_gt[prefix] = gt
                 if gt is None:
@@ -686,8 +725,10 @@ class ResolutionBot:
                 signal.ground_truth_prob = gt.ground_truth_prob
                 signal.ground_truth_result = gt  # preserve real source confidence
                 signals.append(signal)
+                gt_evaluated.add(market.market_id)
             else:
                 n_gap_too_small += 1
+                gt_evaluated.add(market.market_id)
 
         # Emit a single summary line so operators can distinguish
         # "no data sources cover these markets" from "markets are efficiently priced".
@@ -703,6 +744,25 @@ class ResolutionBot:
             n_gap_too_small, len(signals),
         )
 
+        # Aggregate per-source timing log (only real HTTP fetches, not cache hits).
+        # Helps operators quickly identify which source is responsible for slow cycles.
+        if _source_timing:
+            timing_parts = sorted(
+                (
+                    (src, _source_fetch_count[src], _source_timing[src])
+                    for src in _source_timing
+                ),
+                key=lambda x: -x[2],
+            )
+            timing_str = "  ".join(
+                f"{src}:{cnt}x{elapsed:.1f}s"
+                for src, cnt, elapsed in timing_parts
+            )
+            logger.info("ResolutionBot: GT source timing — %s", timing_str)
+
+        # Persist evaluated set so run_once can guard the clear_urgent logic.
+        self._last_gt_evaluated_ids = frozenset(gt_evaluated)
+
         # Deduplicate: cap at MAX_SIGNALS_PER_SOURCE_ACTION per (source, direction)
         # bucket so a single instrument (e.g. Nasdaq) can't consume the whole
         # bankroll with 40 correlated contracts expressing the same directional bet.
@@ -717,15 +777,15 @@ class ResolutionBot:
 
         deduped: List[GapSignal] = []
         for bucket_sigs in buckets.values():
-            # Sort: prefer actionable markets (YES price 0.10–0.90) over near-certain
-            # ones (price > 0.90 or < 0.10).  A 99% gap on a 0.99-priced market is
+            # Sort: prefer actionable markets (YES price 0.15–0.85) over near-certain
+            # ones (price > 0.85 or < 0.15).  A 99% gap on a 0.99-priced market is
             # almost always a data-quality mismatch rather than a real edge — the
             # market is already near-resolved and likely correctly priced at that
             # extreme.  The genuine opportunities sit in the uncertain middle where
             # the GT data and market price meaningfully disagree.
             bucket_sigs.sort(
                 key=lambda s: (
-                    0 if 0.10 <= s.target_price <= 0.90 else 1,  # actionable first
+                    0 if 0.15 <= s.target_price <= 0.85 else 1,  # actionable first
                     -s.effective_gap,
                 )
             )
@@ -906,6 +966,32 @@ class ResolutionBot:
         # Update signal with live-computed values so _compute_size gets consistent data
         signal.effective_gap = live_effective_gap
         signal.taker_fee = fee
+
+        # Minimum expected-value check: require at least MIN_EV_RATIO net EV per dollar
+        # risked.  Filters out near-exhausted trades (e.g. BUY NO @99¢ where the max
+        # win is 1¢ per unit but the GT model error could easily swallow it).
+        # Formula uses target_price as the YES price for both YES and NO positions.
+        _ev_denom = (
+            signal.target_price
+            if signal.action == "buy_yes"
+            else (1.0 - signal.target_price)
+        )
+        if _ev_denom > 0:
+            _ev_ratio = (
+                (gt_prob_for_gap - signal.target_price) / _ev_denom
+                if signal.action == "buy_yes"
+                else (signal.target_price - gt_prob_for_gap) / _ev_denom
+            )
+        else:
+            _ev_ratio = -1.0
+        if _ev_ratio < MIN_EV_RATIO:
+            logger.info(
+                "ResolutionBot: SKIP %s – EV ratio %.3f < %.2f "
+                "(action=%s price=%.3f gt_prob=%.3f min 2%% EV per dollar risked)",
+                mid, _ev_ratio, MIN_EV_RATIO,
+                signal.action, signal.target_price, gt_prob_for_gap,
+            )
+            return None
 
         # Size using fractional Kelly (time-to-resolution weighting applied inside)
         size_usd = self._compute_size(
