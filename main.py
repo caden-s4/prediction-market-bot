@@ -198,7 +198,7 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
         total = result.get("signals_flagged", confidence_blocked)
         print(
             f"\n  {total} gap signal(s) detected, all blocked by confidence gate"
-            f" (time-decay or source quality below 0.80 threshold)."
+            f" (source confidence below 0.80 — check log for reason)."
         )
         print()
     if dry_run and signal_details and not trade_details:

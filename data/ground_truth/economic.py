@@ -60,6 +60,7 @@ _SERIES_STALENESS: Dict[str, Tuple[int, int]] = {
     "GASREGCOVW":   (24,   168),   # US avg retail gas price: weekly (EIA/Monday)
     "ICSA":         (24,   168),   # Initial Claims: weekly; stale after 7 days
     # Monthly
+    "APU000074714": (24,  1080),   # BLS CPI gasoline, U.S. city avg: monthly, 45d max
     "UNRATE":   (24,  1080),   # Unemployment: monthly; allow up to 45 days
     "PAYEMS":   (24,   744),   # Nonfarm Payroll: monthly
     "CPIAUCSL": (24,   744),   # CPI: monthly
@@ -97,27 +98,25 @@ _INDICATOR_MAP: Dict[str, Tuple[str, str]] = {
     "trade balance": ("BOPGSTB", "Trade Balance"),
     "ism manufacturing": ("NAPM", "ISM Manufacturing PMI"),
     "pmi": ("NAPM", "ISM Manufacturing PMI"),
-    # Retail gasoline — EIA weekly conventional gas price (FRED: GASREGCOVW).
+    # Retail gasoline — BLS CPI series APU000074714 "Gasoline, unleaded regular,
+    # per gallon in U.S. city average" (published monthly via FRED).
     #
-    # ⚠ KNOWN DATA MISMATCH: GASREGCOVW tracks EIA "Regular Conventional" gas
-    # (no ethanol/oxygenate blend, sold mostly in rural/Midwest markets).  This
-    # is systematically $0.10–0.20/gallon BELOW the AAA national average used by
-    # Kalshi KXAAAGASW markets, which includes reformulated-fuel (RFG) cities
-    # such as LA, NYC, and Chicago.
+    # Why APU000074714 instead of GASREGCOVW:
+    #   GASREGCOVW = EIA Regular Conventional — excludes reformulated-fuel (RFG)
+    #   cities such as LA, NYC, and Chicago.  This runs $0.10–0.20/gal BELOW the
+    #   AAA national average that Kalshi KXAAAGASW resolves against.
     #
-    # Impact: all KXAAAGASW bracket markets currently return prob=0.0 (EIA price
-    # below all bracket thresholds) while the crowd-implied price is ~$0.15/gal
-    # higher.  The LARGE_DIVERGENCE validator (gap > 40%) correctly blocks
-    # auto-trading on this mismatch — no false trades fire, but no genuine
-    # signals are captured either.
+    #   APU000074714 = BLS "All Urban Consumers" city average — surveys stations
+    #   nationwide across all formulations, closely tracking the AAA national
+    #   average (typically within $0.02–0.05/gal).
     #
-    # Fix required: replace GASREGCOVW with the EIA "all formulations" average
-    # (FRED does not publish this directly; an EIA API key or AAA scraper is
-    # needed).  Until then, gas price signals will always be blocked by the
-    # LARGE_DIVERGENCE gate whenever EIA conventional < AAA national average.
-    "gas price": ("GASREGCOVW", "US Average Retail Gasoline Price"),
-    "gasoline price": ("GASREGCOVW", "US Average Retail Gasoline Price"),
-    "average gas": ("GASREGCOVW", "US Average Retail Gasoline Price"),
+    # Trade-off: monthly release vs weekly KXAAAGASW resolution.  Mid-month BLS
+    # data (≤45 days old) carries confidence=0.80, which meets the 0.80 trade
+    # gate.  Brackets that are clearly above/below the BLS price will generate
+    # signals; near-money brackets (gap < 4% or > 40%) are filtered as usual.
+    "gas price": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
+    "gasoline price": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
+    "average gas": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
 }
 
 

@@ -75,9 +75,11 @@ TIER_STAGGER_JITTER_S  = 0.10    # max random addition to stagger
 # during this window so open positions are tracked from the first second.
 STARTUP_STABILIZATION_SECONDS = 60
 
-# Warn when a Tier-1 cycle takes more than 80% of TIER_1_INTERVAL — it means
-# the VPS is struggling and the next cycle will start late.
-CYCLE_DURATION_WARN_FRACTION = 0.80
+# Warn when a Tier-1 cycle takes more than 120% of TIER_1_INTERVAL.
+# The market scanner alone takes ~13s, so 80% (12s) triggered constantly on
+# normal 15s cycles.  At 120% (18s) we only fire on genuinely slow cycles
+# where the GT loop itself is the bottleneck.
+CYCLE_DURATION_WARN_FRACTION = 1.20
 
 # Max signals kept per (source_name, action) bucket.
 # Prevents correlated overexposure when a single data source (e.g. Yahoo Finance/NQ=F)
