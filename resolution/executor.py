@@ -555,6 +555,11 @@ class ResolutionBot:
                     "ResolutionBot: ground truth progress %d/%d (signals so far: %d)",
                     i, total, len(signals),
                 )
+            # Fast pre-filter: skip the router entirely if no source can handle
+            # this market — all can_handle() calls are in-memory keyword checks.
+            if not self._ground_truth.can_any_source_handle(market):
+                n_no_source += 1
+                continue
             gt = self._ground_truth.fetch(market)
             if gt is None:
                 n_no_source += 1
