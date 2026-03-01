@@ -76,12 +76,20 @@ class FederalRegisterSource(DataSource):
         # Sports markets are never resolved by government documents.
         if market.category.lower() in ("sports", "sport", "esports"):
             return False
+        # Bracket/count series ("will X or more judges be fired?") ask for a
+        # running count, not a binary regulatory outcome.  The Federal Register
+        # API cannot compute a count from regulatory filings, so these markets
+        # always return prob=None — skip them entirely to save API quota and
+        # cycle time.  Examples: KXJUDGECOUNT, KXFIREDCOUNT bracket series.
+        text = (market.question + " " + " ".join(market.tags)).lower()
+        _COUNT_PHRASES = (" or more", " or fewer", " at least ", " at most ", "how many")
+        if any(p in text for p in _COUNT_PHRASES):
+            return False
         # Require at least one domain-specific keyword in the question/tags.
         # A bare category match (e.g. category="politics") is not sufficient —
         # it causes false positives for political-figure markets ("Will Bill
         # Clinton appear in public?") that have no Federal Register documents,
         # burning API quota and producing confidence=0.50/prob=None noise.
-        text = (market.question + " " + " ".join(market.tags)).lower()
         return (
             any(kw in text for kw in _REGULATORY_KEYWORDS)
             or any(kw in text for kw in _COURT_KEYWORDS)

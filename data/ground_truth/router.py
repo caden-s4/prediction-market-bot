@@ -186,6 +186,16 @@ class GroundTruthRouter:
 
     # ── Source management ─────────────────────────────────────────────────────
 
+    def can_any_source_handle(self, market: Market) -> bool:
+        """Return True if at least one registered source claims this market.
+
+        All can_handle() implementations are in-memory keyword checks — no I/O.
+        Use this as a fast pre-filter before calling fetch() to avoid the
+        router's per-source logging overhead for markets that will inevitably
+        return no_source.
+        """
+        return any(s.can_handle(market) for s in self._sources)
+
     def add_source(self, source: DataSource) -> None:
         """Add a custom data source at the end of the priority list."""
         self._sources.append(source)
