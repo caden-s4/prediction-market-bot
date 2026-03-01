@@ -851,11 +851,13 @@ class ResolutionBot:
         # Falls back to signal.target_price only when not provided (dry-run log).
         order_price = limit_price if limit_price is not None else signal.target_price
         if self._dry_run:
+            ghost_id = f"ghost_{market.market_id}_{int(time.time())}"
             logger.info(
-                "ResolutionBot [DRY]: %s %s @ %.4f size=$%.2f fee=%.4f",
-                signal.action, market.market_id, order_price, size_usd, fee,
+                "ResolutionBot [GHOST TRADE]: %s %s @ %.4f size=$%.2f fee=%.4f "
+                "(simulated — no real order placed, order_id=%s)",
+                signal.action, market.market_id, order_price, size_usd, fee, ghost_id,
             )
-            return f"dry_{market.market_id}_{int(time.time())}"
+            return ghost_id
 
         client = self._poly if market.platform == "polymarket" else self._kalshi
         if not client:
@@ -1166,8 +1168,13 @@ class ResolutionBot:
     # ── Position persistence ───────────────────────────────────────────────────
 
     def _save_positions(self) -> None:
-        """Persist all open positions to the state store (called on every open/close)."""
-        if not self._state:
+        """Persist all open positions to the state store (called on every open/close).
+
+        In ghost-trade (dry_run) mode, positions exist only for the current
+        session — they are intentionally NOT written to disk so that each
+        restart begins with a clean slate.
+        """
+        if self._dry_run or not self._state:
             return
         data: dict = {}
         for mid, rec in self._positions.items():
@@ -1192,8 +1199,12 @@ class ResolutionBot:
         self._state.set("open_positions", data)
 
     def _load_positions(self) -> None:
-        """Reload open positions from the state store on startup."""
-        if not self._state:
+        """Reload open positions from the state store on startup.
+
+        In ghost-trade (dry_run) mode, positions are session-scoped — we do
+        NOT reload from disk so each run starts fresh with a clean ledger.
+        """
+        if self._dry_run or not self._state:
             return
         data: dict = self._state.get("open_positions", {})
         if not data:
@@ -1207,10 +1218,12 @@ class ResolutionBot:
                 # now running live.  Dry-run order IDs are prefixed with "dry_";
                 # they were never real orders on any exchange.
                 order_id = saved.get("order_id", "")
-                if not self._dry_run and isinstance(order_id, str) and order_id.startswith("dry_"):
+                if not self._dry_run and isinstance(order_id, str) and (
+                    order_id.startswith("dry_") or order_id.startswith("ghost_")
+                ):
                     logger.info(
                         "ResolutionBot: skipping phantom position %s "
-                        "(saved from a dry-run session, now running live)", mid,
+                        "(saved from a ghost-trade/dry-run session, now running live)", mid,
                     )
                     skipped += 1
                     continue

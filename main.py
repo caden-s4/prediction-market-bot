@@ -78,7 +78,7 @@ def _restore_sleep() -> None:
 def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> None:
     """Print a clean, human-readable cycle summary to stdout."""
     now = datetime.now(tz=_PST).strftime("%H:%M:%S")
-    mode = "DRY RUN" if cfg.bot.dry_run else "LIVE"
+    mode = "GHOST TRADE" if cfg.bot.dry_run else "LIVE"
 
     platforms = []
     if cfg.kalshi.enabled:
@@ -157,16 +157,21 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
     print(f"{reg_str}", end="")
     print(f"  Cross-platform pairs     {pairs:>5}")
     print(f"  Gap signals detected     {signals:>5}{signal_tag}")
-    print(f"  Trades fired             {trades:>5}{trade_tag}")
-    print(f"  Open positions           {positions:>5}")
+    ghost = cfg.bot.dry_run
+    trades_label    = "Ghost trades fired" if ghost else "Trades fired"
+    positions_label = "Ghost positions    " if ghost else "Open positions     "
+    pnl_label       = "Ghost P&L today" if ghost else "P&L today      "
+    print(f"  {trades_label:<24} {trades:>5}{trade_tag}")
+    print(f"  {positions_label:<24} {positions:>5}")
     print(f"  Exits triggered          {exits:>5}")
     print(thin)
     print(f"  Kalshi    {k_s}   |   Polymarket  {p_s}")
-    print(f"  Total     ${bankroll:>9,.2f}   |   P&L today  {pnl_s:>8}   |   {elapsed_s:.1f}s")
+    print(f"  Total     ${bankroll:>9,.2f}   |   {pnl_label}  {pnl_s:>8}   |   {elapsed_s:.1f}s")
     print(sep)
 
     if show_names and trade_details:
-        print(f"\n  Trades this cycle:")
+        label = "Ghost trades this cycle (SIMULATED)" if cfg.bot.dry_run else "Trades this cycle"
+        print(f"\n  {label}:")
         print(f"  {'─' * (_SEP_W - 2)}")
         for d in trade_details:
             action = d["action"].replace("_", " ").upper()
@@ -197,7 +202,7 @@ def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> No
         )
         print()
     if dry_run and signal_details and not trade_details:
-        print(f"\n  Potential trades (would execute in live mode):")
+        print(f"\n  Ghost trades that passed all gates (simulated, session-only):")
         print(f"  {'─' * (_SEP_W - 2)}")
         for d in signal_details:
             action  = d["action"].replace("_", " ").upper()
@@ -506,7 +511,8 @@ def main() -> None:
 
     if cfg.bot.dry_run:
         logger.warning(
-            "DRY RUN mode – no real orders will be placed. "
+            "GHOST TRADE mode – simulated trades will be tracked this session "
+            "but NO real orders will be placed and positions reset on restart. "
             "Set DRY_RUN=false in .env to trade live."
         )
 
