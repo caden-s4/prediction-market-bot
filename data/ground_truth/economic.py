@@ -60,7 +60,6 @@ _SERIES_STALENESS: Dict[str, Tuple[int, int]] = {
     "GASREGCOVW":   (24,   168),   # US avg retail gas price: weekly (EIA/Monday)
     "ICSA":         (24,   168),   # Initial Claims: weekly; stale after 7 days
     # Monthly
-    "APU000074714": (24,  1080),   # BLS CPI gasoline, U.S. city avg: monthly, 45d max
     "UNRATE":   (24,  1080),   # Unemployment: monthly; allow up to 45 days
     "PAYEMS":   (24,   744),   # Nonfarm Payroll: monthly
     "CPIAUCSL": (24,   744),   # CPI: monthly
@@ -98,29 +97,30 @@ _INDICATOR_MAP: Dict[str, Tuple[str, str]] = {
     "trade balance": ("BOPGSTB", "Trade Balance"),
     "ism manufacturing": ("NAPM", "ISM Manufacturing PMI"),
     "pmi": ("NAPM", "ISM Manufacturing PMI"),
-    # Retail gasoline — BLS CPI series APU000074714 "Gasoline, unleaded regular,
-    # per gallon in U.S. city average" (published monthly via FRED).
+    # Retail gasoline — EIA Regular Conventional series via FRED (GASREGCOVW).
     #
-    # Why APU000074714 instead of GASREGCOVW:
-    #   GASREGCOVW = EIA Regular Conventional — excludes reformulated-fuel (RFG)
-    #   cities such as LA, NYC, and Chicago.  This runs $0.10–0.20/gal BELOW the
-    #   AAA national average that Kalshi KXAAAGASW resolves against.
+    # GASREGCOVW = EIA Weekly U.S. Regular Conventional Retail Gasoline Prices
+    # ($/gal), updated every Monday ~5 pm ET.  This is a FRED-native series
+    # served reliably by the fredgraph.csv endpoint (no API key required).
     #
-    #   APU000074714 = BLS "All Urban Consumers" city average — surveys stations
-    #   nationwide across all formulations, closely tracking the AAA national
-    #   average (typically within $0.02–0.05/gal).
+    # Note on accuracy vs AAA: GASREGCOVW excludes reformulated-fuel (RFG) cities
+    # (LA, NYC, Chicago) and runs $0.10–0.20/gal below the AAA national average
+    # that Kalshi KXAAAGASW resolves against.  The LARGE_DIVERGENCE gate (gap >
+    # 40%) blocks auto-trading when the spread is too wide.  When EIA_API_KEY is
+    # set, EIADataSource provides a more accurate reading and takes precedence
+    # (confidence=0.90 vs 0.80 here) so this source acts as a fallback only.
     #
-    # Trade-off: monthly release vs weekly KXAAAGASW resolution.  Mid-month BLS
-    # data (≤45 days old) carries confidence=0.80, which meets the 0.80 trade
-    # gate.  Brackets that are clearly above/below the BLS price will generate
-    # signals; near-money brackets (gap < 4% or > 40%) are filtered as usual.
-    "gas": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
-    "gas price": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
-    "gas prices": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
-    "gasoline": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
-    "gasoline price": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
-    "average gas": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
-    "AAA gas": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
+    # Why NOT APU000074714 (BLS CPI city-avg): that series ID is only accessible
+    # via the FRED website — the fredgraph.csv shortcut endpoint returns HTTP 400
+    # for BLS APU sub-item IDs, causing _fetch_fred_latest to return (None, None)
+    # for every gas market and inflating no_source counts.
+    "gas": ("GASREGCOVW", "US Weekly Retail Gasoline Price (EIA conv.)"),
+    "gas price": ("GASREGCOVW", "US Weekly Retail Gasoline Price (EIA conv.)"),
+    "gas prices": ("GASREGCOVW", "US Weekly Retail Gasoline Price (EIA conv.)"),
+    "gasoline": ("GASREGCOVW", "US Weekly Retail Gasoline Price (EIA conv.)"),
+    "gasoline price": ("GASREGCOVW", "US Weekly Retail Gasoline Price (EIA conv.)"),
+    "average gas": ("GASREGCOVW", "US Weekly Retail Gasoline Price (EIA conv.)"),
+    "AAA gas": ("GASREGCOVW", "US Weekly Retail Gasoline Price (EIA conv.)"),
 }
 
 

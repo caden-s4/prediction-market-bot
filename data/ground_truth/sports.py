@@ -99,6 +99,24 @@ _GOLF_MAP: dict = {
     "us open": "golf/pga",
 }
 
+# Racing (IndyCar, NASCAR) uses individual-driver standings, not team scores.
+# NASCAR-specific keywords are listed BEFORE "grand prix" so that a market
+# like "DuraMAX Texas Grand Prix" matches "duramax" → NASCAR before the
+# generic "grand prix" → IndyCar fallback at the bottom.
+_RACING_MAP: dict = {
+    "nascar": "racing/nascar-cup-series",
+    "daytona 500": "racing/nascar-cup-series",
+    "duramax": "racing/nascar-cup-series",
+    "talladega": "racing/nascar-cup-series",
+    "xfinity series": "racing/nascar-xfinity",
+    "indycar": "racing/indycar",
+    "indy car": "racing/indycar",
+    "indy 500": "racing/indycar",
+    "indianapolis 500": "racing/indycar",
+    # "grand prix" alone defaults to IndyCar; NASCAR GP races match above first.
+    "grand prix": "racing/indycar",
+}
+
 _ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 _TIMEOUT = 8  # seconds
 
@@ -166,6 +184,10 @@ class SportsDataSource(DataSource):
                 logger.debug("SportsSource: no sport detected for %s", market.market_id)
                 return None
 
+            # Racing (IndyCar/NASCAR) uses individual-driver standings.
+            if sport_path.startswith("racing/"):
+                return self._fetch_racing_result(market, sport_path)
+
             # Golf uses individual-player leaderboard logic, not team scores.
             if sport_path.startswith("golf/"):
                 return self._fetch_golf_result(market, sport_path)
@@ -197,7 +219,7 @@ class SportsDataSource(DataSource):
         Includes the market_id in the search text so Kalshi-style IDs like
         'KXNCAABBGAME-...' correctly route to the NCAA basketball endpoint
         even when the question text doesn't contain the exact keyword phrase.
-        Returns a path like "football/nfl" or "golf/pga".
+        Returns a path like "football/nfl", "golf/pga", or "racing/indycar".
         """
         text = (
             market.question + " " + " ".join(market.tags) + " " + market.market_id
@@ -206,6 +228,9 @@ class SportsDataSource(DataSource):
             if keyword in text:
                 return path
         for keyword, path in _GOLF_MAP.items():
+            if keyword in text:
+                return path
+        for keyword, path in _RACING_MAP.items():
             if keyword in text:
                 return path
         # Generic sport category – do NOT fall back to NFL; that produces
@@ -488,6 +513,227 @@ class SportsDataSource(DataSource):
             },
             reasoning=reasoning,
         )
+
+    # ── Racing (IndyCar / NASCAR individual driver standings) ─────────────────
+
+    def _extract_racing_driver(self, question: str) -> Optional[str]:
+        """Extract driver name from a racing market question.
+
+        Handles formats Kalshi uses:
+          "Will Alex Palou be the Grand Prix of St. Petersburg Winner"
+          "Will Austin Dillon finish in the top 3 at NASCAR..."
+          "Will Ross Chastain win the DuraMAX Texas Grand Prix?"
+        """
+        patterns = [
+            r"\bWill\s+(.+?)\s+be\s+the\b",    # "Will X be the [Event] Winner"
+            r"\bWill\s+(.+?)\s+win\b",           # "Will X win..."
+            r"\bWill\s+(.+?)\s+finish\b",        # "Will X finish in top N..."
+        ]
+        for pat in patterns:
+            m = re.search(pat, question, re.IGNORECASE)
+            if m:
+                name = m.group(1).strip()
+                if 2 <= len(name) <= 45:
+                    return name
+        return None
+
+    def _driver_matches(self, driver_name: str, competitor: dict) -> bool:
+        """Return True if driver_name matches a competitor object from ESPN."""
+        athlete = competitor.get("athlete", {})
+        display = athlete.get("displayName", "")
+        short   = athlete.get("shortName", "")
+        full    = (display + " " + short).lower()
+        driver_lower = driver_name.lower()
+        if driver_lower in full or full.strip().startswith(driver_lower):
+            return True
+        # Token match: nearly all parts of the driver name appear in the ESPN name
+        parts = [p for p in driver_lower.split() if len(p) > 1]
+        return sum(1 for p in parts if p in full) >= max(1, len(parts) - 1)
+
+    def _fetch_racing_result(
+        self, market: Market, sport_path: str
+    ) -> Optional[GroundTruthResult]:
+        """Resolve a driver-wins-race market from the ESPN racing scoreboard.
+
+        Returns:
+          prob=1.0 / confidence=0.95  — race FINAL, driver finished P1 (winner market)
+                                        or within top-N (top-N finish market)
+          prob=0.0 / confidence=0.95  — race FINAL, driver did not meet the criterion
+          prob=0.98 / confidence=0.65 — race in-progress, driver leading by >10s
+                                        with fewer than 5 laps remaining
+          None                        — race in-progress but signal gate not met,
+                                        or driver not found in the ESPN event
+        """
+        driver_name = self._extract_racing_driver(market.question)
+        if not driver_name:
+            logger.debug(
+                "SportsSource: could not extract driver name from '%s'",
+                market.question,
+            )
+            return None
+
+        question_lower = market.question.lower()
+
+        # Top-N finish market ("finish in the top 3") vs winner market
+        top_n: Optional[int] = None
+        top_n_m = re.search(r"\btop\s*(\d+)\b", question_lower)
+        if top_n_m:
+            try:
+                top_n = int(top_n_m.group(1))
+            except ValueError:
+                pass
+
+        events = self._fetch_events(sport_path)
+        if not events:
+            return None
+
+        for event in events:
+            status      = event.get("status", {})
+            status_type = status.get("type", {})
+            state       = status_type.get("state", "pre")
+            completed   = status_type.get("completed", False)
+            description = status_type.get("description", state)
+
+            if any(kw in description.lower() for kw in (
+                "postponed", "suspended", "cancelled", "canceled",
+            )):
+                return None
+
+            competitions = event.get("competitions", [{}])
+            comp         = competitions[0] if competitions else {}
+            competitors  = comp.get("competitors", [])
+
+            # Locate target driver in this event
+            target = next(
+                (c for c in competitors if self._driver_matches(driver_name, c)),
+                None,
+            )
+            if target is None:
+                continue   # driver not in this event; try next
+
+            target_status = target.get("status", {})
+            try:
+                target_rank = int(
+                    target_status.get("position", {}).get("rank")
+                    or target_status.get("position", {}).get("displayText", "")
+                )
+            except (TypeError, ValueError):
+                target_rank = None
+
+            driver_display = target.get("athlete", {}).get("displayName", driver_name)
+
+            if completed:
+                # ── FINAL result ────────────────────────────────────────────
+                if top_n is not None:
+                    won = target_rank is not None and target_rank <= top_n
+                else:
+                    won = (
+                        target_status.get("won", False)
+                        or target_rank == 1
+                    )
+                prob = 1.0 if won else 0.0
+                criterion = f"top-{top_n}" if top_n else "P1 winner"
+                return GroundTruthResult(
+                    ground_truth_prob=prob,
+                    confidence=0.95,
+                    source_type=SourceType.HARD,
+                    source_name=f"ESPN/{sport_path}",
+                    source_url=f"{_ESPN_BASE}/{sport_path}/scoreboard",
+                    raw_data={
+                        "event":    event.get("name", ""),
+                        "driver":   driver_display,
+                        "position": target_rank,
+                        "won":      target_status.get("won", False),
+                        "state":    "final",
+                    },
+                    reasoning=(
+                        f"Race FINAL. {driver_display}: P{target_rank}. "
+                        f"{criterion} market: {'YES' if prob == 1.0 else 'NO'}."
+                    ),
+                )
+
+            elif state == "in":
+                # ── In-progress: only trade if leading by >10s with <5 laps left ──
+                if target_rank != 1:
+                    logger.debug(
+                        "SportsSource: %s is P%s in %s — waiting for final",
+                        driver_display, target_rank, market.market_id,
+                    )
+                    return None
+
+                # Driver is leading — check laps remaining
+                try:
+                    laps_remaining = int(target_status.get("lapsRemaining", 99))
+                except (TypeError, ValueError):
+                    laps_remaining = 99
+
+                if laps_remaining >= 5:
+                    logger.debug(
+                        "SportsSource: %s leading %s but %d laps remaining — waiting",
+                        driver_display, market.market_id, laps_remaining,
+                    )
+                    return None
+
+                # Find P2 driver's gap to the leader
+                leader_gap_secs: Optional[float] = None
+                for c in competitors:
+                    try:
+                        c_rank = int(
+                            c.get("status", {}).get("position", {}).get("rank")
+                            or c.get("status", {}).get("position", {}).get("displayText", "")
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if c_rank == 2:
+                        gap_str = (
+                            c.get("status", {}).get("timing", {}).get("leaderGap", "")
+                        )
+                        try:
+                            leader_gap_secs = float(
+                                str(gap_str).lstrip("+").rstrip("s").strip()
+                            )
+                        except (ValueError, AttributeError):
+                            pass
+                        break
+
+                if leader_gap_secs is None or leader_gap_secs <= 10.0:
+                    logger.debug(
+                        "SportsSource: %s leading %s but gap=%.1fs ≤ 10s — waiting",
+                        driver_display, market.market_id, leader_gap_secs or 0.0,
+                    )
+                    return None
+
+                # All gates met: leading, >10s gap, <5 laps — high-confidence signal
+                return GroundTruthResult(
+                    ground_truth_prob=0.98,   # Near-certain but not 1.0 — DNFs happen
+                    confidence=0.65,          # In-progress: uncertainty remains
+                    source_type=SourceType.HARD,
+                    source_name=f"ESPN/{sport_path}",
+                    source_url=f"{_ESPN_BASE}/{sport_path}/scoreboard",
+                    raw_data={
+                        "event":           event.get("name", ""),
+                        "driver":          driver_display,
+                        "position":        1,
+                        "laps_remaining":  laps_remaining,
+                        "lead_gap_secs":   leader_gap_secs,
+                        "state":           "in_progress",
+                    },
+                    reasoning=(
+                        f"Race in progress. {driver_display} leading P1, "
+                        f"gap={leader_gap_secs:.1f}s to P2, "
+                        f"{laps_remaining} laps remaining. Strong WIN signal."
+                    ),
+                )
+
+            else:
+                # Pre-race — no ground truth yet
+                return None
+
+        logger.debug(
+            "SportsSource: driver '%s' not found in ESPN %s for %s",
+            driver_name, sport_path, market.market_id,
+        )
+        return None
 
     # ── Golf (individual leaderboard) ─────────────────────────────────────────
 
