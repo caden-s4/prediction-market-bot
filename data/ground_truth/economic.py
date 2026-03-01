@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
@@ -32,6 +33,13 @@ logger = logging.getLogger(__name__)
 _FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 _FRED_API_BASE = "https://api.stlouisfed.org/fred"
 _TIMEOUT = 10
+
+# Module-level FRED response cache: series_id → (fetched_at, (value, date_str))
+# All bracket markets in the same series (KXAAAGASW-26MAR02-2.888, -2.898, …)
+# share the same underlying indicator — one HTTP call should cover all of them.
+# TTL of 5 minutes is well within any FRED update frequency.
+_FRED_CACHE: dict = {}
+_FRED_CACHE_TTL = 300  # seconds
 
 # Optional FRED API key — required for the release calendar check.
 # Get a free key at https://fred.stlouisfed.org/docs/api/api_key.html
@@ -187,7 +195,19 @@ class EconomicDataSource(DataSource):
         return "", "", ""
 
     def _fetch_fred_latest(self, series_id: str) -> Tuple[Optional[float], Optional[str]]:
-        """Fetch most recent observation from FRED CSV endpoint."""
+        """Fetch most recent observation from FRED CSV endpoint.
+
+        Results are cached for _FRED_CACHE_TTL seconds so that bracket-series
+        markets (e.g. KXAAAGASW-26MAR02-2.888, -2.898, -2.908 …) share a
+        single HTTP call rather than hitting FRED once per bracket level.
+        """
+        now = time.monotonic()
+        cached = _FRED_CACHE.get(series_id)
+        if cached:
+            fetched_at, result = cached
+            if now - fetched_at < _FRED_CACHE_TTL:
+                return result
+
         url = f"{_FRED_BASE}?id={series_id}"
         try:
             resp = requests.get(url, timeout=_TIMEOUT)
@@ -199,21 +219,29 @@ class EconomicDataSource(DataSource):
                 parts = line.strip().split(",")
                 if len(parts) == 2 and parts[1] not in (".", ""):
                     try:
-                        return float(parts[1]), parts[0]
+                        result = (float(parts[1]), parts[0])
+                        _FRED_CACHE[series_id] = (now, result)
+                        return result
                     except ValueError:
                         continue
+            _FRED_CACHE[series_id] = (now, (None, None))
             return None, None
         except Exception as exc:
             logger.debug("EconSource: FRED fetch failed for %s: %s", series_id, exc)
             return None, None
 
     def _extract_threshold(self, question: str, indicator_key: str) -> Optional[float]:
-        """Extract numeric threshold from the market question if present."""
-        # Look for patterns like "> 3.5%", "above 200k", "below 4%", "at least 2.5"
+        """Extract numeric threshold from the market question if present.
+
+        Handles currency-prefixed values like "$2.888" and "$3.50" in addition
+        to bare numerics and percentage/k-suffix formats.
+        """
+        # \$? allows an optional dollar sign between the comparison word and the
+        # number — Kalshi gas/price markets use "above $2.888" formatting.
         patterns = [
-            r"(?:above|over|greater than|exceed|more than|>)\s*([\d,]+\.?\d*)\s*%?k?",
-            r"(?:below|under|less than|<)\s*([\d,]+\.?\d*)\s*%?k?",
-            r"(?:at least|>=)\s*([\d,]+\.?\d*)\s*%?k?",
+            r"(?:above|over|greater than|exceed|more than|>)\s*\$?\s*([\d,]+\.?\d*)\s*%?k?",
+            r"(?:below|under|less than|<)\s*\$?\s*([\d,]+\.?\d*)\s*%?k?",
+            r"(?:at least|>=)\s*\$?\s*([\d,]+\.?\d*)\s*%?k?",
             r"([\d,]+\.?\d*)\s*%?\s*(?:or (?:higher|lower|more|less))",
         ]
         for pat in patterns:

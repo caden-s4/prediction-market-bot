@@ -543,6 +543,7 @@ class ResolutionBot:
         )
 
         # Coverage diagnostic counters
+        n_novelty: int = 0          # subjective prop bets — no GT source can ever resolve
         n_no_source: int = 0        # GT router returned None — no data source covers this market
         n_no_prob: int = 0          # GT source found but couldn't extract a probability
         n_covered: int = 0          # GT source returned a usable probability
@@ -555,6 +556,15 @@ class ResolutionBot:
                     "ResolutionBot: ground truth progress %d/%d (signals so far: %d)",
                     i, total, len(signals),
                 )
+            # Novelty prop-bet filter: "what will the announcers say?"-style markets
+            # are unresolvable by any data source — skip before routing.
+            if self._ground_truth.is_novelty_market(market):
+                n_novelty += 1
+                logger.debug(
+                    "ResolutionBot: excluded_novelty %s — subjective prop bet",
+                    market.market_id,
+                )
+                continue
             # Fast pre-filter: skip the router entirely if no source can handle
             # this market — all can_handle() calls are in-memory keyword checks.
             if not self._ground_truth.can_any_source_handle(market):
@@ -589,9 +599,9 @@ class ResolutionBot:
         )
         logger.info(
             "ResolutionBot: GT coverage summary — "
-            "no_source=%d no_prob=%d covered=%d (sources: %s) "
+            "excluded_novelty=%d no_source=%d no_prob=%d covered=%d (sources: %s) "
             "gap_too_small=%d actionable=%d",
-            n_no_source, n_no_prob, n_covered, sources_str,
+            n_novelty, n_no_source, n_no_prob, n_covered, sources_str,
             n_gap_too_small, len(signals),
         )
 

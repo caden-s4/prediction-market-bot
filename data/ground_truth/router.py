@@ -24,6 +24,7 @@ A result validator runs as a post-step before returning any tradeable result:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import replace as dc_replace
 from typing import List, Optional
 
@@ -36,6 +37,23 @@ from .financial import FinancialDataSource
 from .sports import SportsDataSource
 
 logger = logging.getLogger(__name__)
+
+# Novelty / subjective prop-bet patterns that no data source can resolve.
+# Markets matching these are logged as excluded_novelty and skipped entirely.
+#
+# Examples:
+#   "What will the announcers say during Vera vs Martinez?"
+#   "How many times will LeBron say 'taco' during the game?"
+#   "What word will the host use to open the segment?"
+_NOVELTY_RE = re.compile(
+    # "What will [X] say/mention/announce/tweet…"
+    r"\bwhat\s+will\b.{0,80}\b(?:say|mention|announce|call|tweet|post|shout)\b"
+    # "How many times will [X] say/do…"
+    r"|\bhow\s+many\s+times\s+will\b"
+    # "What word/phrase will [X] use…"
+    r"|\bwhat\s+(?:word|phrase|number)\s+will\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class GroundTruthRouter:
@@ -195,6 +213,17 @@ class GroundTruthRouter:
         return no_source.
         """
         return any(s.can_handle(market) for s in self._sources)
+
+    @staticmethod
+    def is_novelty_market(market: Market) -> bool:
+        """Return True if this market is a subjective prop bet with no machine-readable
+        resolution criterion (announcer dialogue, word counts, etc.).
+
+        These markets should be logged as excluded_novelty and skipped before
+        any source routing — no GT source can resolve them, and attempting to
+        do so wastes cycle time on T1 markets that are guaranteed no_source.
+        """
+        return bool(_NOVELTY_RE.search(market.question))
 
     def add_source(self, source: DataSource) -> None:
         """Add a custom data source at the end of the priority list."""
