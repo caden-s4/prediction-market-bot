@@ -124,11 +124,11 @@ class BotCoordinator:
         _RECOMMENDED_BANKROLL = 200.0
         if bc.dry_run and starting_bankroll < _MIN_VIABLE_BANKROLL:
             logger.warning(
-                "DRY RUN: effective bankroll $%.2f is too small to generate any trades. "
+                "GHOST TRADE: effective bankroll $%.2f is too small to generate any trades. "
                 "With %.0f%% Kelly even a perfect signal produces a position of ~$%.2f "
                 "(below the $1.00 minimum floor). "
                 "Type 'bank <amount>' at the prompt to set a virtual bankroll "
-                "(e.g. 'bank 500') and see realistic signal flow.",
+                "(e.g. 'bank 500') and see realistic ghost-trade signal flow.",
                 starting_bankroll,
                 bc.resolution_kelly_fraction * 100,
                 starting_bankroll * bc.resolution_kelly_fraction * 0.15,
