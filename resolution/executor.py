@@ -646,7 +646,14 @@ class ResolutionBot:
                     if prefix is not None:
                         _bracket_gt[prefix] = None
                     continue
+                _gt_t0 = time.monotonic()
                 gt = self._ground_truth.fetch(market)
+                _gt_elapsed = time.monotonic() - _gt_t0
+                if _gt_elapsed > 2.0:
+                    logger.warning(
+                        "ResolutionBot: slow GT fetch — %s took %.1fs",
+                        market.market_id, _gt_elapsed,
+                    )
                 if prefix is not None:
                     _bracket_gt[prefix] = gt
                 if gt is None:

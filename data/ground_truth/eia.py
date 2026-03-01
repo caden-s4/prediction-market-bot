@@ -44,8 +44,8 @@ from .base import DataSource, GroundTruthResult, SourceType
 logger = logging.getLogger(__name__)
 
 _EIA_BASE    = "https://api.eia.gov/v2/petroleum/pri/gnd/data/"
-_EIA_SERIES  = "EPMR"    # Regular Conventional; switch to EPM0U for all-formulations
-_EIA_AREA    = "NUS"     # National U.S.
+_EIA_SERIES  = "EPM0"    # All formulations (regular + reformulated); tracks AAA closely
+_EIA_AREA    = "NUS"     # National U.S. (duoarea facet code)
 _TIMEOUT     = 10        # seconds
 
 # Module-level cache: (fetched_at, (value, period_str)) or (fetched_at, (None, None))
@@ -112,7 +112,7 @@ class EIADataSource(DataSource):
                     "threshold":  threshold,
                 },
                 reasoning=(
-                    f"EIA {_EIA_SERIES} weekly gas price: {value:.3f} $/gal "
+                    f"EIA {_EIA_SERIES} (all-formulations) weekly gas price: {value:.3f} $/gal "
                     f"(period {period}, {hours_since:.0f}h old). "
                     + (f"Threshold={threshold:.3f}. " if threshold is not None else "No threshold. ")
                     + (f"prob={prob:.2f}." if prob is not None else "prob=None.")
@@ -146,7 +146,7 @@ class EIADataSource(DataSource):
                     "frequency":            "weekly",
                     "data[0]":              "value",
                     f"facets[product][]":   _EIA_SERIES,
-                    f"facets[area][]":      _EIA_AREA,
+                    f"facets[duoarea][]":   _EIA_AREA,
                     "sort[0][column]":      "period",
                     "sort[0][direction]":   "desc",
                     "offset":               "0",

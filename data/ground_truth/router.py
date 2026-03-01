@@ -35,6 +35,7 @@ from .economic import EconomicDataSource
 from .eia import EIADataSource
 from .federal_register import FederalRegisterSource
 from .financial import FinancialDataSource
+from .rotten_tomatoes import RottenTomatoesSource
 from .sports import SportsDataSource
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,16 @@ logger = logging.getLogger(__name__)
 # "announce", "call", "tweet", "post" are intentionally excluded because they
 # produce false positives on FOMC/court markets.  "say" and "mention" are
 # specific enough for broadcast prop bets while rarely appearing in policy markets.
+# Ticker-prefix based novelty detection: these Kalshi series are always
+# announcer-mention prop bets regardless of question text.
+# Prefix matching is O(1) and more reliable than regex on free-form titles.
+_NOVELTY_TICKER_PREFIXES = (
+    "KXNBAMENTION",     # NBA announcer mention markets
+    "KXNCAABMENTION",   # NCAAB announcer mention markets
+    "KXNFLMENTION",     # NFL announcer mention markets
+    "KXMLBMENTION",     # MLB announcer mention markets
+)
+
 _NOVELTY_RE = re.compile(
     # "What will [X] say/mention..." — spoken-word broadcast prop bets
     r"\bwhat\s+will\b.{0,80}\b(?:say|mention)\b"
@@ -75,10 +86,11 @@ class GroundTruthRouter:
         self._sources: List[DataSource] = sources or [
             SportsDataSource(),
             EconomicDataSource(),
-            EIADataSource(),         # weekly gas prices (active only when EIA_API_KEY is set)
+            EIADataSource(),           # weekly gas prices (active only when EIA_API_KEY is set)
             FinancialDataSource(),
-            CongressSource(),        # bill passage status (specific, definitive outcomes)
-            FederalRegisterSource(), # regulatory filings (broad political/legal coverage)
+            CongressSource(),          # bill passage status (specific, definitive outcomes)
+            FederalRegisterSource(),   # regulatory filings (broad political/legal coverage)
+            RottenTomatoesSource(),    # Tomatometer scores for RT-score markets
         ]
 
     def fetch(self, market: Market) -> Optional[GroundTruthResult]:
@@ -258,7 +270,12 @@ class GroundTruthRouter:
         These markets should be logged as excluded_novelty and skipped before
         any source routing — no GT source can resolve them, and attempting to
         do so wastes cycle time on T1 markets that are guaranteed no_source.
+
+        Ticker-prefix check runs first (O(1), most reliable) then falls back
+        to the regex pattern for markets without a known novelty ticker prefix.
         """
+        if market.market_id.upper().startswith(_NOVELTY_TICKER_PREFIXES):
+            return True
         return bool(_NOVELTY_RE.search(market.question))
 
     def add_source(self, source: DataSource) -> None:
