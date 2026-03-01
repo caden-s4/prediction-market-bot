@@ -102,6 +102,22 @@ _GOLF_MAP: dict = {
 _ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 _TIMEOUT = 8  # seconds
 
+# Broad sport keywords used as a fallback in can_handle() for markets tagged
+# [general] that are clearly about sports but lack an explicit sport category.
+# Note: some of these (e.g. "beat", "defeat") are also common outside sports;
+# that is acceptable — can_handle() claiming a market is harmless if fetch()
+# ultimately returns None (it simply lands in no_prob rather than no_source).
+SPORT_KEYWORDS = (
+    # Sport types not already covered by _SPORT_MAP / _GOLF_MAP keyword lookups
+    "soccer", "football", "basketball", "baseball", "hockey", "racing",
+    # Event types
+    "classic", "invitational", "grand prix",
+    # Outcome phrases specific to sports
+    "win the race", "finish first", "finish in the top",
+    "win the tournament", "win the match", "win the game",
+    "beat", "defeat", "advance to",
+)
+
 # Prop/mention markets: "will announcers say X during game Y" — ESPN scores can't
 # answer these, so bail out early rather than returning a misleading result.
 _PROP_BET_RE = re.compile(
@@ -140,6 +156,7 @@ class SportsDataSource(DataSource):
                 "world series", "stanley cup", "finals", "game",
                 "tournament", "tennis", "ufc", "boxing", "mma", "nascar",
             ))
+            or any(kw in text for kw in SPORT_KEYWORDS)
         )
 
     def fetch(self, market: Market) -> Optional[GroundTruthResult]:

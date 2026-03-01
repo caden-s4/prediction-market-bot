@@ -114,9 +114,13 @@ _INDICATOR_MAP: Dict[str, Tuple[str, str]] = {
     # data (≤45 days old) carries confidence=0.80, which meets the 0.80 trade
     # gate.  Brackets that are clearly above/below the BLS price will generate
     # signals; near-money brackets (gap < 4% or > 40%) are filtered as usual.
+    "gas": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
     "gas price": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
+    "gas prices": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
+    "gasoline": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
     "gasoline price": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
     "average gas": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
+    "AAA gas": ("APU000074714", "US Average Retail Gasoline Price (BLS city avg)"),
 }
 
 
@@ -130,6 +134,7 @@ class EconomicDataSource(DataSource):
         return (
             market.category.lower() in ("economics", "economy", "finance", "macro")
             or any(k in text for k in _INDICATOR_MAP)
+            or market.market_id.startswith("KXAAAGASW")  # AAA weekly gas bracket series
             or any(word in text for word in (
                 "federal reserve", "fomc", "rate hike", "rate cut",
                 "basis points", "bps", "economic", "recession",
@@ -284,7 +289,16 @@ class EconomicDataSource(DataSource):
         results and caused spurious trades on every economic market.
         """
         if threshold is None:
+            logger.debug(
+                "EconSource: _compute_prob → None (no threshold extracted) for %s",
+                market.market_id,
+            )
             return None
+
+        logger.debug(
+            "EconSource: _compute_prob — market=%s fetched_value=%.4f threshold=%.4f",
+            market.market_id, value, threshold,
+        )
 
         question_lower = market.question.lower()
         above_phrasing = any(
@@ -297,14 +311,36 @@ class EconomicDataSource(DataSource):
         )
 
         if above_phrasing:
-            return 1.0 if value > threshold else 0.0
+            prob = 1.0 if value > threshold else 0.0
         elif below_phrasing:
-            return 1.0 if value < threshold else 0.0
+            prob = 1.0 if value < threshold else 0.0
         else:
             # Equal or near: treat as 1.0 if within 2% tolerance
             if abs(value - threshold) / max(abs(threshold), 1e-6) < 0.02:
-                return 1.0
-            return 0.0
+                prob = 1.0
+            else:
+                prob = 0.0
+
+        logger.debug(
+            "EconSource: _compute_prob → prob=%.1f "
+            "(value=%.4f %s threshold=%.4f) for %s",
+            prob, value,
+            ">" if above_phrasing else ("<" if below_phrasing else "~"),
+            threshold, market.market_id,
+        )
+        return prob
+
+    def compute_bracket_prob(self, raw_value: float, market: Market) -> Optional[float]:
+        """Re-derive YES probability for a bracket market using a pre-fetched raw value.
+
+        Called by GroundTruthRouter.recompute_bracket_prob() so the executor can
+        compute probabilities for all markets in a bracket series (e.g.
+        KXAAAGASW-26MAR02-2.888, -2.898, …) from a single cached underlying value
+        without making repeated GT fetches.
+        """
+        indicator_key, _, _ = self._detect_indicator(market)
+        threshold = self._extract_threshold(market.question, indicator_key)
+        return self._compute_prob(raw_value, threshold, market)
 
     def _references_historical_period(self, question: str) -> bool:
         """
