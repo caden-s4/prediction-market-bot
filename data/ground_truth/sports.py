@@ -517,7 +517,6 @@ class SportsDataSource(DataSource):
             return None
 
         player_lower = player_name.lower()
-        player_parts = player_lower.split()
 
         for event in events:
             status = event.get("status", {})
@@ -546,16 +545,13 @@ class SportsDataSource(DataSource):
                     continue
 
                 name_lower = name.lower()
-                # Accept if one is a substring of the other (handles truncated
-                # display names), OR if most name parts overlap.
-                match = (
-                    player_lower in name_lower
-                    or name_lower in player_lower
-                    or sum(1 for p in player_parts if p in name_lower)
-                    >= max(1, len(player_parts) - 1)
-                )
-                if not match:
-                    continue
+                # Substring match first; fall back to part-count match that
+                # filters 1-char tokens (handles initials like "T." or "A.").
+                if player_lower not in name_lower and name_lower not in player_lower:
+                    player_parts = [p for p in player_lower.split() if len(p) > 1]
+                    matched = sum(1 for p in player_parts if p in name_lower)
+                    if matched < max(1, len(player_parts) - 1):
+                        continue
 
                 c_status = c.get("status", {})
                 won = c_status.get("won", False)
@@ -594,124 +590,6 @@ class SportsDataSource(DataSource):
 
         logger.debug(
             "SportsSource: player '%s' not found in ESPN golf leaderboard for %s",
-            player_name, market.market_id,
-        )
-        return None
-
-    # ── Golf leaderboard helpers ───────────────────────────────────────────────
-
-    def _extract_golf_player(self, question: str) -> Optional[str]:
-        """Extract player name from 'Will [Player] win [Tournament]?' style question.
-
-        Handles both:
-          "Tournament Name: Will Player Name win?"
-          "Will Player Name win the Tournament Name?"
-        """
-        # Strip a leading "Tournament: " prefix if present
-        if ":" in question:
-            question = question.split(":", 1)[1].strip()
-        m = re.search(r"\bWill\s+(.+?)\s+win\b", question, re.IGNORECASE)
-        if m:
-            name = m.group(1).strip()
-            if 2 <= len(name) <= 45:
-                return name
-        return None
-
-    def _fetch_golf_result(
-        self, market: Market, sport_path: str
-    ) -> Optional[GroundTruthResult]:
-        """Resolve a player-wins-tournament market via the ESPN golf leaderboard.
-
-        ESPN golf scoreboard uses the same /scoreboard endpoint but competitors
-        are individual players with 'athlete.displayName' and 'status.position'.
-
-        prob=1.0  Tournament FINAL and player won (position=="1" or won==True)
-        prob=0.0  Tournament FINAL and player did NOT win
-        None      Tournament in-progress or pre-tournament — wait for final result
-        """
-        player_name = self._extract_golf_player(market.question)
-        if not player_name:
-            logger.debug(
-                "SportsSource(golf): could not extract player name from '%s'",
-                market.question,
-            )
-            return None
-
-        events = self._fetch_events(sport_path)
-        if not events:
-            return None
-
-        player_lower = player_name.lower()
-
-        for event in events:
-            status = event.get("status", {})
-            status_type = status.get("type", {})
-            state = status_type.get("state", "pre")
-            completed = status_type.get("completed", False)
-            description = status_type.get("description", state)
-
-            if any(kw in description.lower() for kw in (
-                "postponed", "suspended", "cancelled", "canceled"
-            )):
-                return None
-
-            competitions = event.get("competitions", [{}])
-            comp = competitions[0] if competitions else {}
-            competitors = comp.get("competitors", [])
-
-            for c in competitors:
-                athlete = c.get("athlete", {})
-                name = (
-                    athlete.get("displayName", "")
-                    or athlete.get("shortName", "")
-                )
-                if not name:
-                    continue
-
-                name_lower = name.lower()
-                # Accept if either name string is a substring of the other,
-                # OR if all parts of the shorter name appear in the longer.
-                if player_lower not in name_lower and name_lower not in player_lower:
-                    player_parts = [p for p in player_lower.split() if len(p) > 1]
-                    matched_parts = sum(1 for p in player_parts if p in name_lower)
-                    if matched_parts < max(1, len(player_parts) - 1):
-                        continue
-
-                c_status = c.get("status", {})
-                won = c_status.get("won", False)
-                position = c_status.get("position", {}).get("displayText", "")
-
-                if completed:
-                    prob = 1.0 if (won or position == "1") else 0.0
-                    return GroundTruthResult(
-                        ground_truth_prob=prob,
-                        confidence=0.95,
-                        source_type=SourceType.HARD,
-                        source_name=f"ESPN/{sport_path}",
-                        source_url=f"{_ESPN_BASE}/{sport_path}/scoreboard",
-                        raw_data={
-                            "event": event.get("name", ""),
-                            "player": name,
-                            "won": won,
-                            "position": position,
-                            "state": state,
-                        },
-                        reasoning=(
-                            f"Tournament FINAL. {name}: "
-                            f"won={won}, position={position!r}. "
-                            f"Market {'resolves YES' if prob == 1.0 else 'resolves NO'}."
-                        ),
-                    )
-
-                # In-progress golf is too volatile to trade mid-round.
-                logger.debug(
-                    "SportsSource(golf): %s tournament in progress, waiting for final",
-                    market.market_id,
-                )
-                return None
-
-        logger.debug(
-            "SportsSource(golf): player '%s' not found in ESPN leaderboard for %s",
             player_name, market.market_id,
         )
         return None
