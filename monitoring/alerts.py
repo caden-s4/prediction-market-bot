@@ -126,6 +126,36 @@ class AlertManager:
         )
         self._send("error", msg)
 
+    def alert_human_review(
+        self,
+        market_id: str,
+        question: str,
+        action: str,
+        target_price: float,
+        gt_prob: float,
+        gap_pct: float,
+        source_name: str,
+    ) -> None:
+        """Send a human-review-required alert for a LARGE_DIVERGENCE signal.
+
+        Called by the executor when a signal passes the confidence gate but carries
+        requires_human_review=True (gap > 40%).  The operator should inspect the
+        data source and reply with 'approve <market_id>' to release the trade.
+        """
+        msg = (
+            f"🔍 HUMAN REVIEW REQUIRED\n"
+            f"Market: {market_id}\n"
+            f"Question: {question[:120]}\n"
+            f"Action: {action}\n"
+            f"Price: {target_price:.3f}  GT: {gt_prob:.3f}\n"
+            f"Gap: {gap_pct:.1f}%\n"
+            f"Source: {source_name}\n"
+            f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+            f"To approve: send 'approve {market_id}'"
+        )
+        # Use a per-market category key so each market gets its own rate-limit slot.
+        self._send(f"human_review_{market_id}", msg)
+
     def alert_trade(
         self,
         action: str,

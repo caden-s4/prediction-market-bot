@@ -33,6 +33,7 @@ from typing import Dict, List, Optional
 from data.ground_truth.router import GroundTruthRouter
 from data.markets.base import BaseMarketClient, Market, Order, Side
 from data.markets.polymarket_ws import PolymarketWSManager
+from monitoring.alerts import AlertManager
 from resolution.confidence import ConfidenceScorer
 from resolution.decay_monitor import (
     DecayAction, DecayMonitor, OpenResolutionPosition,
@@ -155,6 +156,7 @@ class ResolutionBot:
         poly_window_hours: Optional[float] = None,
         scan_interval: int = 300,
         state_store: Optional[StateStore] = None,
+        alert_manager: Optional[AlertManager] = None,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
@@ -164,6 +166,7 @@ class ResolutionBot:
         self._dry_run = dry_run
         self._scan_interval = scan_interval
         self._state = state_store
+        self._alert_manager: Optional[AlertManager] = alert_manager
 
         self._scanner = ResolutionScanner(
             kalshi_client, poly_client, exclusions,
@@ -208,6 +211,9 @@ class ResolutionBot:
         # Signals from the most recent cycle — used by get_last_signals() so
         # the dry-run summary and the 'signals' CLI command can display them.
         self._last_signals: List[GapSignal] = []
+        # Signals blocked for human review (LARGE_DIVERGENCE, live mode only).
+        # market_id → GapSignal.  Cleared when approve_human_review() is called.
+        self._pending_human_review: Dict[str, GapSignal] = {}
         # Timestamp of when this instance was created — used by the startup
         # stabilization guard to delay new trade entry until the first full
         # scan cycle has completed and in-memory state is populated.
@@ -608,6 +614,13 @@ class ResolutionBot:
         # the same underlying data point.  We fetch GT once for the first market in each
         # group, then re-derive the probability for every remaining bracket using the
         # cached raw value — no additional API calls needed.
+        #
+        # This cache is cycle-scoped (local variable) and covers ALL tiers together:
+        # T1 and T2 bracket markets are both present in `active_markets` and are
+        # processed in the same call, so a T1 bracket market that populates the cache
+        # saves the FRED/EIA call for every other T1 or T2 sibling in that cycle.
+        # The underlying FRED HTTP response is also cached for 5 min (_FRED_CACHE_TTL)
+        # so even the first bracket lookup per cycle is usually served from memory.
         _bracket_gt: Dict[str, Optional["GroundTruthResult"]] = {}
 
         for i, market in enumerate(candidates, 1):
@@ -704,7 +717,18 @@ class ResolutionBot:
 
         deduped: List[GapSignal] = []
         for bucket_sigs in buckets.values():
-            bucket_sigs.sort(key=lambda s: -s.effective_gap)
+            # Sort: prefer actionable markets (YES price 0.10–0.90) over near-certain
+            # ones (price > 0.90 or < 0.10).  A 99% gap on a 0.99-priced market is
+            # almost always a data-quality mismatch rather than a real edge — the
+            # market is already near-resolved and likely correctly priced at that
+            # extreme.  The genuine opportunities sit in the uncertain middle where
+            # the GT data and market price meaningfully disagree.
+            bucket_sigs.sort(
+                key=lambda s: (
+                    0 if 0.10 <= s.target_price <= 0.90 else 1,  # actionable first
+                    -s.effective_gap,
+                )
+            )
             deduped.extend(bucket_sigs[:MAX_SIGNALS_PER_SOURCE_ACTION])
 
         if len(deduped) < len(signals):
@@ -761,6 +785,55 @@ class ResolutionBot:
                 "ResolutionBot: SKIP %s – %s", mid, score.skip_reason
             )
             return None
+
+        # ── Human review check (LARGE_DIVERGENCE) ─────────────────────────────
+        # When the router flagged requires_human_review=True it means gap > 40%.
+        # Previously this was handled by capping confidence to 0.70 (blocking the
+        # signal entirely).  Now confidence is preserved and we decide here:
+        #   • dry_run / ghost-trade mode → log and continue as a ghost trade so we
+        #     can track whether these large-gap signals would have been correct.
+        #   • live mode → alert via Telegram, stash in _pending_human_review, skip.
+        #     The trade executes only when approve_human_review(market_id) is called.
+        requires_review = bool(
+            gt is not None
+            and gt.raw_data.get("requires_human_review", False)
+        )
+        if requires_review:
+            gap_pct = gt.raw_data.get("validator_gap_pct", 0.0) if gt else 0.0
+            if self._dry_run:
+                logger.info(
+                    "ResolutionBot: LARGE_DIVERGENCE ghost trade for %s "
+                    "(gt_prob=%.2f market_price=%.2f gap=%.1f%%) — "
+                    "firing ghost trade for accuracy tracking",
+                    mid,
+                    gt.ground_truth_prob if gt else float("nan"),
+                    signal.target_price,
+                    gap_pct,
+                )
+                # Fall through and fire as a ghost trade below.
+            else:
+                # Live mode: alert operator and hold for manual approval.
+                logger.warning(
+                    "ResolutionBot: LARGE_DIVERGENCE signal for %s requires human "
+                    "review (gt_prob=%.2f market_price=%.2f gap=%.1f%%) — "
+                    "pending approval, NOT auto-trading",
+                    mid,
+                    gt.ground_truth_prob if gt else float("nan"),
+                    signal.target_price,
+                    gap_pct,
+                )
+                self._pending_human_review[mid] = signal
+                if self._alert_manager is not None and gt is not None:
+                    self._alert_manager.alert_human_review(
+                        market_id=mid,
+                        question=market.question,
+                        action=signal.action,
+                        target_price=signal.target_price,
+                        gt_prob=gt.ground_truth_prob or 0.0,
+                        gap_pct=gap_pct,
+                        source_name=gt.source_name,
+                    )
+                return None
 
         # Combined floor check: both scores pass but are both marginal (< 0.85).
         # Require order-book depth >= 3x the estimated position size before proceeding.
@@ -927,6 +1000,50 @@ class ResolutionBot:
             "hours_left": round(market.hours_to_resolution, 1),
             "source": gt.source_name if gt else "unknown",
         }
+
+    def approve_human_review(self, market_id: str) -> bool:
+        """Approve a pending human-review signal and attempt to execute it.
+
+        Called externally — e.g. from a Telegram command handler — when the
+        operator has inspected a LARGE_DIVERGENCE signal and decided to trade.
+
+        Clears the requires_human_review flag so _try_execute doesn't re-block
+        it, then calls _try_execute directly.  Returns True if a pending signal
+        was found, False if no signal was waiting for this market_id.
+
+        Note: _try_execute may still skip the trade for other reasons (order
+        book empty, fee too high, etc.) — those cases return True (signal was
+        found and attempted) but no position is added.
+        """
+        signal = self._pending_human_review.pop(market_id, None)
+        if signal is None:
+            logger.info(
+                "ResolutionBot: approve_human_review — no pending signal for %s",
+                market_id,
+            )
+            return False
+
+        logger.info(
+            "ResolutionBot: human review APPROVED for %s — attempting execution",
+            market_id,
+        )
+
+        # Clear the requires_human_review flag so the signal passes through
+        # the live-mode block we just approved it past.
+        if signal.ground_truth_result is not None:
+            cleared_raw = {
+                **signal.ground_truth_result.raw_data,
+                "requires_human_review": False,
+            }
+            signal = dc_replace(
+                signal,
+                ground_truth_result=dc_replace(
+                    signal.ground_truth_result, raw_data=cleared_raw
+                ),
+            )
+
+        self._try_execute(signal)
+        return True
 
     def _place_order(
         self, market: Market, signal: GapSignal, size_usd: float, fee: float,
