@@ -41,17 +41,24 @@ logger = logging.getLogger(__name__)
 # Novelty / subjective prop-bet patterns that no data source can resolve.
 # Markets matching these are logged as excluded_novelty and skipped entirely.
 #
-# Examples:
-#   "What will the announcers say during Vera vs Martinez?"
-#   "How many times will LeBron say 'taco' during the game?"
-#   "What word will the host use to open the segment?"
+# Intentionally narrow — only match patterns that are UNAMBIGUOUSLY about
+# tracking specific spoken words during a broadcast:
+#   ✅ "What will the announcers say during Vera vs Martinez?"
+#   ✅ "How many times will Joe say 'let's go' during the show?"
+#   ✅ "What word will the host use to open the segment?"
+#   ❌ "What will the Fed announce at the FOMC meeting?" (legitimate policy market)
+#   ❌ "What will the court call the ruling?" (legitimate legal market)
+#
+# "announce", "call", "tweet", "post" are intentionally excluded because they
+# produce false positives on FOMC/court markets.  "say" and "mention" are
+# specific enough for broadcast prop bets while rarely appearing in policy markets.
 _NOVELTY_RE = re.compile(
-    # "What will [X] say/mention/announce/tweet…"
-    r"\bwhat\s+will\b.{0,80}\b(?:say|mention|announce|call|tweet|post|shout)\b"
-    # "How many times will [X] say/do…"
+    # "What will [X] say/mention..." — spoken-word broadcast prop bets
+    r"\bwhat\s+will\b.{0,80}\b(?:say|mention)\b"
+    # "How many times will [X] say/do..." — explicit word-count prop bets
     r"|\bhow\s+many\s+times\s+will\b"
-    # "What word/phrase will [X] use…"
-    r"|\bwhat\s+(?:word|phrase|number)\s+will\b",
+    # "What word/phrase will..." — word-choice prop bets
+    r"|\bwhat\s+(?:word|phrase)\s+will\b",
     re.IGNORECASE | re.DOTALL,
 )
 

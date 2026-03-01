@@ -97,10 +97,24 @@ _INDICATOR_MAP: Dict[str, Tuple[str, str]] = {
     "trade balance": ("BOPGSTB", "Trade Balance"),
     "ism manufacturing": ("NAPM", "ISM Manufacturing PMI"),
     "pmi": ("NAPM", "ISM Manufacturing PMI"),
-    # Retail gasoline — EIA/AAA weekly average (FRED: GASREGCOVW)
-    # Matches Kalshi "gas prices" markets (e.g. KXAAAGASM).
-    # The question text contains markdown formatting: "**gas prices**"
-    # so substring "gas price" still matches inside "**gas prices**".
+    # Retail gasoline — EIA weekly conventional gas price (FRED: GASREGCOVW).
+    #
+    # ⚠ KNOWN DATA MISMATCH: GASREGCOVW tracks EIA "Regular Conventional" gas
+    # (no ethanol/oxygenate blend, sold mostly in rural/Midwest markets).  This
+    # is systematically $0.10–0.20/gallon BELOW the AAA national average used by
+    # Kalshi KXAAAGASW markets, which includes reformulated-fuel (RFG) cities
+    # such as LA, NYC, and Chicago.
+    #
+    # Impact: all KXAAAGASW bracket markets currently return prob=0.0 (EIA price
+    # below all bracket thresholds) while the crowd-implied price is ~$0.15/gal
+    # higher.  The LARGE_DIVERGENCE validator (gap > 40%) correctly blocks
+    # auto-trading on this mismatch — no false trades fire, but no genuine
+    # signals are captured either.
+    #
+    # Fix required: replace GASREGCOVW with the EIA "all formulations" average
+    # (FRED does not publish this directly; an EIA API key or AAA scraper is
+    # needed).  Until then, gas price signals will always be blocked by the
+    # LARGE_DIVERGENCE gate whenever EIA conventional < AAA national average.
     "gas price": ("GASREGCOVW", "US Average Retail Gasoline Price"),
     "gasoline price": ("GASREGCOVW", "US Average Retail Gasoline Price"),
     "average gas": ("GASREGCOVW", "US Average Retail Gasoline Price"),
