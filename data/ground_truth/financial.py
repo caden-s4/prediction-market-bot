@@ -68,6 +68,22 @@ _SIMULATE_PRO_DATA: bool = os.environ.get("SIMULATE_PRO_DATA", "").lower() in (
     "1", "true", "yes"
 )
 
+# Twelve Data symbols known to require a paid plan (Grow tier or above).
+# On the free tier these return {"code": 404, "message": "... Grow plan ..."}
+# every single cycle, flooding logs with WARNING noise.  These are silently
+# skipped and fall through to Yahoo Finance instead.  Update this set after
+# upgrading to a paid Twelve Data plan.
+_TD_FREE_TIER_BLOCKED: frozenset = frozenset({
+    "NDX",    # Nasdaq 100 index (NQ=F) — requires paid plan
+    "SPX",    # S&P 500 index (ES=F) — requires paid plan
+    "TNX",    # 10-yr Treasury yield (^TNX)
+    "US5Y",   # 5-yr Treasury yield (^FVX)
+    "US3M",   # 2-yr Treasury yield (^IRX)
+    "US30Y",  # 30-yr Treasury yield (^TYX)
+    "GC1!",   # Gold front-month futures — typically requires paid plan
+    "CL1!",   # WTI Crude front-month futures — typically requires paid plan
+})
+
 # Twelve Data symbol translations from Yahoo Finance symbols.
 # Twelve Data uses spot-index symbols for NDX/SPX and its own commodity format.
 _TD_SYMBOL_MAP: Dict[str, str] = {
@@ -75,9 +91,9 @@ _TD_SYMBOL_MAP: Dict[str, str] = {
     "NQ=F": "NDX",      # Nasdaq 100 (spot index; Kalshi resolves against NDX, not NQ futures)
     "ES=F": "SPX",      # S&P 500 (spot index)
     "YM=F": "YM",       # Dow Jones E-mini (no spot equivalent available free-tier)
-    # Commodities
-    "GC=F": "GC",       # Gold futures
-    "CL=F": "CL/USD",   # WTI Crude (Twelve Data commodity format)
+    # Commodities — continuous front-month futures (standard Twelve Data format)
+    "GC=F": "GC1!",     # Gold front-month futures (not "GC" which is spot/expired)
+    "CL=F": "CL1!",     # WTI Crude front-month futures ("CL/USD" was invalid on free tier)
     "NG=F": "NG",       # Natural Gas futures
     # Forex (Twelve Data uses standard ISO pairs)
     "EURUSD=X": "EUR/USD",
@@ -239,6 +255,18 @@ _BETWEEN_RE = re.compile(
     r"\b(?:between|from)\s+\$?\s*[\d,]+\.?\d*\s+(?:and|to)\s+\$?\s*[\d,]+\.?\d*",
     re.IGNORECASE,
 )
+# Reverse-direction patterns: the threshold number appears BEFORE the direction
+# word.  Standard regexes above require "below $60" (keyword then number).
+# These catch the common Kalshi phrasing "$59.99 or below", "60.00 or more", etc.
+# Must be checked AFTER the forward patterns so "$60 or below $61" isn't mis-parsed.
+_BELOW_SUFFIX_RE = re.compile(
+    r"\$?\s*([\d,]+\.?\d*)\s*%?\s+or\s+(?:below|less|under)\b",
+    re.IGNORECASE,
+)
+_ABOVE_SUFFIX_RE = re.compile(
+    r"\$?\s*([\d,]+\.?\d*)\s*%?\s+or\s+(?:above|more|higher|over)\b",
+    re.IGNORECASE,
+)
 
 
 class FinancialDataSource(DataSource):
@@ -321,6 +349,17 @@ class FinancialDataSource(DataSource):
                     "FinancialSource: no threshold in question for %s", market.market_id
                 )
                 return None
+
+            # Log detected direction on every fetch so operators can verify all
+            # markets are parsed correctly before enabling live trades.
+            logger.info(
+                "FinancialSource: %s detected_direction=%s threshold=%.4f "
+                "question='%.60s'",
+                market.market_id,
+                "BELOW" if not is_above else "ABOVE",
+                threshold,
+                market.question,
+            )
 
             # Always log the raw fetched value so operators can verify correctness
             # before trusting any signal (especially important for WTI, Nasdaq, etc.
@@ -564,6 +603,15 @@ class FinancialDataSource(DataSource):
         td_symbol = _TD_SYMBOL_MAP.get(yahoo_symbol)
         if not td_symbol:
             return None
+        # Skip symbols known to be blocked on the free tier — avoids WARNING spam
+        # every cycle.  Falls through to Yahoo Finance silently.
+        if td_symbol in _TD_FREE_TIER_BLOCKED:
+            logger.debug(
+                "FinancialSource: %s (%s) skipped — Twelve Data free tier blocked, "
+                "falling back to Yahoo",
+                yahoo_symbol, td_symbol,
+            )
+            return None
         try:
             resp = requests.get(
                 f"{_TD_BASE}/quote",
@@ -706,6 +754,17 @@ class FinancialDataSource(DataSource):
         m = _BELOW_RE.search(question)
         if m:
             return _parse_float(m.group(1)), False
+
+        # Reverse-direction patterns: "$59.99 or below", "$60.00 or more"
+        # These are checked AFTER the standard patterns so "above $60" still wins
+        # when both could match.
+        m = _BELOW_SUFFIX_RE.search(question)
+        if m:
+            return _parse_float(m.group(1)), False
+
+        m = _ABOVE_SUFFIX_RE.search(question)
+        if m:
+            return _parse_float(m.group(1)), True
 
         # Kalshi market ID suffix convention: -T{threshold} or -B{threshold}
         # NOTE: only use the -B suffix when the question text is absent — and only

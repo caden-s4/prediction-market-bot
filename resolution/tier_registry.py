@@ -47,6 +47,9 @@ class MarketEntry:
     tier: int                         # 1, 2, or 3
     last_refreshed_at: float = field(default_factory=time.monotonic)
     signal_urgent: bool = False       # active gap signal → forced Tier 1
+    sticky_t1: bool = False           # gap was detected at least once; keep T1 until
+                                      # clear_sticky_t1() is called (survives signal_urgent
+                                      # clearing so T1 persists across discovery rescans)
 
     @property
     def market_id(self) -> str:
@@ -135,13 +138,20 @@ class TierRegistry:
         entry.market = market
         entry.last_refreshed_at = time.monotonic()
         if not entry.signal_urgent:
-            new_tier = self._compute_tier(market)
-            if new_tier < entry.tier:
-                logger.info(
-                    "TierRegistry: %s T%d → T%d (%.1fh left, refresh-promoted)",
-                    market.market_id, entry.tier, new_tier, market.hours_to_resolution,
-                )
-            entry.tier = new_tier
+            if entry.sticky_t1:
+                # A gap signal was detected previously; keep T1 even though the
+                # signal_urgent flag may have been cleared.  sticky_t1 survives
+                # discovery rescans so recently-promoted markets aren't re-tiered
+                # back to T2/T3 just because the gap briefly disappeared.
+                entry.tier = 1
+            else:
+                new_tier = self._compute_tier(market)
+                if new_tier < entry.tier:
+                    logger.info(
+                        "TierRegistry: %s T%d → T%d (%.1fh left, refresh-promoted)",
+                        market.market_id, entry.tier, new_tier, market.hours_to_resolution,
+                    )
+                entry.tier = new_tier
         return entry.tier
 
     def ingest_many(self, markets: List[Market]) -> Dict[int, int]:
@@ -160,9 +170,10 @@ class TierRegistry:
     def mark_urgent(self, market_id: str) -> None:
         """Force a market to Tier 1 because an active gap signal was detected."""
         entry = self._entries.get(market_id)
-        if entry and not entry.signal_urgent:
-            entry.signal_urgent = True
+        if entry:
             old_tier = entry.tier
+            entry.signal_urgent = True
+            entry.sticky_t1 = True   # persist T1 across discovery rescans
             entry.tier = 1
             if old_tier != 1:
                 logger.info(
@@ -172,17 +183,51 @@ class TierRegistry:
 
     def clear_urgent(self, market_id: str) -> None:
         """
-        Remove urgent override.  The market reverts to its natural tier based
-        on current hours_to_resolution.
+        Remove the active gap-signal override.
+
+        If sticky_t1=True the market stays in Tier 1 (it had a gap signal and
+        may still be a near-term opportunity).  The tier only falls back to its
+        natural time-based value when clear_sticky_t1() is also called — which
+        should happen when the gap is confirmed closed or the position is entered.
         """
         entry = self._entries.get(market_id)
         if entry and entry.signal_urgent:
             entry.signal_urgent = False
+            if entry.sticky_t1:
+                # Keep T1 — gap may reappear; fast scan prevents missing it.
+                logger.debug(
+                    "TierRegistry: %s urgent cleared; staying T1 (sticky_t1=True)",
+                    market_id,
+                )
+                return
             new_tier = self._compute_tier(entry.market)
             entry.tier = new_tier
             logger.debug(
                 "TierRegistry: %s urgent cleared → T%d", market_id, new_tier
             )
+
+    def clear_sticky_t1(self, market_id: str) -> None:
+        """
+        Clear the sticky T1 flag and revert to the natural time-based tier.
+
+        Call this when the gap is confirmed closed (position entered, gap < 4%
+        for multiple consecutive cycles, or the market is near resolution and
+        should be evicted soon anyway).  The bot restart also clears sticky_t1
+        implicitly since it lives only in memory.
+        """
+        entry = self._entries.get(market_id)
+        if entry and entry.sticky_t1:
+            entry.sticky_t1 = False
+            if not entry.signal_urgent:
+                new_tier = self._compute_tier(entry.market)
+                old_tier = entry.tier
+                entry.tier = new_tier
+                if old_tier != new_tier:
+                    logger.info(
+                        "TierRegistry: %s sticky T1 cleared → T%d "
+                        "(gap confirmed closed, %.1fh remaining)",
+                        market_id, new_tier, entry.market.hours_to_resolution,
+                    )
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 

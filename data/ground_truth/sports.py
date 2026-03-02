@@ -118,10 +118,10 @@ _RACING_MAP: dict = {
 }
 
 _ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
-_TIMEOUT = 8         # seconds — general team-sports scoreboard calls
-_RACING_TIMEOUT = 1  # seconds — NASCAR/IndyCar; ESPN racing endpoint is often slow;
-                     # a 1-second hard cap prevents one lagging call from blocking
-                     # an entire 15-second Tier-1 cycle
+_TIMEOUT = 0.5       # seconds — hard cap for ALL ESPN calls; a slow scoreboard
+                     # fetch must not block a 15-second Tier-1 cycle.  The 90-second
+                     # scoreboard cache means failures only affect one cycle window.
+_RACING_TIMEOUT = 0.5  # seconds — NASCAR/IndyCar; same hard cap as general sports
 
 # Broad sport keywords used as a fallback in can_handle() for markets tagged
 # [general] that are clearly about sports but lack an explicit sport category.
@@ -301,9 +301,20 @@ class SportsDataSource(DataSource):
             events = data.get("events", [])
             _SCOREBOARD_CACHE[sport_path] = (now, events)
             return events
-        except Exception as exc:
-            logger.debug("SportsSource: failed fetching %s: %s", url, exc)
+        except requests.exceptions.Timeout:
+            logger.debug(
+                "SportsSource: ESPN timeout (%.1fs) for %s — returning None this cycle",
+                timeout, sport_path,
+            )
+            _SCOREBOARD_CACHE[sport_path] = (now, [])  # cache the miss; don't hammer ESPN
+            return []
+        except requests.exceptions.RequestException as exc:
+            logger.debug("SportsSource: ESPN error for %s: %s", sport_path, exc)
             _SCOREBOARD_CACHE[sport_path] = (now, [])  # cache failure to prevent retry storms
+            return []
+        except Exception as exc:
+            logger.debug("SportsSource: unexpected error fetching %s: %s", url, exc)
+            _SCOREBOARD_CACHE[sport_path] = (now, [])
             return []
 
     def _match_event(self, events: list, teams: list, market: Market) -> Optional[dict]:

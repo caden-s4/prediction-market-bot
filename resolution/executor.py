@@ -27,7 +27,7 @@ import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field, replace as dc_replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from data.ground_truth.router import GroundTruthRouter
@@ -98,6 +98,26 @@ STALE_PRICE_THRESHOLD = 0.12     # 12 cents
 # would eliminate any real edge (e.g. BUY NO @99¢ when the gap is < 2¢).
 MIN_EV_RATIO = 0.02
 
+# ── Order-book cooldown ────────────────────────────────────────────────────────
+# When a market's order book is empty (no YES ask, no YES bid, or mid_price=None)
+# we set a 30-minute cooldown so the same market doesn't waste a T1 slot on every
+# cycle.  The cooldown also demotes signal_urgent T1 markets back to their natural
+# tier so the T1 pool doesn't fill up with perpetually-illiquid markets.
+_orderbook_cooldowns: Dict[str, datetime] = {}
+
+
+def _is_in_orderbook_cooldown(market_id: str) -> bool:
+    expiry = _orderbook_cooldowns.get(market_id)
+    return expiry is not None and datetime.utcnow() < expiry
+
+
+def _set_orderbook_cooldown(market_id: str, minutes: int = 30) -> None:
+    _orderbook_cooldowns[market_id] = datetime.utcnow() + timedelta(minutes=minutes)
+    logger.info(
+        "ResolutionBot: order-book cooldown set for %s (%d min — empty book)",
+        market_id, minutes,
+    )
+
 
 @dataclass
 class TradeRecord:
@@ -113,6 +133,7 @@ class TradeRecord:
     source_confidence: float
     entry_time: float = field(default_factory=time.time)
     order_id: Optional[str] = None
+    requires_human_review: bool = False   # set on startup if gt_prob flipped >50% since entry
 
 
 def _bracket_prefix(market_id: str) -> Optional[str]:
@@ -234,6 +255,7 @@ class ResolutionBot:
         self._startup_time: float = time.time()
         self._load_positions()
         self._reconcile_with_exchange()
+        self._validate_open_positions()
 
     # ── Main loop ─────────────────────────────────────────────────────────────
 
@@ -879,6 +901,11 @@ class ResolutionBot:
             return None  # already in this market
         if self._exclusions.is_excluded(market.platform, mid):
             return None
+        if _is_in_orderbook_cooldown(mid):
+            logger.debug(
+                "ResolutionBot: %s in order-book cooldown — skipping this cycle", mid
+            )
+            return None
 
         # Use the ground truth result carried on the signal (info signals) or
         # re-fetch it (cross-platform signals that didn't go through the router).
@@ -893,12 +920,14 @@ class ResolutionBot:
         if ob_live is None:
             # Empty order book — scanner price is unverifiable. Placing an order
             # based on stale bulk-API data (e.g. Kalshi's default yes_bid=99)
-            # creates unfillable limit orders. Skip entirely.
+            # creates unfillable limit orders. Skip entirely and suppress for 30 min.
             logger.info(
                 "ResolutionBot: SKIP %s – order book empty, cannot verify scanner "
                 "price %.3f (would create unfillable limit order)",
                 mid, signal.target_price,
             )
+            _set_orderbook_cooldown(mid, minutes=30)
+            self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
             return None
 
         # For cross-platform signals, populate depth_ratio now so the confidence
@@ -1086,6 +1115,8 @@ class ResolutionBot:
                     "ResolutionBot: SKIP %s – no YES ask in order book "
                     "(no sellers to fill against)", mid
                 )
+                _set_orderbook_cooldown(mid, minutes=30)
+                self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
                 return None
         else:
             # BUY_NO: order.price is the YES price field for Kalshi.
@@ -1097,6 +1128,8 @@ class ResolutionBot:
                     "ResolutionBot: SKIP %s – no YES bid in order book "
                     "(no NO sellers to fill against)", mid
                 )
+                _set_orderbook_cooldown(mid, minutes=30)
+                self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
                 return None
         logger.info(
             "ResolutionBot: limit_price=%.4f (action=%s ask=%.4f bid=%.4f) for %s",
@@ -1757,6 +1790,61 @@ class ResolutionBot:
                     f"\n  [RECONCILE] WARNING: {len(failed)} Kalshi position(s) could "
                     f"not be auto-adopted (market fetch failed or expired): {failed}"
                 )
+
+    def _validate_open_positions(self) -> None:
+        """
+        On startup, re-run GT fetch for all open positions and flag any where the
+        current ground truth probability has flipped more than 0.50 since entry.
+
+        A flip > 0.50 (e.g. entry gt_prob=1.0 but now gt_prob=0.0) most often
+        means a direction-parsing bug was present at entry time, or the underlying
+        instrument moved dramatically between sessions.  The position is NOT
+        auto-closed — it's marked requires_human_review=True and logged at ERROR
+        so the operator sees it immediately on the next startup.
+        """
+        if not self._positions:
+            return
+        flagged = 0
+        for mid, rec in self._positions.items():
+            try:
+                current_gt = self._ground_truth.fetch(rec.market)
+                if current_gt is None or current_gt.ground_truth_prob is None:
+                    continue
+                delta = abs(current_gt.ground_truth_prob - rec.ground_truth_prob)
+                if delta > 0.50:
+                    rec.requires_human_review = True
+                    logger.error(
+                        "ResolutionBot [STARTUP VALIDATION]: %s — gt_prob FLIPPED "
+                        "%.2f → %.2f (delta=%.2f > 0.50). "
+                        "Position marked requires_human_review=True. "
+                        "Verify direction and close manually if needed. "
+                        "action=%s entry_price=%.3f",
+                        mid,
+                        rec.ground_truth_prob,
+                        current_gt.ground_truth_prob,
+                        delta,
+                        rec.action,
+                        rec.entry_price,
+                    )
+                    flagged += 1
+            except Exception as exc:
+                logger.warning(
+                    "ResolutionBot [STARTUP VALIDATION]: GT fetch failed for %s: %s",
+                    mid, exc,
+                )
+        if flagged:
+            logger.error(
+                "ResolutionBot [STARTUP VALIDATION]: %d position(s) require human "
+                "review — gt_prob flipped >50%% since entry.  "
+                "Run `positions` command to see details.",
+                flagged,
+            )
+        else:
+            logger.info(
+                "ResolutionBot [STARTUP VALIDATION]: %d open position(s) checked — "
+                "no large gt_prob flips detected",
+                len(self._positions),
+            )
 
     def _adopt_exchange_position(
         self,
