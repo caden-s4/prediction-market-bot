@@ -1,26 +1,23 @@
 """
 data.ground_truth.financial – real-time financial instrument prices.
 
-Source: Yahoo Finance public API (no key required, stable since 2015).
+Primary source: Twelve Data API (set TWELVEDATA_API_KEY in .env).
+  Free tier: 800 calls/day, 8/minute — sufficient with the 60-second symbol cache.
+  Confidence: 0.85 (commercial API, reliable but not an exchange feed).
+  Register at https://twelvedata.com/apikey (instant, no credit card).
+
+Fallback: Yahoo Finance (unofficial scraping endpoint, no key required).
+  Confidence: capped at 0.55 for markets beyond 8 h — not trustworthy enough
+  to fire signals well before resolution.  Use Twelve Data for live trading.
 
 Covers:
-  - US stock indices : Nasdaq 100 (NQ=F futures), S&P 500 (ES=F futures), Dow (YM=F)
+  - US stock indices : Nasdaq 100 (NDX/NQ=F), S&P 500 (SPX/ES=F), Dow (YM=F)
   - Forex pairs      : EUR/USD, USD/JPY, GBP/USD, USD/CAD, AUD/USD
-  - Treasury yields  : 10-yr (^TNX), 5-yr (^FVX), 2-yr (^IRX), 30-yr (^TYX)
-  - Commodities      : Gold (GC=F), WTI Crude (CL=F), Natural Gas (NG=F)
+  - Treasury yields  : 10-yr (TNX), 5-yr (US5Y), 2-yr (US3M), 30-yr (US30Y)
+  - Commodities      : Gold (GC), WTI Crude (CL/USD), Natural Gas (NG)
 
-Index markets use E-mini futures (NQ=F, ES=F, YM=F) rather than spot index symbols
-(^NDX, ^GSPC, ^DJI) because futures trade 24/5 and reflect the current market
-expectation even on weekends/pre-market. Spot index symbols only update during
-regular trading hours; on Sunday evening they still show Friday's close, which
-is wrong for Kalshi markets that resolve Monday at 4pm.
-
-Confidence is a function of how far the current price sits from the market
-threshold. If current price is within 2% of the threshold we return None
-(too close to call) and skip the trade. Beyond 5% we're at 0.90 confidence.
-
-The module-level price cache caps Yahoo Finance at one HTTP request per symbol
-per 60 seconds regardless of how many markets reference the same instrument.
+The module-level price cache limits each symbol to one HTTP request per 60 seconds
+regardless of how many markets reference the same instrument.
 """
 
 from __future__ import annotations
@@ -50,20 +47,22 @@ _AV_BASE = "https://www.alphavantage.co/query"
 _TIMEOUT = 8
 
 # Optional API keys — set in .env to use more reliable primary sources.
-# If absent, the source is skipped and Yahoo Finance is used as fallback.
-_TWELVE_DATA_KEY: str = os.environ.get("TWELVE_DATA_KEY", "")
+# TWELVEDATA_API_KEY: recommended — free tier covers typical usage.
+# ALPHA_VANTAGE_KEY: free tier (25/day) is too low; paid tier not worth it over TD.
+# When no key is set, Yahoo Finance is used as an unofficial fallback.
+_TWELVE_DATA_KEY: str = os.environ.get("TWELVEDATA_API_KEY", "")
 _ALPHA_VANTAGE_KEY: str = os.environ.get("ALPHA_VANTAGE_KEY", "")
 
 # Twelve Data symbol translations from Yahoo Finance symbols.
-# Twelve Data uses its own naming for futures and Forex pairs.
+# Twelve Data uses spot-index symbols for NDX/SPX and its own commodity format.
 _TD_SYMBOL_MAP: Dict[str, str] = {
-    # E-mini futures (continuous front-month contracts)
-    "NQ=F": "NQ",       # Nasdaq 100 E-mini
-    "ES=F": "ES",       # S&P 500 E-mini
-    "YM=F": "YM",       # Dow Jones E-mini
+    # Indices — Twelve Data spot symbols (NDX, SPX) match Kalshi resolution values
+    "NQ=F": "NDX",      # Nasdaq 100 (spot index; Kalshi resolves against NDX, not NQ futures)
+    "ES=F": "SPX",      # S&P 500 (spot index)
+    "YM=F": "YM",       # Dow Jones E-mini (no spot equivalent available free-tier)
     # Commodities
     "GC=F": "GC",       # Gold futures
-    "CL=F": "CL",       # WTI Crude futures
+    "CL=F": "CL/USD",   # WTI Crude (Twelve Data commodity format)
     "NG=F": "NG",       # Natural Gas futures
     # Forex (Twelve Data uses standard ISO pairs)
     "EURUSD=X": "EUR/USD",
@@ -73,7 +72,7 @@ _TD_SYMBOL_MAP: Dict[str, str] = {
     "AUDUSD=X": "AUD/USD",
     "CHF=X":    "USD/CHF",
     # Treasury yields
-    "^TNX": "US10Y",
+    "^TNX": "TNX",
     "^FVX": "US5Y",
     "^IRX": "US3M",
     "^TYX": "US30Y",
@@ -176,21 +175,29 @@ _CLOSE_QUESTION_RE = re.compile(
 
 # Time-decay for financial information signals.
 #
-# Spot/futures prices are highly predictive of settlement in the final hour
-# but become unreliable over multi-hour horizons — NQ can move 3-5% in a day.
-# We reduce source confidence linearly as hours-to-resolution grows, capping it
-# at 0.55 beyond _MAX_SIGNAL_HOURS.  Because ConfidenceScorer requires both
-# dimensions ≥ 0.80, no financial signal fires once time_confidence < 0.80.
+# Spot prices become unreliable predictors of settlement over long horizons
+# (NQ can move 3-5% in a day).  We decay source confidence linearly from 1.0
+# to a source-dependent floor beyond _MAX_SIGNAL_HOURS.
 #
-# Calibration:
+# Floor by data source:
+#   Twelve Data (commercial API)  → 0.85  fires at any horizon with ≥5% margin
+#   Yahoo Finance (unofficial)    → 0.55  blocked beyond ~3h (floor < 0.80 gate)
+#
+# Calibration (Yahoo Finance / floor=0.55):
 #   ≤ 1h  → 1.00  (spot ≈ settlement; full confidence)
 #   2h    → 0.91  (fires for any spatial-confident signal)
 #   3h    → 0.82  (fires only for ≥5%-margin signals)
 #   4h    → 0.73  (BLOCKED — time_conf < 0.80 gate)
 #   8h+   → 0.55  (BLOCKED — floor)
+#
+# Calibration (Twelve Data / floor=0.85):
+#   ≤ 1h  → 1.00
+#   any   → 0.85–1.00  (always above 0.80 gate; spatial margin still applies)
 _MAX_SIGNAL_HOURS: float = 8.0
 _FULL_SIGNAL_HOURS: float = 1.0
-_TIME_CONF_FLOOR: float = 0.55
+_TIME_CONF_FLOOR: float = 0.55          # Yahoo Finance fallback floor
+_TD_TIME_CONF_FLOOR: float = 0.85       # Twelve Data primary floor
+_TD_MAX_SPATIAL_CONF: float = 0.85      # Twelve Data spatial confidence cap
 
 # Regex to extract threshold and direction from a market question.
 _ABOVE_RE = re.compile(
@@ -245,7 +252,7 @@ class FinancialDataSource(DataSource):
                 )
                 return None
 
-            current_price = self._fetch_price(symbol)
+            current_price, price_source = self._fetch_price(symbol)
             if current_price is None:
                 return None
 
@@ -271,8 +278,29 @@ class FinancialDataSource(DataSource):
                 )
                 return None
 
+            # Always log the raw fetched value so operators can verify correctness
+            # before trusting any signal (especially important for WTI, Nasdaq, etc.
+            # where a stale or wrong price produces a misleading ground_truth_prob).
+            logger.info(
+                "FinancialSource: %s → %.4f via %s (threshold %.4f for %s)",
+                symbol, current_price, price_source, threshold or 0.0,
+                market.market_id,
+            )
+
+            # Per-source confidence parameters:
+            #   Twelve Data  — commercial API, reliable prices; spatial cap 0.85,
+            #                   time floor 0.85 (signals fire at any horizon).
+            #   Yahoo Finance — unofficial scraping; spatial cap 0.90, time floor
+            #                   0.55 (signals blocked beyond ~3h).
+            if price_source == "twelve_data":
+                max_spatial = _TD_MAX_SPATIAL_CONF      # 0.85
+                time_floor  = _TD_TIME_CONF_FLOOR       # 0.85
+            else:
+                max_spatial = 0.90
+                time_floor  = _TIME_CONF_FLOOR          # 0.55
+
             ground_truth_prob, spatial_conf = self._compute_prob_and_confidence(
-                current_price, threshold, is_above
+                current_price, threshold, is_above, max_conf=max_spatial
             )
             if ground_truth_prob is None:
                 # Price too close to threshold – skip rather than guess
@@ -283,17 +311,15 @@ class FinancialDataSource(DataSource):
                 return None
 
             # Time-decay: reduce confidence for markets far from resolution.
-            # Spot/futures prices are not reliable predictors of settlement when
-            # hours_to_resolution is large — so we cap source confidence using a
-            # linear decay.  Signals with time_conf < 0.80 won't clear the
-            # ConfidenceScorer threshold and will be silently skipped.
-            time_conf = self._time_confidence(market.hours_to_resolution)
+            # Twelve Data floor (0.85) stays above the 0.80 gate at any horizon.
+            # Yahoo Finance floor (0.55) blocks signals beyond ~3h.
+            time_conf = self._time_confidence(market.hours_to_resolution, floor=time_floor)
             confidence = min(spatial_conf, time_conf)
             if time_conf < 1.0:
                 logger.debug(
                     "FinancialSource: time-adjusted confidence %.2f "
-                    "(spatial=%.2f, time=%.2f, hours_left=%.1f) for %s",
-                    confidence, spatial_conf, time_conf,
+                    "(spatial=%.2f, time=%.2f floor=%.2f, hours_left=%.1f) for %s",
+                    confidence, spatial_conf, time_conf, time_floor,
                     market.hours_to_resolution, market.market_id,
                 )
 
@@ -308,17 +334,31 @@ class FinancialDataSource(DataSource):
                     "flagged in raw_data",
                     symbol, instrument_name,
                 )
+
+            # Build source metadata based on which API actually returned the price.
+            if price_source == "twelve_data":
+                td_sym = _TD_SYMBOL_MAP.get(symbol, symbol)
+                src_name = f"Twelve Data/{td_sym}"
+                src_url  = f"{_TD_BASE}/quote?symbol={td_sym}"
+            elif price_source == "alpha_vantage":
+                src_name = f"Alpha Vantage/{symbol}"
+                src_url  = _AV_BASE
+            else:
+                src_name = f"Yahoo Finance/{symbol}"
+                src_url  = (
+                    f"https://finance.yahoo.com/quote/"
+                    f"{symbol.replace('^', '%5E')}"
+                )
+
             return GroundTruthResult(
                 ground_truth_prob=ground_truth_prob,
                 confidence=confidence,
                 source_type=SourceType.HARD,
-                source_name=f"Yahoo Finance/{symbol}",
-                source_url=(
-                    f"https://finance.yahoo.com/quote/"
-                    f"{symbol.replace('^', '%5E')}"
-                ),
+                source_name=src_name,
+                source_url=src_url,
                 raw_data={
                     "symbol": symbol,
+                    "price_source": price_source,
                     "instrument": instrument_name,
                     "current_price": current_price,
                     "threshold": threshold,
@@ -327,13 +367,13 @@ class FinancialDataSource(DataSource):
                     "near_futures_rollover": near_rollover,
                 },
                 reasoning=(
-                    f"{instrument_name}: current={current_price:.4f}, "
+                    f"{instrument_name}: current={current_price:.4f} (via {price_source}), "
                     f"threshold={threshold:.4f} ({direction_str}), "
                     f"margin={margin_pct:.1f}%, "
                     f"hours_left={market.hours_to_resolution:.1f}. "
                     f"→ {outcome_str} "
                     f"confidence={confidence:.2f} "
-                    f"(spatial={spatial_conf:.2f} time={time_conf:.2f})"
+                    f"(spatial={spatial_conf:.2f} time={time_conf:.2f} floor={time_floor:.2f})"
                 ),
             )
 
@@ -413,41 +453,53 @@ class FinancialDataSource(DataSource):
                 return _INSTRUMENT_MAP[kw]
         return "", ""
 
-    def _fetch_price(self, symbol: str) -> Optional[float]:
+    def _fetch_price(self, symbol: str) -> Tuple[Optional[float], str]:
         """
-        Return current market price with a 60-second module-level cache.
+        Return (current market price, source_key) with a 60-second module-level cache.
+
+        source_key is one of: "twelve_data" | "alpha_vantage" | "yahoo".
 
         Source priority:
-          1. Twelve Data  (if TWELVE_DATA_KEY is set and symbol is mapped)
+          1. Twelve Data  (if TWELVEDATA_API_KEY is set and symbol is mapped)
           2. Alpha Vantage (if ALPHA_VANTAGE_KEY is set and symbol is mapped)
           3. Yahoo Finance  (always-available fallback, unofficial but proven)
 
-        Using an unofficial source (Yahoo) as the last resort rather than the
-        only resort means a Yahoo outage doesn't kill the entire financial
-        pipeline — it degrades gracefully to whatever primary sources are
-        configured.
+        Tracking which source succeeded matters for confidence scoring: Twelve
+        Data results carry a higher time-confidence floor (0.85) than Yahoo
+        Finance results (0.55), allowing signals to fire at longer horizons.
         """
         now = time.monotonic()
         cached = _PRICE_CACHE.get(symbol)
         if cached:
-            fetched_at, price = cached
+            fetched_at, price, source_key = cached
             if now - fetched_at < _CACHE_TTL:
-                return price
+                return price, source_key
 
-        price = (
-            self._fetch_price_twelve_data(symbol)
-            or self._fetch_price_alpha_vantage(symbol)
-            or self._fetch_price_yahoo(symbol)
-        )
+        td_price = self._fetch_price_twelve_data(symbol)
+        if td_price is not None:
+            price, source_key = td_price, "twelve_data"
+        else:
+            av_price = self._fetch_price_alpha_vantage(symbol)
+            if av_price is not None:
+                price, source_key = av_price, "alpha_vantage"
+            else:
+                price, source_key = self._fetch_price_yahoo(symbol), "yahoo"
 
         if price is not None:
-            _PRICE_CACHE[symbol] = (time.monotonic(), price)
-            logger.debug("FinancialSource: %s price=%.4f", symbol, price)
-        return price
+            _PRICE_CACHE[symbol] = (time.monotonic(), price, source_key)
+            logger.debug(
+                "FinancialSource: %s price=%.4f (source=%s)", symbol, price, source_key
+            )
+        return price, source_key
 
     def _fetch_price_twelve_data(self, yahoo_symbol: str) -> Optional[float]:
         """
-        Fetch price from Twelve Data API (requires TWELVE_DATA_KEY env var).
+        Fetch price from Twelve Data /quote endpoint (requires TWELVEDATA_API_KEY).
+
+        /quote returns the latest close price plus open/high/low/volume so we
+        can confirm the symbol resolved correctly.  The `close` field is used
+        because it reflects the most recent completed bar (real-time during
+        market hours; last close outside hours).
 
         Free tier: 8 calls/minute, 800/day — well within our usage given the
         60-second symbol cache that limits us to one call per symbol per minute.
@@ -459,18 +511,20 @@ class FinancialDataSource(DataSource):
             return None
         try:
             resp = requests.get(
-                f"{_TD_BASE}/price",
+                f"{_TD_BASE}/quote",
                 params={"symbol": td_symbol, "apikey": _TWELVE_DATA_KEY},
                 timeout=_TIMEOUT,
                 headers={"User-Agent": "Mozilla/5.0"},
             )
             resp.raise_for_status()
             data = resp.json()
-            if "price" in data:
-                return float(data["price"])
-            # Twelve Data returns {"code": 4xx, "message": "..."} on error
+            # /quote returns {"close": "19823.99", "symbol": "NDX", ...}
+            close = data.get("close")
+            if close is not None:
+                return float(close)
+            # Twelve Data returns {"code": 4xx, "message": "..."} on auth/limit errors
             logger.warning(
-                "FinancialSource: TwelveData unexpected response for %s: %s",
+                "FinancialSource: TwelveData unexpected /quote response for %s: %s",
                 td_symbol, data,
             )
         except Exception as exc:
@@ -612,48 +666,59 @@ class FinancialDataSource(DataSource):
         return None, True
 
     @staticmethod
-    def _time_confidence(hours_to_resolution: float) -> float:
+    def _time_confidence(
+        hours_to_resolution: float, floor: float = _TIME_CONF_FLOOR
+    ) -> float:
         """
         Returns how much we trust the current spot price as a predictor of the
         settlement price given the time remaining.
 
-        Full confidence (1.0) within the final hour; linearly decays to
-        _TIME_CONF_FLOOR at _MAX_SIGNAL_HOURS.  The floor (0.55) sits below the
-        ConfidenceScorer threshold (0.80), ensuring no financial signal fires
-        beyond _MAX_SIGNAL_HOURS regardless of how large the spatial margin is.
+        Full confidence (1.0) within the final hour; linearly decays to `floor`
+        at _MAX_SIGNAL_HOURS.
+
+        floor=_TIME_CONF_FLOOR (0.55) for Yahoo Finance — sits below the
+        ConfidenceScorer threshold (0.80), blocking signals beyond ~3h.
+
+        floor=_TD_TIME_CONF_FLOOR (0.85) for Twelve Data — stays above the
+        gate at any horizon; signals fire whenever the spatial margin is large
+        enough (price is ≥2% from threshold).
         """
         if hours_to_resolution <= _FULL_SIGNAL_HOURS:
             return 1.0
         if hours_to_resolution >= _MAX_SIGNAL_HOURS:
-            return _TIME_CONF_FLOOR
+            return floor
         frac = (
             (hours_to_resolution - _FULL_SIGNAL_HOURS)
             / (_MAX_SIGNAL_HOURS - _FULL_SIGNAL_HOURS)
         )
-        return round(1.0 - frac * (1.0 - _TIME_CONF_FLOOR), 4)
+        return round(1.0 - frac * (1.0 - floor), 4)
 
     def _compute_prob_and_confidence(
-        self, current: float, threshold: float, is_above: bool
+        self, current: float, threshold: float, is_above: bool,
+        max_conf: float = 0.90,
     ) -> Tuple[Optional[float], float]:
         """
         Return (ground_truth_prob, confidence).
 
         Confidence scales with the margin between current price and threshold:
-          ≥ 5% away  → 0.90  (strong signal)
-          2–5% away  → 0.80–0.875 (tradeable)
-          < 2% away  → None  (too close, skip)
+          ≥ 5% away  → max_conf  (strong signal; 0.90 Yahoo, 0.85 Twelve Data)
+          2–5% away  → 0.80 – max_conf  (tradeable range, linear interpolation)
+          < 2% away  → None  (too close to threshold, skip)
+
+        max_conf is lowered to 0.85 for Twelve Data to reflect that it is a
+        commercial API but not an exchange-native feed.
         """
         if threshold == 0:
             return None, 0.0
 
         margin = (current - threshold) / abs(threshold)  # + means current is above
 
-        # Clamp confidence between 0.80 and 0.90 in the tradeable range
+        # Confidence scales from 0.80 (at ±2% margin) to max_conf (at ±5%+).
         def _confidence(abs_margin: float) -> float:
             if abs_margin >= 0.05:
-                return 0.90
-            # Linear interpolation: 0.80 at 2%, 0.90 at 5%
-            return 0.80 + (abs_margin - 0.02) / 0.03 * 0.10
+                return max_conf
+            # Linear interpolation: 0.80 at 2%, max_conf at 5%
+            return round(0.80 + (abs_margin - 0.02) / 0.03 * (max_conf - 0.80), 4)
 
         if is_above:
             if margin > 0.02:
