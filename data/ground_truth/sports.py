@@ -303,6 +303,7 @@ class SportsDataSource(DataSource):
             return events
         except Exception as exc:
             logger.debug("SportsSource: failed fetching %s: %s", url, exc)
+            _SCOREBOARD_CACHE[sport_path] = (now, [])  # cache failure to prevent retry storms
             return []
 
     def _match_event(self, events: list, teams: list, market: Market) -> Optional[dict]:
