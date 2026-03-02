@@ -93,10 +93,11 @@ MAX_SIGNALS_PER_SOURCE_ACTION = 2
 # no longer exists in the real order book.
 STALE_PRICE_THRESHOLD = 0.12     # 12 cents
 
-# Minimum expected value per dollar risked before a trade is fired.
-# Prevents entering positions where transaction costs or small model errors
-# would eliminate any real edge (e.g. BUY NO @99¢ when the gap is < 2¢).
-MIN_EV_RATIO = 0.02
+# Minimum absolute expected value per contract before a trade is fired.
+# EV is computed as: for BUY YES → gt_prob - price; for BUY NO → (1-gt_prob) - price.
+# This is the edge in dollars per contract (not a ratio).  2¢ floor blocks near-
+# exhausted trades (e.g. BUY NO @99¢ where the max win is 1¢ per contract).
+MIN_EV = 0.02
 
 # Time-adjusted entry gap constants (mirrors gap_detector.py).
 # min_gap = _GAP_BASE + hours_remaining × _GAP_TIME_PREMIUM
@@ -115,6 +116,34 @@ def _minimum_gap_for_entry(hours_remaining: float) -> float:
       4.0 h → 10.0%    1.0 h → 5.5%    0.25 h (15 min) → 4.4%
     """
     return _GAP_BASE + hours_remaining * _GAP_TIME_PREMIUM
+
+
+def _check_minimum_ev(
+    market_price: float, gt_prob: float, action: str
+) -> "tuple[bool, float]":
+    """
+    Compute absolute expected value per contract and check against MIN_EV.
+
+    For BUY YES at YES price p with ground-truth probability g:
+        EV = g*(1-p) - (1-g)*p  =  g - p
+
+    For BUY NO at YES price p with ground-truth probability g:
+        EV = (1-g)*(1-p) - g*p  =  (1-g) - p
+
+    EV is dollars of edge per contract, independent of position size.
+
+    Returns (passes_gate, ev).
+
+    Validation examples:
+      Gas BUY YES at 0.99, gt=0.00 → EV = 0.00-0.99 = -0.99 → BLOCKED ✓
+      S&P BUY NO at 0.095, gt=0.00 → EV = 1.00-0.095 = 0.905 → PASS  ✓
+    """
+    if action == "buy_yes":
+        ev = gt_prob - market_price
+    else:  # buy_no
+        ev = (1.0 - gt_prob) - market_price
+    return ev >= MIN_EV, ev
+
 
 # ── Order-book cooldown ────────────────────────────────────────────────────────
 # When a market's order book is empty (no YES ask, no YES bid, or mid_price=None)
@@ -1104,31 +1133,25 @@ class ResolutionBot:
         signal.effective_gap = live_effective_gap
         signal.taker_fee = fee
 
-        # Minimum expected-value check: require at least MIN_EV_RATIO net EV per dollar
-        # risked.  Filters out near-exhausted trades (e.g. BUY NO @99¢ where the max
-        # win is 1¢ per unit but the GT model error could easily swallow it).
-        # Formula uses target_price as the YES price for both YES and NO positions.
-        _ev_denom = (
-            signal.target_price
-            if signal.action == "buy_yes"
-            else (1.0 - signal.target_price)
+        # Minimum expected-value check: require at least MIN_EV cents of edge per
+        # contract.  Filters out near-exhausted trades (e.g. BUY NO @99¢ where
+        # the max win is 1¢ but the GT model error could easily swallow it).
+        _ev_passes, _ev = _check_minimum_ev(
+            signal.target_price, gt_prob_for_gap, signal.action
         )
-        if _ev_denom > 0:
-            _ev_ratio = (
-                (gt_prob_for_gap - signal.target_price) / _ev_denom
-                if signal.action == "buy_yes"
-                else (signal.target_price - gt_prob_for_gap) / _ev_denom
-            )
-        else:
-            _ev_ratio = -1.0
-        if _ev_ratio < MIN_EV_RATIO:
+        if not _ev_passes:
             logger.info(
-                "ResolutionBot: SKIP %s – EV ratio %.3f < %.2f "
-                "(action=%s price=%.3f gt_prob=%.3f min 2%% EV per dollar risked)",
-                mid, _ev_ratio, MIN_EV_RATIO,
+                "ResolutionBot: SKIP %s – EV %.3f below minimum %.2f "
+                "(action=%s price=%.3f gt_prob=%.3f)",
+                mid, _ev, MIN_EV,
                 signal.action, signal.target_price, gt_prob_for_gap,
             )
             return None
+        logger.info(
+            "ResolutionBot: EV check PASS %s — EV=%.3f "
+            "(action=%s price=%.3f gt_prob=%.3f)",
+            mid, _ev, signal.action, signal.target_price, gt_prob_for_gap,
+        )
 
         # Size using fractional Kelly (time-to-resolution weighting applied inside)
         size_usd = self._compute_size(

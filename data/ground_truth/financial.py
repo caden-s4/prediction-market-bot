@@ -75,13 +75,18 @@ _SIMULATE_PRO_DATA: bool = os.environ.get("SIMULATE_PRO_DATA", "").lower() in (
 # upgrading to a paid Twelve Data plan.
 _TD_FREE_TIER_BLOCKED: frozenset = frozenset({
     "NDX",    # Nasdaq 100 index (NQ=F) — requires paid plan
-    "SPX",    # S&P 500 index (ES=F) — requires paid plan
+    "SPX",    # S&P 500 index (ES=F / ^GSPC) — requires paid plan
+    "RUT",    # Russell 2000 (^RUT) — requires paid plan
+    "VIX",    # CBOE Volatility Index (^VIX) — requires paid plan
     "TNX",    # 10-yr Treasury yield (^TNX)
     "US5Y",   # 5-yr Treasury yield (^FVX)
     "US3M",   # 2-yr Treasury yield (^IRX)
     "US30Y",  # 30-yr Treasury yield (^TYX)
-    "GC1!",   # Gold front-month futures — typically requires paid plan
-    "CL1!",   # WTI Crude front-month futures — typically requires paid plan
+    "GC",     # Gold spot — invalid/unavailable on free tier
+    "GC1!",   # Gold front-month futures — requires paid plan
+    "CL1!",   # WTI Crude front-month futures — requires paid plan
+    "SI",     # Silver spot — requires paid plan
+    "SI1!",   # Silver front-month futures — requires paid plan
 })
 
 # Twelve Data symbol translations from Yahoo Finance symbols.
@@ -95,6 +100,11 @@ _TD_SYMBOL_MAP: Dict[str, str] = {
     "GC=F": "GC1!",     # Gold front-month futures (not "GC" which is spot/expired)
     "CL=F": "CL1!",     # WTI Crude front-month futures ("CL/USD" was invalid on free tier)
     "NG=F": "NG",       # Natural Gas futures
+    "SI=F": "SI1!",     # Silver front-month futures
+    # Indices — additional Yahoo Finance tickers for the same underlyings
+    "^GSPC": "SPX",     # S&P 500 via Yahoo ^GSPC → Twelve Data SPX
+    "^RUT":  "RUT",     # Russell 2000
+    "^VIX":  "VIX",     # CBOE Volatility Index
     # Forex (Twelve Data uses standard ISO pairs)
     "EURUSD=X": "EUR/USD",
     "JPY=X":    "USD/JPY",
@@ -303,6 +313,12 @@ class FinancialDataSource(DataSource):
                 "Ghost trades are for strategy evaluation ONLY; "
                 "do not use in production without a real Twelve Data key."
             )
+        # Log the full symbol translation table once at startup so operators can
+        # verify every Yahoo→Twelve Data mapping without grepping source code.
+        logger.info(
+            "FinancialDataSource: ticker translations loaded — %s",
+            list(_TD_SYMBOL_MAP.keys()),
+        )
 
     def can_handle(self, market: Market) -> bool:
         # Include market_id so Kalshi tickers like KXUSDJPY, KXEURUSD, KXNASDAQ100
