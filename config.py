@@ -106,7 +106,7 @@ class BotConfig:
     resolution_window_hours: float              # shared fallback
     kalshi_resolution_window_hours: float       # kalshi-specific (falls back to shared)
     polymarket_resolution_window_hours: float   # polymarket-specific (falls back to shared)
-    resolution_min_gap: float                   # Min fee-adjusted gap to flag (default 4%)
+    resolution_min_gap: float                   # Base gap floor (default 4%); actual min_gap = base + hours×1.5%
     resolution_kelly_fraction: float            # Fractional Kelly (default 12%)
     resolution_max_position_fraction: float     # Hard cap per position (default 20%)
     resolution_scan_interval_seconds: int       # How often to poll (default 300 = 5 min)

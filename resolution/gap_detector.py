@@ -5,7 +5,7 @@ Two signal types:
 
 1. Cross-platform gap
    Same real-world event is listed on both Polymarket and Kalshi.
-   If |poly_yes - kalshi_yes| > MIN_GAP after fees → flag both markets.
+   If |poly_yes - kalshi_yes| > min_gap after fees → flag both markets.
    Action: buy the underpriced side on the lagging platform.
 
 2. Single-platform information signal
@@ -16,7 +16,20 @@ Two signal types:
 Fee-adjusted gap calculation:
   effective_gap = raw_gap - taker_fee_poly - taker_fee_kalshi
   (or just taker_fee_poly for single-platform signals)
-  Only flag if effective_gap > MIN_GAP_THRESHOLD (default 4%).
+
+Time-adjusted minimum gap:
+  min_gap = BASE_GAP_THRESHOLD + hours_to_resolution × TIME_GAP_PREMIUM
+  BASE_GAP_THRESHOLD = 0.04  (4% floor — minimum gap at any horizon)
+  TIME_GAP_PREMIUM   = 0.015 (extra 1.5% per hour remaining)
+
+  Examples:
+    4 h remaining  → 0.04 + 4.00 × 0.015 = 0.100  (10.0%)
+    1 h remaining  → 0.04 + 1.00 × 0.015 = 0.055  ( 5.5%)
+    15 min (0.25h) → 0.04 + 0.25 × 0.015 = 0.044  ( 4.4%)
+
+  Rationale: the closer to resolution, the less time for the world to change.
+  A 9.5% gap at 3.8 hours is not the same edge as a 9.5% gap at 30 minutes.
+  Early entries require substantially larger mispricings to justify the time risk.
 """
 
 from __future__ import annotations
@@ -31,8 +44,9 @@ from shared.fee_cache import FeeCache
 
 logger = logging.getLogger(__name__)
 
-# Minimum probability gap after fees to flag (strategy spec: 4%)
-MIN_GAP_THRESHOLD = 0.04
+# Time-adjusted minimum gap: min_gap = BASE_GAP_THRESHOLD + hours × TIME_GAP_PREMIUM
+BASE_GAP_THRESHOLD = 0.04    # 4% floor — applies even at t=0
+TIME_GAP_PREMIUM   = 0.015   # additional 1.5% required per hour of remaining time
 
 # Minimum hours remaining to act (avoid resolution chaos in last few minutes)
 MIN_HOURS_TO_RESOLUTION = 0.25  # 15 minutes
@@ -84,10 +98,10 @@ class GapDetector:
     def __init__(
         self,
         fee_cache: FeeCache,
-        min_gap: float = MIN_GAP_THRESHOLD,
+        base_gap: float = BASE_GAP_THRESHOLD,
     ) -> None:
         self._fee_cache = fee_cache
-        self._min_gap = min_gap
+        self._base_gap = base_gap
 
     # ── Cross-platform detection ──────────────────────────────────────────────
 
@@ -96,7 +110,7 @@ class GapDetector:
     ) -> List[GapSignal]:
         """
         For each (poly, kalshi) pair, compute the fee-adjusted gap and flag
-        any that exceed MIN_GAP_THRESHOLD.
+        any that exceed the time-adjusted minimum gap threshold.
 
         Returns signals sorted by effective_gap descending.
         """
@@ -109,8 +123,8 @@ class GapDetector:
 
         signals.sort(key=lambda s: -s.effective_gap)
         logger.info(
-            "GapDetector: %d/%d cross-platform pairs exceed %.1f%% gap",
-            len(signals), len(pairs), self._min_gap * 100,
+            "GapDetector: %d/%d cross-platform pairs exceed time-adjusted gap threshold",
+            len(signals), len(pairs),
         )
         return signals
 
@@ -132,17 +146,21 @@ class GapDetector:
         raw_gap = abs(ground_truth_prob - market.yes_price)
         effective_gap = raw_gap - fee
 
-        if effective_gap < self._min_gap:
+        min_gap = self._time_adjusted_min_gap(market.hours_to_resolution)
+        if effective_gap < min_gap:
             logger.debug(
-                "GapDetector: info signal below threshold for %s (eff_gap=%.3f)",
-                market.market_id, effective_gap,
+                "GapDetector: info signal below threshold for %s "
+                "(eff_gap=%.3f < min_gap=%.3f at %.2fh remaining)",
+                market.market_id, effective_gap, min_gap, market.hours_to_resolution,
             )
             return None
 
         reasoning = (
             f"Information signal: market_price={market.yes_price:.3f} "
             f"ground_truth={ground_truth_prob:.3f} raw_gap={raw_gap:.3f} "
-            f"taker_fee={fee:.3f} effective_gap={effective_gap:.3f}"
+            f"taker_fee={fee:.3f} effective_gap={effective_gap:.3f} "
+            f"min_gap={min_gap:.3f} "
+            f"({self._base_gap:.2f}+{market.hours_to_resolution:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f})"
         )
         logger.info("GapDetector: %s – %s", market.market_id, reasoning)
 
@@ -188,17 +206,22 @@ class GapDetector:
 
         effective_gap = raw_gap - lagging_fee
 
-        if effective_gap < self._min_gap:
+        hours = min(poly.hours_to_resolution, kalshi.hours_to_resolution)
+        min_gap = self._time_adjusted_min_gap(hours)
+        if effective_gap < min_gap:
             logger.debug(
-                "GapDetector: pair %s/%s eff_gap=%.3f below threshold",
-                poly.market_id, kalshi.market_id, effective_gap,
+                "GapDetector: pair %s/%s eff_gap=%.3f below threshold %.3f "
+                "(%.2fh remaining)",
+                poly.market_id, kalshi.market_id, effective_gap, min_gap, hours,
             )
             return None
 
         reasoning = (
             f"Cross-platform gap: poly={poly.yes_price:.3f} kalshi={kalshi.yes_price:.3f} "
             f"raw_gap={raw_gap:.3f} lagging_fee={lagging_fee:.3f} "
-            f"effective_gap={effective_gap:.3f} ({platform_label})"
+            f"effective_gap={effective_gap:.3f} ({platform_label}) "
+            f"min_gap={min_gap:.3f} "
+            f"({self._base_gap:.2f}+{hours:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f})"
         )
         logger.info(
             "GapDetector: FLAGGED %s/%s – %s",
@@ -216,6 +239,17 @@ class GapDetector:
             taker_fee=lagging_fee,
             reasoning=reasoning,
         )
+
+    def _time_adjusted_min_gap(self, hours: float) -> float:
+        """
+        Return the minimum effective gap required given hours to resolution.
+
+        min_gap = base_gap + hours × TIME_GAP_PREMIUM
+
+        The further from resolution, the larger the gap must be to justify
+        entering: early positions have more time to go wrong.
+        """
+        return self._base_gap + hours * TIME_GAP_PREMIUM
 
     def _enough_time(self, market: Market) -> bool:
         """Return False if market is resolving too soon to safely trade."""
