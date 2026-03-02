@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 _FR_BASE = "https://www.federalregister.gov/api/v1"
 _CL_BASE = "https://www.courtlistener.com/api/rest/v3"
-_TIMEOUT = 10
+_TIMEOUT = 0.5    # seconds — hard cap; slow FR/CourtListener calls must not block a cycle
 
 # Keywords that suggest a federal regulatory market
 _REGULATORY_KEYWORDS = (

@@ -93,10 +93,57 @@ MAX_SIGNALS_PER_SOURCE_ACTION = 2
 # no longer exists in the real order book.
 STALE_PRICE_THRESHOLD = 0.12     # 12 cents
 
-# Minimum expected value per dollar risked before a trade is fired.
-# Prevents entering positions where transaction costs or small model errors
-# would eliminate any real edge (e.g. BUY NO @99¢ when the gap is < 2¢).
-MIN_EV_RATIO = 0.02
+# Minimum absolute expected value per contract before a trade is fired.
+# EV is computed as: for BUY YES → gt_prob - price; for BUY NO → (1-gt_prob) - price.
+# This is the edge in dollars per contract (not a ratio).  2¢ floor blocks near-
+# exhausted trades (e.g. BUY NO @99¢ where the max win is 1¢ per contract).
+MIN_EV = 0.02
+
+# Time-adjusted entry gap constants (mirrors gap_detector.py).
+# min_gap = _GAP_BASE + hours_remaining × _GAP_TIME_PREMIUM
+# Applied in _try_execute() after the confidence gate.
+_GAP_BASE         = 0.04   # 4% floor at any horizon
+_GAP_TIME_PREMIUM = 0.015  # +1.5% per hour remaining
+
+
+def _minimum_gap_for_entry(hours_remaining: float) -> float:
+    """
+    Minimum fee-adjusted gap required at this time horizon.
+
+    Larger gaps are required early — the further from resolution, the more
+    time for the edge to evaporate.
+
+      4.0 h → 10.0%    1.0 h → 5.5%    0.25 h (15 min) → 4.4%
+    """
+    return _GAP_BASE + hours_remaining * _GAP_TIME_PREMIUM
+
+
+def _check_minimum_ev(
+    market_price: float, gt_prob: float, action: str
+) -> "tuple[bool, float]":
+    """
+    Compute absolute expected value per contract and check against MIN_EV.
+
+    For BUY YES at YES price p with ground-truth probability g:
+        EV = g*(1-p) - (1-g)*p  =  g - p
+
+    For BUY NO at YES price p with ground-truth probability g:
+        EV = (1-g)*(1-p) - g*p  =  (1-g) - p
+
+    EV is dollars of edge per contract, independent of position size.
+
+    Returns (passes_gate, ev).
+
+    Validation examples:
+      Gas BUY YES at 0.99, gt=0.00 → EV = 0.00-0.99 = -0.99 → BLOCKED ✓
+      S&P BUY NO at 0.095, gt=0.00 → EV = 1.00-0.095 = 0.905 → PASS  ✓
+    """
+    if action == "buy_yes":
+        ev = gt_prob - market_price
+    else:  # buy_no
+        ev = (1.0 - gt_prob) - market_price
+    return ev >= MIN_EV, ev
+
 
 # ── Order-book cooldown ────────────────────────────────────────────────────────
 # When a market's order book is empty (no YES ask, no YES bid, or mid_price=None)
@@ -418,8 +465,25 @@ class ResolutionBot:
         summary["pairs_found"] = len(pairs)
         cross_signals = self._gap_detector.detect_cross_platform(pairs)
 
+        # ── Fuzzy cross-platform scan (using cached pairs from discovery) ────
+        # Uses Polymarket prices as GT for Kalshi markets via SequenceMatcher
+        # title pairing.  Pairs are rebuilt at discovery intervals; this call
+        # evaluates gaps using whatever pairs are currently cached.
+        kalshi_active  = [m for m in pair_eligible if m.platform == "kalshi"]
+        poly_active    = [m for m in pair_eligible if m.platform == "polymarket"]
+        fuzzy_signals: list = []
+        if kalshi_active and poly_active:
+            try:
+                fuzzy_signals = self._gap_detector.run_cross_platform_scan(
+                    kalshi_active, poly_active
+                )
+            except Exception as fxp_exc:
+                logger.warning(
+                    "ResolutionBot: fuzzy cross-platform scan failed: %s", fxp_exc
+                )
+
         # Urgent-promote markets with detected cross-platform gaps.
-        for sig in cross_signals:
+        for sig in cross_signals + fuzzy_signals:
             self._registry.mark_urgent(sig.market_to_buy.market_id)
 
         # ── Information signals (GT fetch for active markets) ───────────────
@@ -429,13 +493,13 @@ class ResolutionBot:
         for sig in info_signals:
             self._registry.mark_urgent(sig.market_to_buy.market_id)
 
-        all_signals = cross_signals + info_signals
+        all_signals = cross_signals + fuzzy_signals + info_signals
         self._last_signals = all_signals
         summary["signals_flagged"] = len(all_signals)
         logger.info(
-            "ResolutionBot: %d cross-platform + %d info signals = %d total "
+            "ResolutionBot: %d exact + %d fuzzy cross-platform + %d info signals = %d total "
             "(T1=%d T2_batch=%d/%d total_t2=%d)",
-            len(cross_signals), len(info_signals), len(all_signals),
+            len(cross_signals), len(fuzzy_signals), len(info_signals), len(all_signals),
             len(t1_markets), len(t2_markets),
             len(self._registry.get_tier(2)), len(all_t2_markets),
         )
@@ -581,6 +645,26 @@ class ResolutionBot:
                 counts.get(1, 0), counts.get(2, 0), counts.get(3, 0),
                 len(self._registry),
             )
+
+            # Rebuild fuzzy cross-platform pairs now that we have a fresh full
+            # market list from both platforms.  Actual gap evaluation and signal
+            # generation happens in run_once() (every T1 cycle) using the cached
+            # pairs, so this rebuild only happens at DISCOVERY_INTERVAL.
+            try:
+                kalshi_markets  = [m for m in clean_markets if m.platform == "kalshi"]
+                poly_markets    = [m for m in clean_markets if m.platform == "polymarket"]
+                if kalshi_markets and poly_markets:
+                    # Force pair rebuild by clearing the cache flag
+                    if hasattr(self._gap_detector, "_cross_platform"):
+                        self._gap_detector._cross_platform._built_at = 0.0
+                    self._gap_detector.run_cross_platform_scan(
+                        kalshi_markets, poly_markets
+                    )
+            except Exception as xp_exc:
+                logger.warning(
+                    "ResolutionBot: cross-platform pair rebuild failed: %s", xp_exc
+                )
+
         except Exception as exc:
             logger.warning("ResolutionBot: discovery scan failed: %s", exc)
 
@@ -943,6 +1027,28 @@ class ResolutionBot:
             )
             return None
 
+        # ── Time-adjusted gap gate ─────────────────────────────────────────────
+        # Require a larger mispricing for early entries: the further from
+        # resolution, the more time for the world to change and the edge to
+        # disappear.  A 9.5% gap at 3.8 h (min=9.7%) is NOT the same edge as
+        # 9.5% at 30 min (min=4.4%).  This gate runs after confidence (so a
+        # high-confidence early signal still needs a real gap) and before the
+        # order-book + EV checks (no point fetching books for a gap we'll reject).
+        _min_gap = _minimum_gap_for_entry(market.hours_to_resolution)
+        if signal.effective_gap < _min_gap:
+            logger.info(
+                "ResolutionBot: SKIP %s — gap %.1f%% below time-adjusted "
+                "minimum %.1f%% (%.2fh remaining; base=%.0f%%+%.0f%%/h)",
+                mid,
+                signal.effective_gap * 100,
+                _min_gap * 100,
+                market.hours_to_resolution,
+                _GAP_BASE * 100,
+                _GAP_TIME_PREMIUM * 100,
+            )
+            return None
+        # ──────────────────────────────────────────────────────────────────────
+
         # ── Human review check (LARGE_DIVERGENCE) ─────────────────────────────
         # When the router flagged requires_human_review=True it means gap > 40%.
         # Previously this was handled by capping confidence to 0.70 (blocking the
@@ -1024,10 +1130,10 @@ class ResolutionBot:
             )
             live_gap = abs(live_price - gt_prob)
             live_effective_gap = live_gap - signal.taker_fee
-            if live_effective_gap < 0.04:
+            if live_effective_gap < _minimum_gap_for_entry(market.hours_to_resolution):
                 logger.info(
                     "ResolutionBot: SKIP %s – stale scanner %.3f → live %.3f, "
-                    "recalc gap %.3f below threshold (no real edge)",
+                    "recalc gap %.3f below time-adjusted threshold (no real edge)",
                     mid, signal.target_price, live_price, live_effective_gap,
                 )
                 return None
@@ -1050,10 +1156,10 @@ class ResolutionBot:
             else signal.reference_price
         )
         live_effective_gap = abs(signal.target_price - gt_prob_for_gap) - fee
-        if live_effective_gap < 0.04:
+        if live_effective_gap < _minimum_gap_for_entry(market.hours_to_resolution):
             logger.info(
-                "ResolutionBot: SKIP %s – live effective_gap=%.3f below threshold "
-                "(fee=%.4f target=%.3f gt=%.3f)",
+                "ResolutionBot: SKIP %s – live effective_gap=%.3f below "
+                "time-adjusted threshold (fee=%.4f target=%.3f gt=%.3f)",
                 mid, live_effective_gap, fee, signal.target_price, gt_prob_for_gap,
             )
             if fee > signal.taker_fee:
@@ -1064,31 +1170,25 @@ class ResolutionBot:
         signal.effective_gap = live_effective_gap
         signal.taker_fee = fee
 
-        # Minimum expected-value check: require at least MIN_EV_RATIO net EV per dollar
-        # risked.  Filters out near-exhausted trades (e.g. BUY NO @99¢ where the max
-        # win is 1¢ per unit but the GT model error could easily swallow it).
-        # Formula uses target_price as the YES price for both YES and NO positions.
-        _ev_denom = (
-            signal.target_price
-            if signal.action == "buy_yes"
-            else (1.0 - signal.target_price)
+        # Minimum expected-value check: require at least MIN_EV cents of edge per
+        # contract.  Filters out near-exhausted trades (e.g. BUY NO @99¢ where
+        # the max win is 1¢ but the GT model error could easily swallow it).
+        _ev_passes, _ev = _check_minimum_ev(
+            signal.target_price, gt_prob_for_gap, signal.action
         )
-        if _ev_denom > 0:
-            _ev_ratio = (
-                (gt_prob_for_gap - signal.target_price) / _ev_denom
-                if signal.action == "buy_yes"
-                else (signal.target_price - gt_prob_for_gap) / _ev_denom
-            )
-        else:
-            _ev_ratio = -1.0
-        if _ev_ratio < MIN_EV_RATIO:
+        if not _ev_passes:
             logger.info(
-                "ResolutionBot: SKIP %s – EV ratio %.3f < %.2f "
-                "(action=%s price=%.3f gt_prob=%.3f min 2%% EV per dollar risked)",
-                mid, _ev_ratio, MIN_EV_RATIO,
+                "ResolutionBot: SKIP %s – EV %.3f below minimum %.2f "
+                "(action=%s price=%.3f gt_prob=%.3f)",
+                mid, _ev, MIN_EV,
                 signal.action, signal.target_price, gt_prob_for_gap,
             )
             return None
+        logger.info(
+            "ResolutionBot: EV check PASS %s — EV=%.3f "
+            "(action=%s price=%.3f gt_prob=%.3f)",
+            mid, _ev, signal.action, signal.target_price, gt_prob_for_gap,
+        )
 
         # Size using fractional Kelly (time-to-resolution weighting applied inside)
         size_usd = self._compute_size(
