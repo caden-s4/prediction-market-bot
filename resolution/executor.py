@@ -758,6 +758,31 @@ class ResolutionBot:
                     n_no_prob += 1
                     continue
 
+            # ── Per-market illiquid check ─────────────────────────────────────
+            # The series-level filter above catches whole bracket series at 50¢.
+            # This guard catches individual singletons (e.g. KXNASDAQ100-T23600)
+            # where NQ is at 24,669 yet the market still shows ~49.5¢ because it
+            # has never been traded (Kalshi placeholder price).
+            #
+            # Condition: yes_price within ±0.02 of 0.50 AND GT says the outcome is
+            # near-certain (prob ≤ 0.10 or ≥ 0.90).  Real mispricings near certainty
+            # get arbed quickly; a 95%+ GT-prob market stuck at 50¢ is almost always
+            # untraded, not a real opportunity.
+            if (
+                abs(market.yes_price - 0.50) <= 0.02
+                and gt.ground_truth_prob is not None
+                and (gt.ground_truth_prob <= 0.10 or gt.ground_truth_prob >= 0.90)
+            ):
+                logger.info(
+                    "ResolutionBot: skipping %s — illiquid single market "
+                    "(yes_price=%.3f ≈ 0.50 but gt_prob=%.3f is extreme; "
+                    "uniform_50_pricing)",
+                    market.market_id, market.yes_price, gt.ground_truth_prob,
+                )
+                n_no_source += 1
+                continue
+            # ─────────────────────────────────────────────────────────────────
+
             n_covered += 1
             coverage_sources[gt.source_name] = coverage_sources.get(gt.source_name, 0) + 1
 
