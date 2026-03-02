@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 _EIA_BASE    = "https://api.eia.gov/v2/petroleum/pri/gnd/data/"
 _EIA_SERIES  = "EPM0"    # All formulations (regular + reformulated); tracks AAA closely
 _EIA_AREA    = "NUS"     # National U.S. (duoarea facet code)
-_TIMEOUT     = 10        # seconds
+_TIMEOUT     = 3         # seconds — EIA API; 3 s gives headroom without stalling a cycle
 
 # Module-level cache: (fetched_at, (value, period_str)) or (fetched_at, (None, None))
 _EIA_CACHE: dict = {}

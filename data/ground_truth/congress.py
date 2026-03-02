@@ -34,7 +34,7 @@ from .base import DataSource, GroundTruthResult, SourceType
 logger = logging.getLogger(__name__)
 
 _CONGRESS_BASE = "https://api.congress.gov/v3"
-_TIMEOUT = 10
+_TIMEOUT = 0.5    # seconds — hard cap; slow congress.gov calls must not block a cycle
 
 # Current congress number.  119th Congress: Jan 2025 – Jan 2027.
 _CURRENT_CONGRESS = 119

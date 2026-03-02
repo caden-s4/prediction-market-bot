@@ -98,6 +98,24 @@ STALE_PRICE_THRESHOLD = 0.12     # 12 cents
 # would eliminate any real edge (e.g. BUY NO @99¢ when the gap is < 2¢).
 MIN_EV_RATIO = 0.02
 
+# Time-adjusted entry gap constants (mirrors gap_detector.py).
+# min_gap = _GAP_BASE + hours_remaining × _GAP_TIME_PREMIUM
+# Applied in _try_execute() after the confidence gate.
+_GAP_BASE         = 0.04   # 4% floor at any horizon
+_GAP_TIME_PREMIUM = 0.015  # +1.5% per hour remaining
+
+
+def _minimum_gap_for_entry(hours_remaining: float) -> float:
+    """
+    Minimum fee-adjusted gap required at this time horizon.
+
+    Larger gaps are required early — the further from resolution, the more
+    time for the edge to evaporate.
+
+      4.0 h → 10.0%    1.0 h → 5.5%    0.25 h (15 min) → 4.4%
+    """
+    return _GAP_BASE + hours_remaining * _GAP_TIME_PREMIUM
+
 # ── Order-book cooldown ────────────────────────────────────────────────────────
 # When a market's order book is empty (no YES ask, no YES bid, or mid_price=None)
 # we set a 30-minute cooldown so the same market doesn't waste a T1 slot on every
@@ -943,6 +961,28 @@ class ResolutionBot:
             )
             return None
 
+        # ── Time-adjusted gap gate ─────────────────────────────────────────────
+        # Require a larger mispricing for early entries: the further from
+        # resolution, the more time for the world to change and the edge to
+        # disappear.  A 9.5% gap at 3.8 h (min=9.7%) is NOT the same edge as
+        # 9.5% at 30 min (min=4.4%).  This gate runs after confidence (so a
+        # high-confidence early signal still needs a real gap) and before the
+        # order-book + EV checks (no point fetching books for a gap we'll reject).
+        _min_gap = _minimum_gap_for_entry(market.hours_to_resolution)
+        if signal.effective_gap < _min_gap:
+            logger.info(
+                "ResolutionBot: SKIP %s — gap %.1f%% below time-adjusted "
+                "minimum %.1f%% (%.2fh remaining; base=%.0f%%+%.0f%%/h)",
+                mid,
+                signal.effective_gap * 100,
+                _min_gap * 100,
+                market.hours_to_resolution,
+                _GAP_BASE * 100,
+                _GAP_TIME_PREMIUM * 100,
+            )
+            return None
+        # ──────────────────────────────────────────────────────────────────────
+
         # ── Human review check (LARGE_DIVERGENCE) ─────────────────────────────
         # When the router flagged requires_human_review=True it means gap > 40%.
         # Previously this was handled by capping confidence to 0.70 (blocking the
@@ -1024,10 +1064,10 @@ class ResolutionBot:
             )
             live_gap = abs(live_price - gt_prob)
             live_effective_gap = live_gap - signal.taker_fee
-            if live_effective_gap < 0.04:
+            if live_effective_gap < _minimum_gap_for_entry(market.hours_to_resolution):
                 logger.info(
                     "ResolutionBot: SKIP %s – stale scanner %.3f → live %.3f, "
-                    "recalc gap %.3f below threshold (no real edge)",
+                    "recalc gap %.3f below time-adjusted threshold (no real edge)",
                     mid, signal.target_price, live_price, live_effective_gap,
                 )
                 return None
@@ -1050,10 +1090,10 @@ class ResolutionBot:
             else signal.reference_price
         )
         live_effective_gap = abs(signal.target_price - gt_prob_for_gap) - fee
-        if live_effective_gap < 0.04:
+        if live_effective_gap < _minimum_gap_for_entry(market.hours_to_resolution):
             logger.info(
-                "ResolutionBot: SKIP %s – live effective_gap=%.3f below threshold "
-                "(fee=%.4f target=%.3f gt=%.3f)",
+                "ResolutionBot: SKIP %s – live effective_gap=%.3f below "
+                "time-adjusted threshold (fee=%.4f target=%.3f gt=%.3f)",
                 mid, live_effective_gap, fee, signal.target_price, gt_prob_for_gap,
             )
             if fee > signal.taker_fee:

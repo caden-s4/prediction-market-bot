@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 _FRED_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 _FRED_API_BASE = "https://api.stlouisfed.org/fred"
-_TIMEOUT = 10
+_TIMEOUT = 3      # seconds — FRED/API calls; 3 s gives headroom without stalling a cycle
 
 # Module-level FRED response cache: series_id → (fetched_at, (value, date_str))
 # All bracket markets in the same series (KXAAAGASW-26MAR02-2.888, -2.898, …)

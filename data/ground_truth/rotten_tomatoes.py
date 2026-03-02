@@ -37,7 +37,7 @@ _RT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; prediction-market-bot/1.0)",
     "Accept": "application/json",
 }
-_TIMEOUT = 10
+_TIMEOUT = 0.5    # seconds — hard cap; RT scraping must not stall a cycle
 
 # Cache: title_lower → (fetched_at, (score_int, num_reviews))
 # RT scores update slowly; 30-minute TTL is appropriate.
