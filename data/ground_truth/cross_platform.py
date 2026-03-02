@@ -4,10 +4,10 @@ for the equivalent market on the other platform.
 
 How it works:
   1. build_pairs(kalshi_markets, polymarket_markets) fuzzy-matches titles using
-     SequenceMatcher after stripping dates and platform noise.
+     SequenceMatcher after normalising abbreviations, dates, and platform noise.
   2. For a matched pair, the Polymarket price is returned as ground truth for
      the Kalshi market (and vice versa).
-  3. Confidence = POLYMARKET_AS_GT_CONFIDENCE × similarity_score (≈ 0.56–0.78).
+  3. Confidence = POLYMARKET_AS_GT_CONFIDENCE × similarity_score (≈ 0.46–0.78).
      This sits below the 0.80 auto-trade gate, so cross-platform signals appear
      as ghost trades for human review.  Raise the confidence floor once a week
      of ghost trades validates pair matching accuracy.
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
-import time
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Dict, List, Optional, Tuple
 
@@ -29,29 +29,48 @@ from data.markets.base import Market
 logger = logging.getLogger(__name__)
 
 # Minimum title similarity to consider two markets the same underlying event.
-# 0.72 matches "Will S&P 500 close above 6550 today?" ↔ "S&P above 6550 March 2?"
-# while rejecting "Will S&P 500 close above 6500?" ↔ "Will S&P 500 close above 6550?"
-MIN_SIMILARITY = 0.72
+# 0.60 is permissive enough to match differently-phrased questions about the
+# same underlying (e.g. "Will S&P 500 close above 6550 today?" ↔ "S&P above 6550"),
+# while still rejecting clearly different strikes/events.
+# Diagnostic top-10 logging helps tune this threshold over time.
+MIN_SIMILARITY = 0.60
 
 # Confidence when using Polymarket price as ground truth.
 # Real market price, but not an authoritative data source.
-# Multiply by similarity → 0.72×0.72 = 0.52 (min) … 0.78×1.0 = 0.78 (max).
+# Multiply by similarity → 0.60×0.78 = 0.47 (min) … 1.0×0.78 = 0.78 (max).
 # Both sit below the 0.80 auto-trade gate — intentional until pairs are validated.
 POLYMARKET_AS_GT_CONFIDENCE = 0.78
 
-# How long cached pairs remain valid before triggering a rebuild (seconds).
-_PAIR_CACHE_TTL = 1800  # 30 minutes — pairs rarely change within a discovery cycle
+# How long cached pairs remain valid before triggering a rebuild.
+_PAIR_CACHE_TTL = timedelta(minutes=30)
 
 
 def _normalize_title(title: str) -> str:
     """
     Strip dates, platform-specific language, and punctuation for comparison.
+    Normalizes common financial abbreviations before stripping punctuation
+    so "S&P 500" and "S&P500" both reduce to the same token.
 
-    Example:
+    Examples:
       "Will the S&P 500 close above 6550 on Mar 2 at 4pm EST?"
-      → "will s p 500 close above 6550"
+      → "will sp500 close above 6550"
+
+      "S&P500 above 6550 March 2?" → "sp500 above 6550"
     """
     t = title.lower()
+
+    # Normalize common financial index abbreviations before stripping punctuation
+    t = t.replace("s&p 500", "sp500")
+    t = t.replace("s&p500", "sp500")
+    t = t.replace("s & p 500", "sp500")
+    t = t.replace("s&p", "sp")
+    t = t.replace("nasdaq-100", "nasdaq100")
+    t = t.replace("nasdaq 100", "nasdaq100")
+    t = t.replace("russell 2000", "russell2000")
+    t = t.replace("dow jones industrial average", "djia")
+    t = t.replace("dow jones", "djia")
+    t = t.replace("&", "and")
+
     # Remove date patterns: "on Mar 2", "by March 2026", "as of 3/2"
     t = re.sub(r"\b(?:on|by|as of|before|after)\s+\w+\s+\d+,?\s*\d*", "", t)
     t = re.sub(r"\d{1,2}/\d{1,2}(?:/\d{2,4})?", "", t)
@@ -87,14 +106,13 @@ class CrossPlatformSource:
     def __init__(self) -> None:
         # {kalshi_id: (polymarket_id, similarity_score)}
         self._pairs: Dict[str, Tuple[str, float]] = {}
-        self._built_at: float = 0.0
+        self._last_built: Optional[datetime] = None
 
     def needs_rebuild(self) -> bool:
-        """True if pairs cache is empty or expired."""
-        return (
-            not self._pairs
-            or time.monotonic() - self._built_at >= _PAIR_CACHE_TTL
-        )
+        """True if pairs cache is empty or expired (older than _PAIR_CACHE_TTL)."""
+        if not self._pairs or self._last_built is None:
+            return True
+        return datetime.utcnow() - self._last_built >= _PAIR_CACHE_TTL
 
     def build_pairs(
         self, kalshi_markets: List[Market], polymarket_markets: List[Market]
@@ -102,29 +120,46 @@ class CrossPlatformSource:
         """
         Fuzzy-match each Kalshi market against all Polymarket markets.
         Rebuilds the pairs cache in place; returns the number of pairs found.
+
+        For each Kalshi market, all Polymarket similarities are computed and
+        sorted.  The best match is taken if it exceeds MIN_SIMILARITY.  The
+        top-10 candidates are logged at DEBUG level for unmatched markets to
+        help tune the threshold over time.
         """
         pairs: Dict[str, Tuple[str, float]] = {}
 
         for km in kalshi_markets:
-            best_id: Optional[str] = None
-            best_score = MIN_SIMILARITY
+            # Score all Polymarket markets against this Kalshi market
+            scored: List[Tuple[float, str]] = [
+                (_similarity(km.question, pm.question), pm.market_id)
+                for pm in polymarket_markets
+            ]
+            scored.sort(key=lambda x: -x[0])
 
-            for pm in polymarket_markets:
-                score = _similarity(km.question, pm.question)
-                if score > best_score:
-                    best_score = score
-                    best_id = pm.market_id
+            best_score, best_pm_id = scored[0] if scored else (0.0, "")
 
-            if best_id is not None:
-                pairs[km.market_id] = (best_id, best_score)
+            if best_score > MIN_SIMILARITY and best_pm_id:
+                pairs[km.market_id] = (best_pm_id, best_score)
                 logger.info(
                     "CrossPlatform: paired %s ↔ %s (similarity=%.2f)",
-                    km.market_id, best_id, best_score,
+                    km.market_id, best_pm_id, best_score,
+                )
+            else:
+                # Diagnostic: log top-10 candidates to help tune MIN_SIMILARITY
+                top10 = [(pm_id, f"{sc:.2f}") for sc, pm_id in scored[:10]]
+                logger.debug(
+                    "CrossPlatform: no match for %s (best=%.2f < %.2f). Top-10: %s",
+                    km.market_id, best_score, MIN_SIMILARITY, top10,
                 )
 
         self._pairs = pairs
-        self._built_at = time.monotonic()
-        logger.info("CrossPlatform: built %d cross-platform pairs", len(pairs))
+        self._last_built = datetime.utcnow()
+        next_rebuild = self._last_built + _PAIR_CACHE_TTL
+        logger.info(
+            "CrossPlatform: built %d cross-platform pairs "
+            "(next rebuild ~%s UTC)",
+            len(pairs), next_rebuild.strftime("%H:%M"),
+        )
         return len(pairs)
 
     def get_probability(

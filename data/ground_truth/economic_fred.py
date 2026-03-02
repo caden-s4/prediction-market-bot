@@ -2,11 +2,16 @@
 data.ground_truth.economic_fred – FRED API source for economic release markets.
 
 Uses the FRED JSON observations endpoint (requires FRED_API_KEY) to price
-markets about CPI, unemployment, nonfarm payrolls, Fed rate decisions, and GDP.
+markets about CPI, unemployment, nonfarm payrolls, Fed rate decisions, GDP,
+10-year breakeven inflation, and 30-year mortgage rates.
 
 This source handles the same FRED data as economic.py but uses the JSON API
 endpoint for more structured responses and applies per-series cache TTLs that
-match the actual publication frequency (Fed rate: 24 h; monthly CPI: 12 h).
+match the actual publication frequency (Fed rate: 6 h; monthly CPI: 12 h).
+
+Foreign-market exclusion: FRED tracks US data exclusively.  Markets that
+reference foreign economies (China, EU, UK, Japan, …) are rejected in
+can_handle() to avoid spurious matches.
 
 Requires: FRED_API_KEY env var (free at https://fred.stlouisfed.org/docs/api/api_key.html).
 If the key is absent, can_handle() returns False and the source is inactive.
@@ -19,7 +24,6 @@ from __future__ import annotations
 import logging
 import os
 import re
-import time
 from datetime import datetime, timezone
 from typing import Dict, Optional, Tuple
 
@@ -32,10 +36,28 @@ logger = logging.getLogger(__name__)
 
 _FRED_OBS_URL = "https://api.stlouisfed.org/fred/series/observations"
 _FRED_API_KEY: str = os.environ.get("FRED_API_KEY", "")
-_TIMEOUT = 3  # seconds — FRED JSON API; same headroom as economic.py
+_TIMEOUT = 3  # seconds — FRED JSON API
 
 # Confidence for all FRED data (authoritative government source)
 _CONFIDENCE = 0.90
+
+# ── Foreign-market exclusion ───────────────────────────────────────────────────
+# FRED series reflect US economic data only.  Reject markets about foreign
+# economies to prevent false matches on questions like "Will China CPI exceed 2%?"
+FOREIGN_COUNTRY_INDICATORS: frozenset = frozenset({
+    "china", "chinese",
+    "euro ", " euro", "european", "eurozone", "eu cpi", "eu gdp",
+    "uk ", "united kingdom", "britain", "british",
+    "japan", "japanese",
+    "canada", "canadian",
+    "australia", "australian",
+    "germany", "german",
+    "france", "french",
+    "india", "indian",
+    "brazil", "mexico",
+    "russia", "russian",
+    "south korea", "taiwan",
+})
 
 # ── Per-series metadata ────────────────────────────────────────────────────────
 # cache_hours : how long to reuse a cached observation before re-fetching.
@@ -45,12 +67,17 @@ _CONFIDENCE = 0.90
 #               Used for staleness rejection: if the latest observation is older
 #               than lag_days + 7 extra buffer days, the data is too stale to trade.
 # keywords    : lowercased substrings to match against market.question.
+#               Use US-specific phrasing to avoid matching foreign-economy markets.
 FRED_SERIES: Dict[str, dict] = {
     # ── Inflation ─────────────────────────────────────────────────────────────
     "CPIAUCSL": {
         "name": "CPI All Items",
         "unit": "index",
-        "keywords": ["cpi", "consumer price index", "inflation"],
+        "keywords": [
+            "us cpi", "u.s. cpi", "united states cpi",
+            "cpi", "consumer price index",
+            "us inflation", "u.s. inflation", "inflation rate",
+        ],
         "frequency": "monthly",
         "lag_days": 14,   # BLS releases ~2 weeks after month end
         "cache_hours": 12,
@@ -63,11 +90,25 @@ FRED_SERIES: Dict[str, dict] = {
         "lag_days": 14,
         "cache_hours": 12,
     },
+    "T10YIE": {
+        "name": "10-Year Breakeven Inflation Rate",
+        "unit": "percent",
+        "keywords": [
+            "breakeven inflation", "10-year breakeven", "10 year breakeven",
+            "inflation expectations", "tips spread",
+        ],
+        "frequency": "daily",
+        "lag_days": 1,
+        "cache_hours": 6,
+    },
     # ── Employment ────────────────────────────────────────────────────────────
     "UNRATE": {
         "name": "Unemployment Rate",
         "unit": "percent",
-        "keywords": ["unemployment rate", "unemployment", "jobless rate"],
+        "keywords": [
+            "us unemployment rate", "us unemployment", "u.s. unemployment",
+            "unemployment rate", "jobless rate",
+        ],
         "frequency": "monthly",
         "lag_days": 7,
         "cache_hours": 12,
@@ -75,7 +116,10 @@ FRED_SERIES: Dict[str, dict] = {
     "PAYEMS": {
         "name": "Nonfarm Payrolls",
         "unit": "thousands",
-        "keywords": ["nonfarm payroll", "nonfarm payrolls", "jobs added", "job gains", "payrolls"],
+        "keywords": [
+            "nonfarm payroll", "nonfarm payrolls",
+            "us jobs added", "job gains", "us payrolls",
+        ],
         "frequency": "monthly",
         "lag_days": 7,
         "cache_hours": 6,   # jobs Friday is high-stakes; refresh more often
@@ -87,7 +131,7 @@ FRED_SERIES: Dict[str, dict] = {
         "keywords": ["fed funds rate", "federal funds rate", "fomc rate"],
         "frequency": "monthly",
         "lag_days": 1,
-        "cache_hours": 24,  # changes at most 8 times a year
+        "cache_hours": 24,  # monthly average changes at most 8 times a year
     },
     "DFF": {
         "name": "Fed Funds Rate (daily effective)",
@@ -95,16 +139,28 @@ FRED_SERIES: Dict[str, dict] = {
         "keywords": ["fed rate", "federal reserve rate", "interest rate"],
         "frequency": "daily",
         "lag_days": 1,
-        "cache_hours": 24,
+        "cache_hours": 6,   # was 24; rate decisions can move intraday
     },
     # ── GDP ───────────────────────────────────────────────────────────────────
     "GDP": {
         "name": "GDP",
         "unit": "billions",
-        "keywords": ["gdp", "gross domestic product"],
+        "keywords": ["us gdp", "u.s. gdp", "gdp", "gross domestic product"],
         "frequency": "quarterly",
         "lag_days": 30,
         "cache_hours": 72,   # quarterly release; barely changes intra-day
+    },
+    # ── Housing ───────────────────────────────────────────────────────────────
+    "MORTGAGE30US": {
+        "name": "30-Year Fixed Rate Mortgage Average",
+        "unit": "percent",
+        "keywords": [
+            "30 year mortgage", "30-year mortgage",
+            "mortgage rate", "30yr mortgage", "fixed mortgage rate",
+        ],
+        "frequency": "weekly",
+        "lag_days": 3,
+        "cache_hours": 12,
     },
     # ── Gas (fallback; EIADataSource is preferred when EIA_API_KEY is set) ───
     "GASREGCOVW": {
@@ -116,10 +172,6 @@ FRED_SERIES: Dict[str, dict] = {
         "cache_hours": 4,
     },
 }
-
-# Module-level observation cache:
-# series_id → (value: float, obs_date: datetime, fetched_at: float [monotonic])
-_OBS_CACHE: Dict[str, Tuple[float, datetime, float]] = {}
 
 # Regex to pull a numeric threshold from Kalshi market IDs and question text.
 # Kalshi format: KXCPI-26MAR02-T3.5 → above 3.5; -B3.5 → below 3.5 (bucket).
@@ -154,16 +206,31 @@ class FREDEconomicSource(DataSource):
     """
     Prices economic release markets using the FRED JSON observations API.
 
-    Covers: CPI, Core CPI, Unemployment, Nonfarm Payrolls, Fed Funds Rate,
-    GDP.  Requires FRED_API_KEY env var; inactive without it.
+    Covers: CPI, Core CPI, 10Y Breakeven Inflation, Unemployment, Nonfarm
+    Payrolls, Fed Funds Rate, GDP, 30Y Mortgage Rate.
+    Requires FRED_API_KEY env var; inactive without it.
 
     Confidence: 0.90 (authoritative government source).
     """
+
+    def __init__(self) -> None:
+        # Per-series datetime-based cache:
+        # series_id → (value_or_None, obs_date_or_None, fetched_at: datetime)
+        # value=None means the series was fetched but found stale; avoids
+        # re-hitting the API until cache_hours have elapsed.
+        self._cache: Dict[str, Tuple[Optional[float], Optional[datetime], datetime]] = {}
+        logger.info(
+            "FREDEconSource: initialized with %d series, datetime-based cache enabled",
+            len(FRED_SERIES),
+        )
 
     def can_handle(self, market: Market) -> bool:
         if not _FRED_API_KEY:
             return False
         text = (market.question + " " + " ".join(market.tags)).lower()
+        # Reject markets about foreign economies — FRED tracks US data only
+        if any(indicator in text for indicator in FOREIGN_COUNTRY_INDICATORS):
+            return False
         return any(
             kw in text
             for meta in FRED_SERIES.values()
@@ -252,20 +319,29 @@ class FREDEconomicSource(DataSource):
         """
         Fetch the most recent FRED observation.  Returns (value, obs_date).
 
-        Results are cached per-series according to the series' cache_hours so
-        slow-changing series (Fed rate: 24 h; GDP: 72 h) don't hammer the API.
+        Uses a datetime-based per-instance cache so slow-changing series
+        (FEDFUNDS: 24 h; GDP: 72 h) don't hammer the API.  Stale results
+        (where value is None) are also cached for cache_hours to prevent
+        repeated API hits when data is known to be unavailable.
         """
         meta = FRED_SERIES.get(series_id, {})
         cache_hours = meta.get("cache_hours", 1)
 
-        now_mono = time.monotonic()
-        cached = _OBS_CACHE.get(series_id)
-        if cached:
+        now = datetime.utcnow()
+        cached = self._cache.get(series_id)
+        if cached is not None:
             value, obs_date, fetched_at = cached
-            if now_mono - fetched_at < cache_hours * 3600:
+            age_hours = (now - fetched_at).total_seconds() / 3600
+            if age_hours < cache_hours:
+                if value is None:
+                    logger.debug(
+                        "FREDEconSource: %s known-stale in cache (age=%.1fh)",
+                        series_id, age_hours,
+                    )
+                    return None
                 logger.debug(
-                    "FREDEconSource: %s from cache (age=%.0fs)",
-                    series_id, now_mono - fetched_at,
+                    "FREDEconSource: %s from cache (age=%.1fh)",
+                    series_id, age_hours,
                 )
                 return value, obs_date
 
@@ -307,12 +383,13 @@ class FREDEconomicSource(DataSource):
             if data_age_days > max_age_days:
                 logger.warning(
                     "FREDEconSource: %s data from %s is %dd old — exceeds "
-                    "%dd limit (lag=%d+7); returning None (stale)",
+                    "%dd limit (lag=%d+7); caching None (stale)",
                     series_id, obs["date"], data_age_days, max_age_days, lag_days,
                 )
+                self._cache[series_id] = (None, obs_date, now)
                 return None
 
-            _OBS_CACHE[series_id] = (value, obs_date, now_mono)
+            self._cache[series_id] = (value, obs_date, now)
             logger.debug(
                 "FREDEconSource: fetched %s=%.4f (obs %s)", series_id, value, obs["date"]
             )
