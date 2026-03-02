@@ -47,10 +47,15 @@ _AV_BASE = "https://www.alphavantage.co/query"
 _TIMEOUT = 8
 
 # Optional API keys — set in .env to use more reliable primary sources.
-# TWELVEDATA_API_KEY: recommended — free tier covers typical usage.
+# Accepted env var names for Twelve Data (checked in order, first non-empty wins):
+#   TWELVEDATA_API_KEY  — canonical name used in .env.example
+#   TWELVE_API_KEY      — common short alias users may set instead
 # ALPHA_VANTAGE_KEY: free tier (25/day) is too low; paid tier not worth it over TD.
 # When no key is set, Yahoo Finance is used as an unofficial fallback.
-_TWELVE_DATA_KEY: str = os.environ.get("TWELVEDATA_API_KEY", "")
+_TWELVE_DATA_KEY: str = (
+    os.environ.get("TWELVEDATA_API_KEY", "")
+    or os.environ.get("TWELVE_API_KEY", "")
+)
 _ALPHA_VANTAGE_KEY: str = os.environ.get("ALPHA_VANTAGE_KEY", "")
 
 # Twelve Data symbol translations from Yahoo Finance symbols.
@@ -231,6 +236,28 @@ class FinancialDataSource(DataSource):
     Fetches real-time prices/yields from Yahoo Finance for markets about
     index levels, forex rates, and Treasury yields.
     """
+
+    def __init__(self) -> None:
+        # Diagnostic: always log exactly which env vars are present and which
+        # provider was selected.  Run once at startup so operators can immediately
+        # spot "key present=False" without having to grep through cycle logs.
+        td_canonical = bool(os.environ.get("TWELVEDATA_API_KEY"))
+        td_alias     = bool(os.environ.get("TWELVE_API_KEY"))
+        logger.info(
+            "FinancialDataSource: TWELVE_API_KEY present=%s  "
+            "TWELVEDATA_API_KEY present=%s",
+            td_alias, td_canonical,
+        )
+        if _TWELVE_DATA_KEY:
+            provider = "twelve_data"
+        elif _ALPHA_VANTAGE_KEY:
+            provider = "alpha_vantage"
+        else:
+            provider = "yahoo (fallback — set TWELVEDATA_API_KEY or TWELVE_API_KEY for higher confidence)"
+        logger.info(
+            "FinancialDataSource: active provider=%s  key_active=%s",
+            provider, bool(_TWELVE_DATA_KEY),
+        )
 
     def can_handle(self, market: Market) -> bool:
         # Include market_id so Kalshi tickers like KXUSDJPY, KXEURUSD, KXNASDAQ100

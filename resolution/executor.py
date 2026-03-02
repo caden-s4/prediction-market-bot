@@ -119,15 +119,19 @@ def _bracket_prefix(market_id: str) -> Optional[str]:
     """Return the ticker prefix for bracket-series markets, or None for singletons.
 
     Bracket markets share one underlying data point at different strike levels:
-      KXAAAGASW-26MAR02-2.888  →  "KXAAAGASW-26MAR02"   (bracket)
-      KXAAAGASW-26MAR02-2.898  →  "KXAAAGASW-26MAR02"   (same group)
-      KXSOME-MARKET            →  None                   (singleton)
+      KXAAAGASW-26MAR02-2.888          →  "KXAAAGASW-26MAR02"          (gas, numeric)
+      KXAAAGASW-26MAR02-2.898          →  "KXAAAGASW-26MAR02"          (same group)
+      KXNASDAQ100U-26MAR02H1600-T22099.99 →  "KXNASDAQ100U-26MAR02H1600" (financial, T-prefix)
+      KXSOME-MARKET                    →  None                          (singleton)
 
-    A suffix is treated as numeric when it contains only digits and dots
-    (e.g. "2.888") — calendar codes like "26MAR02" are not matched.
+    A suffix is treated as a bracket threshold when it matches either:
+      ^[\\d.]+$      — pure numeric (e.g. "2.888" for gas prices)
+      ^T[\\d.]+$     — T-prefixed numeric (e.g. "T22099.99" for Nasdaq brackets)
+
+    Calendar codes like "26MAR02" and time codes like "H1600" are not matched.
     """
     parts = market_id.split("-")
-    if len(parts) >= 2 and re.match(r"^[\d.]+$", parts[-1]):
+    if len(parts) >= 2 and re.match(r"^(?:[\d.]+|T[\d.]+)$", parts[-1]):
         return "-".join(parts[:-1])
     return None
 
@@ -657,6 +661,35 @@ class ResolutionBot:
         # so even the first bracket lookup per cycle is usually served from memory.
         _bracket_gt: Dict[str, Optional["GroundTruthResult"]] = {}
 
+        # ── Uniform-50 illiquid filter ────────────────────────────────────────
+        # Real mispricings are bracket-specific: only the bracket(s) straddling the
+        # current underlying value diverge from 50¢.  When every bracket in a series
+        # simultaneously shows ~50¢ it means the series has never been traded and
+        # Kalshi initialised all contracts with a placeholder 50-cent quote.
+        # Acting on these produces ghost signals — the "gap" is just stale default
+        # pricing, not a real market-vs-reality divergence.
+        #
+        # Rule: if more than 3 brackets in the same series all have yes_price within
+        # ±0.02 of 0.50 (i.e. 0.48–0.52), flag the entire series as illiquid and
+        # skip every bracket in it with reason='uniform_50_pricing'.
+        _illiquid_prefixes: set = set()
+        _prefix_prices: Dict[str, list] = {}
+        for m in candidates:
+            pfx = _bracket_prefix(m.market_id)
+            if pfx is not None:
+                _prefix_prices.setdefault(pfx, []).append(m.yes_price)
+        for pfx, prices in _prefix_prices.items():
+            near_50 = sum(1 for p in prices if abs(p - 0.50) <= 0.02)
+            if near_50 > 3:
+                _illiquid_prefixes.add(pfx)
+                logger.info(
+                    "ResolutionBot: series %s flagged illiquid — "
+                    "%d/%d brackets priced within 2¢ of 0.50 "
+                    "(uniform_50_pricing; skipping whole series)",
+                    pfx, near_50, len(prices),
+                )
+        # ─────────────────────────────────────────────────────────────────────
+
         for i, market in enumerate(candidates, 1):
             if i % 25 == 0 or i == total:
                 logger.info(
@@ -665,6 +698,16 @@ class ResolutionBot:
                 )
 
             prefix = _bracket_prefix(market.market_id)
+
+            # ── Uniform-50 illiquid series skip ───────────────────────────────
+            if prefix is not None and prefix in _illiquid_prefixes:
+                logger.debug(
+                    "ResolutionBot: skipping %s — series %s is illiquid "
+                    "(uniform_50_pricing)",
+                    market.market_id, prefix,
+                )
+                n_no_source += 1
+                continue
 
             # ── Bracket deduplication path ────────────────────────────────────
             if prefix and prefix in _bracket_gt:
