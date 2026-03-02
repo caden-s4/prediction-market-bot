@@ -58,6 +58,16 @@ _TWELVE_DATA_KEY: str = (
 )
 _ALPHA_VANTAGE_KEY: str = os.environ.get("ALPHA_VANTAGE_KEY", "")
 
+# Simulation mode: use Yahoo Finance prices but report pro-level confidence.
+# Set SIMULATE_PRO_DATA=true in .env to evaluate strategy profitability without
+# a Twelve Data subscription.  Prices still come from Yahoo Finance; only the
+# time-confidence floor is lifted to 0.85 so signals pass the 0.80 gate.
+# Every fetch under this mode logs a clearly marked [SIMULATED PRO] warning so
+# ghost trades are distinguishable from live signals.  Never use in production.
+_SIMULATE_PRO_DATA: bool = os.environ.get("SIMULATE_PRO_DATA", "").lower() in (
+    "1", "true", "yes"
+)
+
 # Twelve Data symbol translations from Yahoo Finance symbols.
 # Twelve Data uses spot-index symbols for NDX/SPX and its own commodity format.
 _TD_SYMBOL_MAP: Dict[str, str] = {
@@ -258,6 +268,13 @@ class FinancialDataSource(DataSource):
             "FinancialDataSource: active provider=%s  key_active=%s",
             provider, bool(_TWELVE_DATA_KEY),
         )
+        if _SIMULATE_PRO_DATA and not _TWELVE_DATA_KEY:
+            logger.warning(
+                "FinancialDataSource: SIMULATE_PRO_DATA=true — Yahoo Finance prices "
+                "will be reported with confidence=0.85 (pro-level floor).  "
+                "Ghost trades are for strategy evaluation ONLY; "
+                "do not use in production without a real Twelve Data key."
+            )
 
     def can_handle(self, market: Market) -> bool:
         # Include market_id so Kalshi tickers like KXUSDJPY, KXEURUSD, KXNASDAQ100
@@ -315,13 +332,24 @@ class FinancialDataSource(DataSource):
             )
 
             # Per-source confidence parameters:
-            #   Twelve Data  — commercial API, reliable prices; spatial cap 0.85,
-            #                   time floor 0.85 (signals fire at any horizon).
-            #   Yahoo Finance — unofficial scraping; spatial cap 0.90, time floor
-            #                   0.55 (signals blocked beyond ~3h).
+            #   Twelve Data       — commercial API, reliable prices; spatial cap 0.85,
+            #                       time floor 0.85 (signals fire at any horizon).
+            #   SIMULATE_PRO_DATA — Yahoo Finance prices, but pro-level floor 0.85.
+            #                       Logs a [SIMULATED PRO] warning on every fetch.
+            #                       For strategy back-evaluation only, not production.
+            #   Yahoo Finance     — unofficial scraping; spatial cap 0.90, time floor
+            #                       0.55 (signals blocked beyond ~3h).
             if price_source == "twelve_data":
                 max_spatial = _TD_MAX_SPATIAL_CONF      # 0.85
                 time_floor  = _TD_TIME_CONF_FLOOR       # 0.85
+            elif _SIMULATE_PRO_DATA:
+                max_spatial = _TD_MAX_SPATIAL_CONF      # 0.85 — simulated
+                time_floor  = _TD_TIME_CONF_FLOOR       # 0.85 — simulated
+                logger.warning(
+                    "[SIMULATED PRO] %s → %.4f  confidence=0.85 "
+                    "(would require Twelve Data in production)",
+                    symbol, current_price,
+                )
             else:
                 max_spatial = 0.90
                 time_floor  = _TIME_CONF_FLOOR          # 0.55
