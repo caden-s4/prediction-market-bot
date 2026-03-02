@@ -656,7 +656,7 @@ class ResolutionBot:
                 if kalshi_markets and poly_markets:
                     # Force pair rebuild by clearing the cache flag
                     if hasattr(self._gap_detector, "_cross_platform"):
-                        self._gap_detector._cross_platform._built_at = 0.0
+                        self._gap_detector._cross_platform._last_built = None
                     self._gap_detector.run_cross_platform_scan(
                         kalshi_markets, poly_markets
                     )
