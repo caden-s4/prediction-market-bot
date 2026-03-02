@@ -36,9 +36,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from data.ground_truth.base import GroundTruthResult
+from data.ground_truth.base import GroundTruthResult, SourceType
+from data.ground_truth.cross_platform import CrossPlatformSource
 from data.markets.base import Market
 from shared.fee_cache import FeeCache
 
@@ -254,3 +255,110 @@ class GapDetector:
     def _enough_time(self, market: Market) -> bool:
         """Return False if market is resolving too soon to safely trade."""
         return market.hours_to_resolution >= MIN_HOURS_TO_RESOLUTION
+
+    # ── Fuzzy cross-platform scan ─────────────────────────────────────────────
+
+    def run_cross_platform_scan(
+        self,
+        kalshi_markets: List[Market],
+        polymarket_markets: List[Market],
+    ) -> List[GapSignal]:
+        """
+        Discover cross-platform mispricings using fuzzy title matching.
+
+        Rebuilds the Kalshi↔Polymarket pairs cache if it is stale (empty or
+        older than 30 minutes).  Each matched pair is evaluated for a gap; any
+        pair exceeding the time-adjusted minimum threshold produces a GapSignal.
+
+        Signals are returned as BUY on the Kalshi market (we always trade the
+        less-efficient Kalshi side).  Confidence = POLYMARKET_AS_GT_CONFIDENCE
+        × similarity ≈ 0.56–0.78, which sits below the 0.80 auto-trade gate so
+        these appear as ghost signals until pair accuracy is validated.
+        """
+        if not kalshi_markets or not polymarket_markets:
+            return []
+
+        # Lazy-initialise and rebuild if stale
+        if not hasattr(self, "_cross_platform"):
+            self._cross_platform = CrossPlatformSource()
+
+        if self._cross_platform.needs_rebuild():
+            self._cross_platform.build_pairs(kalshi_markets, polymarket_markets)
+
+        pm_by_id: Dict[str, Market] = {m.market_id: m for m in polymarket_markets}
+        signals: List[GapSignal] = []
+
+        for km in kalshi_markets:
+            if not self._enough_time(km):
+                continue
+
+            pm_prob, confidence = self._cross_platform.get_probability(km, pm_by_id)
+            if pm_prob is None:
+                continue
+
+            raw_gap = abs(km.yes_price - pm_prob)
+            if raw_gap <= 0:
+                continue
+
+            fee = self._fee_cache.get_taker_fee("kalshi", km.market_id)
+            effective_gap = raw_gap - fee
+
+            min_gap = self._time_adjusted_min_gap(km.hours_to_resolution)
+            if effective_gap < min_gap:
+                logger.debug(
+                    "GapDetector[cross]: %s eff_gap=%.3f < min_gap=%.3f "
+                    "(%.2fh remaining) — below time-adjusted threshold",
+                    km.market_id, effective_gap, min_gap, km.hours_to_resolution,
+                )
+                continue
+
+            if pm_prob > km.yes_price:
+                action_label = "buy_yes"
+                reference_price = pm_prob
+            else:
+                action_label = "buy_no"
+                reference_price = pm_prob
+
+            gt_result = GroundTruthResult(
+                ground_truth_prob=pm_prob,
+                confidence=confidence,
+                source_type=SourceType.AGGREGATED,
+                source_name=f"Polymarket/cross-platform",
+                reasoning=(
+                    f"Cross-platform: kalshi={km.yes_price:.3f} "
+                    f"polymarket={pm_prob:.3f} raw_gap={raw_gap:.3f} "
+                    f"effective_gap={effective_gap:.3f} confidence={confidence:.2f}"
+                ),
+            )
+
+            reasoning = (
+                f"Cross-platform (fuzzy): kalshi={km.yes_price:.3f} "
+                f"polymarket={pm_prob:.3f} raw_gap={raw_gap:.3f} "
+                f"fee={fee:.3f} effective_gap={effective_gap:.3f} "
+                f"min_gap={min_gap:.3f} confidence={confidence:.2f}"
+            )
+            logger.info(
+                "GapDetector[cross]: FLAGGED %s — %s", km.market_id, reasoning
+            )
+
+            signals.append(GapSignal(
+                signal_type="cross_platform",
+                market_to_buy=km,
+                market_reference=None,
+                target_price=km.yes_price,
+                reference_price=reference_price,
+                ground_truth_prob=pm_prob,
+                raw_gap=raw_gap,
+                effective_gap=effective_gap,
+                taker_fee=fee,
+                ground_truth_result=gt_result,
+                reasoning=reasoning,
+            ))
+
+        signals.sort(key=lambda s: -s.effective_gap)
+        logger.info(
+            "GapDetector[cross]: %d fuzzy cross-platform signal(s) found "
+            "from %d Kalshi × %d Polymarket markets",
+            len(signals), len(kalshi_markets), len(polymarket_markets),
+        )
+        return signals

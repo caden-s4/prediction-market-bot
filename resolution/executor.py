@@ -465,8 +465,25 @@ class ResolutionBot:
         summary["pairs_found"] = len(pairs)
         cross_signals = self._gap_detector.detect_cross_platform(pairs)
 
+        # ── Fuzzy cross-platform scan (using cached pairs from discovery) ────
+        # Uses Polymarket prices as GT for Kalshi markets via SequenceMatcher
+        # title pairing.  Pairs are rebuilt at discovery intervals; this call
+        # evaluates gaps using whatever pairs are currently cached.
+        kalshi_active  = [m for m in pair_eligible if m.platform == "kalshi"]
+        poly_active    = [m for m in pair_eligible if m.platform == "polymarket"]
+        fuzzy_signals: list = []
+        if kalshi_active and poly_active:
+            try:
+                fuzzy_signals = self._gap_detector.run_cross_platform_scan(
+                    kalshi_active, poly_active
+                )
+            except Exception as fxp_exc:
+                logger.warning(
+                    "ResolutionBot: fuzzy cross-platform scan failed: %s", fxp_exc
+                )
+
         # Urgent-promote markets with detected cross-platform gaps.
-        for sig in cross_signals:
+        for sig in cross_signals + fuzzy_signals:
             self._registry.mark_urgent(sig.market_to_buy.market_id)
 
         # ── Information signals (GT fetch for active markets) ───────────────
@@ -476,13 +493,13 @@ class ResolutionBot:
         for sig in info_signals:
             self._registry.mark_urgent(sig.market_to_buy.market_id)
 
-        all_signals = cross_signals + info_signals
+        all_signals = cross_signals + fuzzy_signals + info_signals
         self._last_signals = all_signals
         summary["signals_flagged"] = len(all_signals)
         logger.info(
-            "ResolutionBot: %d cross-platform + %d info signals = %d total "
+            "ResolutionBot: %d exact + %d fuzzy cross-platform + %d info signals = %d total "
             "(T1=%d T2_batch=%d/%d total_t2=%d)",
-            len(cross_signals), len(info_signals), len(all_signals),
+            len(cross_signals), len(fuzzy_signals), len(info_signals), len(all_signals),
             len(t1_markets), len(t2_markets),
             len(self._registry.get_tier(2)), len(all_t2_markets),
         )
@@ -628,6 +645,26 @@ class ResolutionBot:
                 counts.get(1, 0), counts.get(2, 0), counts.get(3, 0),
                 len(self._registry),
             )
+
+            # Rebuild fuzzy cross-platform pairs now that we have a fresh full
+            # market list from both platforms.  Actual gap evaluation and signal
+            # generation happens in run_once() (every T1 cycle) using the cached
+            # pairs, so this rebuild only happens at DISCOVERY_INTERVAL.
+            try:
+                kalshi_markets  = [m for m in clean_markets if m.platform == "kalshi"]
+                poly_markets    = [m for m in clean_markets if m.platform == "polymarket"]
+                if kalshi_markets and poly_markets:
+                    # Force pair rebuild by clearing the cache flag
+                    if hasattr(self._gap_detector, "_cross_platform"):
+                        self._gap_detector._cross_platform._built_at = 0.0
+                    self._gap_detector.run_cross_platform_scan(
+                        kalshi_markets, poly_markets
+                    )
+            except Exception as xp_exc:
+                logger.warning(
+                    "ResolutionBot: cross-platform pair rebuild failed: %s", xp_exc
+                )
+
         except Exception as exc:
             logger.warning("ResolutionBot: discovery scan failed: %s", exc)
 

@@ -35,6 +35,7 @@ from data.markets.base import Market
 from .base import DataSource, GroundTruthResult
 from .congress import CongressSource
 from .economic import EconomicDataSource
+from .economic_fred import FREDEconomicSource
 from .eia import EIADataSource
 from .federal_register import FederalRegisterSource
 from .financial import FinancialDataSource
@@ -90,6 +91,7 @@ class GroundTruthRouter:
             SportsDataSource(),
             EconomicDataSource(),
             EIADataSource(),           # weekly gas prices (active only when EIA_API_KEY is set)
+            FREDEconomicSource(),      # 0.90 confidence — FRED JSON API (requires FRED_API_KEY)
             FinancialDataSource(),
             CongressSource(),          # bill passage status (specific, definitive outcomes)
             FederalRegisterSource(),   # regulatory filings (broad political/legal coverage)
