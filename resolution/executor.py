@@ -99,6 +99,14 @@ STALE_PRICE_THRESHOLD = 0.12     # 12 cents
 # exhausted trades (e.g. BUY NO @99¢ where the max win is 1¢ per contract).
 MIN_EV = 0.02
 
+# Confidence gate thresholds used in _try_execute().
+# In live mode BOTH source_confidence AND resolution_clarity must reach the live
+# gate.  In ghost-trade (dry_run) mode, cross-platform signals are allowed
+# through at the lower ghost gate so pair-matching accuracy can be validated
+# before real money is committed.
+CONFIDENCE_GATE_LIVE                = 0.80
+CONFIDENCE_GATE_GHOST_CROSS_PLATFORM = 0.50
+
 # Time-adjusted entry gap constants (mirrors gap_detector.py).
 # min_gap = _GAP_BASE + hours_remaining × _GAP_TIME_PREMIUM
 # Applied in _try_execute() after the confidence gate.
@@ -469,13 +477,33 @@ class ResolutionBot:
         # Uses Polymarket prices as GT for Kalshi markets via SequenceMatcher
         # title pairing.  Pairs are rebuilt at discovery intervals; this call
         # evaluates gaps using whatever pairs are currently cached.
-        kalshi_active  = [m for m in pair_eligible if m.platform == "kalshi"]
-        poly_active    = [m for m in pair_eligible if m.platform == "polymarket"]
+        #
+        # IMPORTANT: include ALL tiers (T1+T2+T3) on both sides, not just the
+        # T1+T2 active batch.  Long-dated markets (T3, e.g. Trump presidency
+        # Sep-2026) only appear in T3 between discovery cycles.  Using pair_eligible
+        # (T1+T2 only) drops ~90 Polymarket markets every regular cycle and means
+        # the Trump signal can never be found outside the 30-min discovery window.
+        # The active_markets restriction above applies to GT-source evaluation
+        # and order sizing; the fuzzy scan is price-discovery only — it can safely
+        # reach into T3 and the urgency system will promote a T3 Kalshi market to
+        # T1 when a gap is found.
+        fuzzy_kalshi = [
+            e.market
+            for tier in (1, 2, 3)
+            for e in self._registry.get_tier(tier)
+            if e.market.platform == "kalshi"
+        ]
+        fuzzy_poly = [
+            e.market
+            for tier in (1, 2, 3)
+            for e in self._registry.get_tier(tier)
+            if e.market.platform == "polymarket"
+        ]
         fuzzy_signals: list = []
-        if kalshi_active and poly_active:
+        if fuzzy_kalshi and fuzzy_poly:
             try:
                 fuzzy_signals = self._gap_detector.run_cross_platform_scan(
-                    kalshi_active, poly_active
+                    fuzzy_kalshi, fuzzy_poly
                 )
             except Exception as fxp_exc:
                 logger.warning(
@@ -1021,11 +1049,42 @@ class ResolutionBot:
 
         # Confidence gate
         score = self._confidence.score(market, gt, signal)
+        is_cross = signal.signal_type == "cross_platform"
         if not score.passes:
-            logger.info(
-                "ResolutionBot: SKIP %s – %s", mid, score.skip_reason
+            # Ghost-mode exception for cross-platform signals.
+            # The standard 0.80 gate blocks many valid cross-platform pairs
+            # because resolution_clarity scores political / geopolitical markets
+            # at 0.65–0.70 (subjective resolution risk).  In dry_run mode we
+            # want these to fire as ghost trades so we can validate whether the
+            # fuzzy title-matching is actually finding the same underlying
+            # question before ever committing real money to this signal type.
+            ghost_exception = (
+                self._dry_run
+                and is_cross
+                and score.source_confidence  >= CONFIDENCE_GATE_GHOST_CROSS_PLATFORM
+                and score.resolution_clarity >= CONFIDENCE_GATE_GHOST_CROSS_PLATFORM
             )
-            return None
+            if ghost_exception:
+                logger.warning(
+                    "ResolutionBot: CROSS-PLATFORM GHOST TRADE FIRED: %s "
+                    "source=%.2f clarity=%.2f (ghost gate=%.2f, live gate=%.2f) "
+                    "kalshi=%.3f polymarket=%.3f gap=%.1f%% — "
+                    "MANUALLY VERIFY SAME QUESTION BEFORE GOING LIVE",
+                    mid,
+                    score.source_confidence,
+                    score.resolution_clarity,
+                    CONFIDENCE_GATE_GHOST_CROSS_PLATFORM,
+                    CONFIDENCE_GATE_LIVE,
+                    signal.target_price,
+                    signal.reference_price,
+                    signal.effective_gap * 100,
+                )
+                # Fall through — fire as a ghost trade for accuracy tracking.
+            else:
+                logger.info(
+                    "ResolutionBot: SKIP %s – %s", mid, score.skip_reason
+                )
+                return None
 
         # ── Time-adjusted gap gate ─────────────────────────────────────────────
         # Require a larger mispricing for early entries: the further from
