@@ -111,7 +111,14 @@ CONFIDENCE_GATE_GHOST_CROSS_PLATFORM = 0.50
 # min_gap = _GAP_BASE + hours_remaining × _GAP_TIME_PREMIUM
 # Applied in _try_execute() after the confidence gate.
 _GAP_BASE         = 0.04   # 4% floor at any horizon
-_GAP_TIME_PREMIUM = 0.015  # +1.5% per hour remaining
+_GAP_TIME_PREMIUM = 0.030  # +3.0% per hour remaining (doubled — curve was too flat)
+
+# Per-series exposure cap: bracket markets from the same series
+# (same FRED indicator, gas series, etc.) are 100% correlated.  Without a cap
+# the bot can fire $480 across 10 payroll brackets from a single FRED read,
+# meaning one bad data point wipes the entire series allocation in one cycle.
+# Cap total exposure per series at 30% of bankroll (1.5× the per-position cap).
+MAX_SERIES_EXPOSURE_FRACTION = 0.30
 
 
 def _minimum_gap_for_entry(hours_remaining: float) -> float:
@@ -121,7 +128,7 @@ def _minimum_gap_for_entry(hours_remaining: float) -> float:
     Larger gaps are required early — the further from resolution, the more
     time for the edge to evaporate.
 
-      4.0 h → 10.0%    1.0 h → 5.5%    0.25 h (15 min) → 4.4%
+      4.0 h → 16.0%    1.0 h → 7.0%    0.25 h (15 min) → 4.75%
     """
     return _GAP_BASE + hours_remaining * _GAP_TIME_PREMIUM
 
@@ -189,6 +196,21 @@ class TradeRecord:
     entry_time: float = field(default_factory=time.time)
     order_id: Optional[str] = None
     requires_human_review: bool = False   # set on startup if gt_prob flipped >50% since entry
+
+
+@dataclass
+class ResolvedPosition:
+    """A closed trade — appended to _resolved_positions for session-level history."""
+    market_id: str
+    action: str          # "buy_yes" | "buy_no"
+    size_usd: float      # dollars wagered
+    entry_price: float   # YES price at entry
+    exit_price: float    # YES price at exit (or 1.0/0.0 at market resolution)
+    pnl: float           # realized P&L in dollars
+    capture: float       # pnl / theoretical_max  (positive = with the signal)
+    confidence: float    # source_confidence at entry
+    source: str          # e.g. "FRED/PAYEMS", "cross-platform"
+    resolved_at: datetime
 
 
 def _bracket_prefix(market_id: str) -> Optional[str]:
@@ -289,6 +311,8 @@ class ResolutionBot:
         # ── Other state ────────────────────────────────────────────────────────
         # Active positions: market_id → TradeRecord
         self._positions: Dict[str, TradeRecord] = {}
+        # Closed positions — session-only (not persisted); drives 'history' command.
+        self._resolved_positions: List[ResolvedPosition] = []
         # Per-cycle circuit breaker: set True when Kalshi's backend returns
         # "service unavailable" so remaining signals skip immediately rather
         # than each burning ~14s on retries.
@@ -521,6 +545,9 @@ class ResolutionBot:
         for sig in info_signals:
             self._registry.mark_urgent(sig.market_to_buy.market_id)
 
+        # Persist sticky-T1 promotions so they survive a restart.
+        self._save_sticky_t1()
+
         all_signals = cross_signals + fuzzy_signals + info_signals
         self._last_signals = all_signals
         summary["signals_flagged"] = len(all_signals)
@@ -673,6 +700,10 @@ class ResolutionBot:
                 counts.get(1, 0), counts.get(2, 0), counts.get(3, 0),
                 len(self._registry),
             )
+
+            # Restore sticky-T1 promotions from the previous session so recently-
+            # promoted markets aren't re-tiered back to T2/T3 after a restart.
+            self._restore_sticky_t1()
 
             # Rebuild fuzzy cross-platform pairs now that we have a fresh full
             # market list from both platforms.  Actual gap evaluation and signal
@@ -1257,6 +1288,40 @@ class ResolutionBot:
             logger.info("ResolutionBot: SKIP %s – size too small ($%.2f)", mid, size_usd)
             return None
 
+        # ── Per-series exposure cap ────────────────────────────────────────────
+        # Bracket markets in the same series (same underlying FRED indicator,
+        # gas price, etc.) are perfectly correlated.  Without a cap a single bad
+        # FRED observation can commit the whole bankroll across all strike levels.
+        # Cap total active exposure per series at MAX_SERIES_EXPOSURE_FRACTION.
+        prefix = _bracket_prefix(mid)
+        if prefix is not None:
+            series_exposure = sum(
+                r.size_usd for r_id, r in self._positions.items()
+                if _bracket_prefix(r_id) == prefix
+            )
+            max_series = self._bankroll.total_usd * MAX_SERIES_EXPOSURE_FRACTION
+            remaining = max_series - series_exposure
+            if remaining <= 0:
+                logger.info(
+                    "ResolutionBot: SKIP %s – series cap reached "
+                    "(series=%s exposure=$%.0f limit=$%.0f)",
+                    mid, prefix, series_exposure, max_series,
+                )
+                return None
+            if size_usd > remaining:
+                logger.info(
+                    "ResolutionBot: %s size capped by series limit "
+                    "(series=%s $%.2f → $%.2f, used=$%.0f limit=$%.0f)",
+                    mid, prefix, size_usd, remaining, series_exposure, max_series,
+                )
+                size_usd = round(remaining, 2)
+            if size_usd < 1.0:
+                logger.info(
+                    "ResolutionBot: SKIP %s – size below $1 after series cap", mid
+                )
+                return None
+        # ──────────────────────────────────────────────────────────────────────
+
         # Determine taker limit price from the live order book.
         #
         # Using signal.target_price (the scanner mid) as the limit creates
@@ -1576,15 +1641,56 @@ class ResolutionBot:
                 decision.reason,
             )
             if decision.action != DecayAction.HOLD:
-                self._exit_position(mid, decision.current_gain_usd)
+                self._exit_position(
+                    mid, decision.current_gain_usd,
+                    current_price=decision.position.current_price,
+                    capture=decision.capture_ratio,
+                )
                 exits += 1
         return exits
 
-    def _exit_position(self, market_id: str, realized_pnl_usd: float) -> None:
+    def _exit_position(
+        self,
+        market_id: str,
+        realized_pnl_usd: float,
+        current_price: Optional[float] = None,
+        capture: Optional[float] = None,
+    ) -> None:
         rec = self._positions.pop(market_id, None)
         if not rec:
             return
         self._bankroll.release(market_id, realized_pnl_usd=realized_pnl_usd)
+
+        # Record in resolved history (session-only; drives 'history' command).
+        exit_price = current_price
+        if exit_price is None and rec.size_usd > 0:
+            offset = realized_pnl_usd / rec.size_usd
+            raw = (rec.entry_price + offset) if rec.action == "buy_yes" else (rec.entry_price - offset)
+            exit_price = max(0.0, min(1.0, raw))
+        if capture is None:
+            if rec.action == "buy_yes":
+                theo = (rec.ground_truth_prob - rec.entry_price) * rec.size_usd
+            else:
+                theo = (rec.entry_price - rec.ground_truth_prob) * rec.size_usd
+            capture = realized_pnl_usd / theo if theo > 1e-6 else 0.0
+        src = "unknown"
+        if rec.signal and rec.signal.ground_truth_result:
+            src = rec.signal.ground_truth_result.source_name
+        elif rec.signal and rec.signal.signal_type == "cross_platform":
+            src = "cross-platform"
+        self._resolved_positions.append(ResolvedPosition(
+            market_id=market_id,
+            action=rec.action,
+            size_usd=rec.size_usd,
+            entry_price=rec.entry_price,
+            exit_price=exit_price or rec.entry_price,
+            pnl=realized_pnl_usd,
+            capture=capture,
+            confidence=rec.source_confidence,
+            source=src,
+            resolved_at=datetime.utcnow(),
+        ))
+
         self._save_positions()
         if not self._dry_run:
             client = self._poly if rec.platform == "polymarket" else self._kalshi
@@ -1617,6 +1723,10 @@ class ResolutionBot:
         self._save_positions()
         logger.info("ResolutionBot: cleared %d position(s) from state", count)
         return count
+
+    def get_resolved_positions(self) -> List[ResolvedPosition]:
+        """Return all trades resolved this session (exits from decay monitor)."""
+        return list(self._resolved_positions)
 
     def get_last_signals(self) -> list:
         """Return signal details from the most recent scan cycle."""
@@ -1838,6 +1948,27 @@ class ResolutionBot:
         if skipped:
             # Rewrite state without the entries we couldn't load
             self._save_positions()
+
+    def _save_sticky_t1(self) -> None:
+        """Persist sticky-T1 market IDs to the state store so they survive restarts.
+
+        Always saved regardless of dry_run — sticky_t1 tracks signal history,
+        not open positions, so the information is valuable across sessions.
+        """
+        if not self._state:
+            return
+        ids = self._registry.get_sticky_market_ids()
+        self._state.set("sticky_t1_markets", ids)
+        if ids:
+            logger.debug("ResolutionBot: saved %d sticky-T1 market ID(s)", len(ids))
+
+    def _restore_sticky_t1(self) -> None:
+        """Re-apply sticky_t1=True for markets saved from the previous session."""
+        if not self._state:
+            return
+        saved_ids = self._state.get("sticky_t1_markets", [])
+        if saved_ids:
+            self._registry.restore_sticky_t1(saved_ids)
 
     def _reconcile_with_exchange(self) -> None:
         """

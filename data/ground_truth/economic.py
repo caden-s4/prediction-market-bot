@@ -124,6 +124,18 @@ _INDICATOR_MAP: Dict[str, Tuple[str, str]] = {
 }
 
 
+# Foreign country/region indicators — markets mentioning these are about non-US
+# economic data that FRED US series cannot resolve correctly.  Matched as
+# substrings so "european" catches "euro", "eu " catches "eu gdp", etc.
+_ECON_FOREIGN_INDICATORS = frozenset({
+    "china", "chinese", "euro ", "european", "uk ", "united kingdom",
+    "britain", "british", "japan", "japanese", "canada", "canadian",
+    "australia", "australian", "germany", "german", "france", "french",
+    "india", "indian", "brazil", "mexico", "russia", "russian",
+    "south korea", "taiwan",
+})
+
+
 class EconomicDataSource(DataSource):
     """
     Fetches economic indicator data from FRED public API.
@@ -131,6 +143,9 @@ class EconomicDataSource(DataSource):
 
     def can_handle(self, market: Market) -> bool:
         text = (market.question + " " + " ".join(market.tags)).lower()
+        # Reject foreign-country markets: US FRED series cannot answer them.
+        if any(ind in text for ind in _ECON_FOREIGN_INDICATORS):
+            return False
         return (
             market.category.lower() in ("economics", "economy", "finance", "macro")
             or any(k in text for k in _INDICATOR_MAP)

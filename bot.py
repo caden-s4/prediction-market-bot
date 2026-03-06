@@ -232,6 +232,10 @@ class BotCoordinator:
         """Wipe all tracked positions from memory and state (no exit orders placed)."""
         return self._resolution.clear_positions()
 
+    def get_resolved_positions(self) -> list:
+        """Return all trades resolved this session (exits from the decay monitor)."""
+        return self._resolution.get_resolved_positions()
+
     def get_bankroll(self) -> float:
         """Return the current total bankroll (virtual or live)."""
         return self._bankroll.total_usd

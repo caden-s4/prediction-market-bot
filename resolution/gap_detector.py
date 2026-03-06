@@ -20,12 +20,12 @@ Fee-adjusted gap calculation:
 Time-adjusted minimum gap:
   min_gap = BASE_GAP_THRESHOLD + hours_to_resolution × TIME_GAP_PREMIUM
   BASE_GAP_THRESHOLD = 0.04  (4% floor — minimum gap at any horizon)
-  TIME_GAP_PREMIUM   = 0.015 (extra 1.5% per hour remaining)
+  TIME_GAP_PREMIUM   = 0.030 (extra 3.0% per hour remaining)
 
   Examples:
-    4 h remaining  → 0.04 + 4.00 × 0.015 = 0.100  (10.0%)
-    1 h remaining  → 0.04 + 1.00 × 0.015 = 0.055  ( 5.5%)
-    15 min (0.25h) → 0.04 + 0.25 × 0.015 = 0.044  ( 4.4%)
+    4 h remaining  → 0.04 + 4.00 × 0.030 = 0.160  (16.0%)
+    1 h remaining  → 0.04 + 1.00 × 0.030 = 0.070  ( 7.0%)
+    15 min (0.25h) → 0.04 + 0.25 × 0.030 = 0.048  ( 4.8%)
 
   Rationale: the closer to resolution, the less time for the world to change.
   A 9.5% gap at 3.8 hours is not the same edge as a 9.5% gap at 30 minutes.
@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 # Time-adjusted minimum gap: min_gap = BASE_GAP_THRESHOLD + hours × TIME_GAP_PREMIUM
 BASE_GAP_THRESHOLD = 0.04    # 4% floor — applies even at t=0
-TIME_GAP_PREMIUM   = 0.015   # additional 1.5% required per hour of remaining time
+TIME_GAP_PREMIUM   = 0.030   # additional 3.0% required per hour of remaining time
 
 # Minimum hours remaining to act (avoid resolution chaos in last few minutes)
 MIN_HOURS_TO_RESOLUTION = 0.25  # 15 minutes

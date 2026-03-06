@@ -381,6 +381,40 @@ def _print_near_miss_pairs(coordinator: BotCoordinator, top_n: int = 10) -> None
     print()
 
 
+def _print_history(coordinator: BotCoordinator) -> None:
+    """Print all trades resolved this session with P&L and capture details."""
+    resolved = coordinator.get_resolved_positions()
+    sep  = "=" * _SEP_W
+    thin = "-" * _SEP_W
+    now  = datetime.now().strftime("%H:%M:%S")
+
+    print(f"\n{sep}")
+    print(f"  TRADE HISTORY   {now}   ({len(resolved)} resolved this session)")
+    print(sep)
+
+    if not resolved:
+        print("  No trades resolved this session.")
+    else:
+        total_pnl = 0.0
+        for r in resolved:
+            action  = r.action.replace("_", " ").upper()
+            pnl_s   = f"+${r.pnl:.2f}" if r.pnl >= 0 else f"-${abs(r.pnl):.2f}"
+            cap_s   = f"{r.capture:.0%}" if r.capture is not None else "n/a"
+            ts      = r.resolved_at.strftime("%H:%M:%S") if r.resolved_at else "?"
+            total_pnl += r.pnl
+            print(f"  {action:<10}  ${r.size_usd:<6.0f}  "
+                  f"entry={r.entry_price:.3f}  exit={r.exit_price:.3f}  "
+                  f"pnl={pnl_s}  capture={cap_s}")
+            print(f"    conf={r.confidence:.2f}  src={r.source}  "
+                  f"closed={ts}  [{r.market_id}]")
+            print(f"  {thin}")
+        total_s = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
+        print(f"  Session P&L: {total_s} across {len(resolved)} trade(s)")
+
+    print(sep)
+    print()
+
+
 def _print_help() -> None:
     sep = "=" * _SEP_W
     print(f"\n{sep}")
@@ -389,6 +423,7 @@ def _print_help() -> None:
     print("  p  /  positions   Show all open positions (live mark-to-market)")
     print("  sig / signals     Show gap signals from the last scan cycle")
     print("  pairs [N]         Near-miss cross-platform pairs ranked by overlap")
+    print("  history / hist    Show all trades resolved this session with P&L")
     print("  s  /  scan        Run a scan cycle right now")
     print("  bank <amount>     Set virtual bankroll for this session (dry-run only)")
     print("  clear             Wipe all tracked positions (no exit orders placed)")
@@ -443,6 +478,8 @@ def _start_command_listener(
                             print(f"  Usage: bank <amount>   e.g.  bank 500")
                         except RuntimeError as e:
                             print(f"  Error: {e}")
+                elif cmd in ("history", "hist"):
+                    _print_history(coordinator)
                 elif cmd in ("h", "help", "?"):
                     _print_help()
                 elif cmd:
@@ -456,7 +493,7 @@ def _start_command_listener(
 
     t = threading.Thread(target=_listen, daemon=True, name="cmd-listener")
     t.start()
-    print("  Type 'p' positions · 's' scan now · 'pairs' near-miss · 'bank <amount>' virtual bankroll · 'help'\n")
+    print("  Type 'p' positions · 's' scan now · 'pairs' near-miss · 'history' resolved trades · 'bank <amount>' virtual bankroll · 'help'\n")
 
 
 def parse_args() -> argparse.Namespace:
