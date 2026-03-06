@@ -294,5 +294,21 @@ class TierRegistry:
         counts["total"] = len(self._entries)
         return counts
 
+    def get_sticky_market_ids(self) -> List[str]:
+        """Return market IDs where sticky_t1 is True (for persistence across restarts)."""
+        return [mid for mid, e in self._entries.items() if e.sticky_t1]
+
+    def restore_sticky_t1(self, market_ids) -> None:
+        """Re-apply sticky_t1=True for markets present in the registry after a restart."""
+        restored = 0
+        for mid in market_ids:
+            entry = self._entries.get(mid)
+            if entry and not entry.sticky_t1:
+                entry.sticky_t1 = True
+                entry.tier = 1
+                restored += 1
+        if restored:
+            logger.info("TierRegistry: restored %d sticky-T1 market(s)", restored)
+
     def __len__(self) -> int:
         return len(self._entries)
