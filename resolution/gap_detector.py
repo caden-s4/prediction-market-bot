@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from data.ground_truth.base import GroundTruthResult, SourceType
@@ -103,6 +104,17 @@ class GapDetector:
     ) -> None:
         self._fee_cache = fee_cache
         self._base_gap = base_gap
+        # Signal cache for the fuzzy cross-platform scan.
+        # The gap evaluation loop (265 Kalshi × 96 Poly) runs every cycle and
+        # dominates cycle time when it triggers build_pairs() or when fee cache
+        # is cold for matched pairs.  We cache the computed signal list against
+        # the pairs-rebuild timestamp: as long as _cross_platform._last_built
+        # hasn't changed, the same pairs are in effect and we return the cached
+        # list immediately rather than re-running the O(K) evaluation loop.
+        # Signals remain live enough for ghost trades; _try_execute() validates
+        # current order-book prices before any real placement.
+        self._fuzzy_signals_cache: List[GapSignal] = []
+        self._fuzzy_signals_pairs_ts: Optional[datetime] = None  # _last_built when cached
 
     # ── Cross-platform detection ──────────────────────────────────────────────
 
@@ -278,12 +290,33 @@ class GapDetector:
         if not kalshi_markets or not polymarket_markets:
             return []
 
-        # Lazy-initialise and rebuild if stale
+        # Lazy-initialise
         if not hasattr(self, "_cross_platform"):
             self._cross_platform = CrossPlatformSource()
 
+        # Rebuild pairs if stale (TTL-gated; expensive O(K×P) SequenceMatcher work).
         if self._cross_platform.needs_rebuild():
             self._cross_platform.build_pairs(kalshi_markets, polymarket_markets)
+            # Invalidate signal cache: pairs changed, must re-evaluate gaps.
+            self._fuzzy_signals_pairs_ts = None
+
+        # Signal cache: if the pairs haven't been rebuilt since we last ran the
+        # gap evaluation loop, return the cached signal list immediately.
+        # This avoids the O(K) evaluation loop + fee lookups every 15-second cycle;
+        # only runs when needs_rebuild() fires (every _PAIR_CACHE_TTL = 30 min).
+        current_pairs_ts = self._cross_platform._last_built
+        if (
+            self._fuzzy_signals_pairs_ts is not None
+            and current_pairs_ts is not None
+            and self._fuzzy_signals_pairs_ts >= current_pairs_ts
+        ):
+            logger.debug(
+                "GapDetector[cross]: returning %d cached signal(s) "
+                "(pairs unchanged since %s UTC)",
+                len(self._fuzzy_signals_cache),
+                current_pairs_ts.strftime("%H:%M:%S"),
+            )
+            return self._fuzzy_signals_cache
 
         pm_by_id: Dict[str, Market] = {m.market_id: m for m in polymarket_markets}
         signals: List[GapSignal] = []
@@ -361,4 +394,10 @@ class GapDetector:
             "from %d Kalshi × %d Polymarket markets",
             len(signals), len(kalshi_markets), len(polymarket_markets),
         )
+
+        # Store in signal cache keyed to the current pairs rebuild timestamp.
+        # Next cycle: if _last_built hasn't advanced, skip directly to return above.
+        self._fuzzy_signals_cache = signals
+        self._fuzzy_signals_pairs_ts = self._cross_platform._last_built
+
         return signals
