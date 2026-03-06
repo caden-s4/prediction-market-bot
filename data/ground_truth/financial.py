@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 _YAHOO_BASE = "https://query1.finance.yahoo.com/v8/finance/chart"
 _TD_BASE = "https://api.twelvedata.com"
 _AV_BASE = "https://www.alphavantage.co/query"
-_TIMEOUT = 8
+_TIMEOUT = 3
 
 # Optional API keys — set in .env to use more reliable primary sources.
 # Accepted env var names for Twelve Data (checked in order, first non-empty wins):
