@@ -927,6 +927,12 @@ class ResolutionBot:
                 if not self._ground_truth.can_any_source_handle(market):
                     # Fast-path skip: zero network calls, zero wait.
                     n_no_source_fast_skip += 1
+                    _source_timing["no_source_fast_skip"] = _source_timing.get(
+                        "no_source_fast_skip", 0.0
+                    )  # stays 0.0 — pure in-memory, no elapsed time
+                    _source_fetch_count["no_source_fast_skip"] = (
+                        _source_fetch_count.get("no_source_fast_skip", 0) + 1
+                    )
                     if prefix is not None:
                         _bracket_gt[prefix] = None
                     continue
@@ -1018,7 +1024,9 @@ class ResolutionBot:
                 key=lambda x: -x[2],
             )
             timing_str = "  ".join(
-                f"{src}:{cnt}x{elapsed:.1f}s"
+                # Per-market average: no_source_fast_skip:N×0.0s vs no_source:N×4.7s
+                # makes the cost-per-market directly comparable across sources.
+                f"{src}:{cnt}x{elapsed / max(cnt, 1):.1f}s"
                 for src, cnt, elapsed in timing_parts
             )
             logger.info("ResolutionBot: GT source timing — %s", timing_str)
