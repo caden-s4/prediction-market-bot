@@ -109,8 +109,16 @@ class CrossPlatformSource:
         self._last_built: Optional[datetime] = None
 
     def needs_rebuild(self) -> bool:
-        """True if pairs cache is empty or expired (older than _PAIR_CACHE_TTL)."""
-        if not self._pairs or self._last_built is None:
+        """True if pairs have never been built or the cache has expired.
+
+        Deliberately does NOT check whether _pairs is non-empty: if a build
+        ran and found zero matches (legitimately no cross-platform pairs this
+        cycle), _last_built is still set and the TTL guard still applies.
+        The old `not self._pairs` check made an empty result indistinguishable
+        from "never built", causing a rebuild on every cycle whenever no pairs
+        were found.
+        """
+        if self._last_built is None:
             return True
         return datetime.utcnow() - self._last_built >= _PAIR_CACHE_TTL
 

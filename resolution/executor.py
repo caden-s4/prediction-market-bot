@@ -740,9 +740,12 @@ class ResolutionBot:
                 kalshi_markets  = [m for m in clean_markets if m.platform == "kalshi"]
                 poly_markets    = [m for m in clean_markets if m.platform == "polymarket"]
                 if kalshi_markets and poly_markets:
-                    # Force pair rebuild by clearing the cache flag
-                    if hasattr(self._gap_detector, "_cross_platform"):
-                        self._gap_detector._cross_platform._last_built = None
+                    # Let needs_rebuild() decide — discovery already runs on its
+                    # own 900 s interval which is shorter than _PAIR_CACHE_TTL
+                    # (30 min), so a rebuild will fire here on the first
+                    # discovery cycle after TTL expiry without force-clearing.
+                    # Explicitly nulling _last_built would bypass the TTL guard
+                    # and defeat the fix in needs_rebuild().
                     self._gap_detector.run_cross_platform_scan(
                         kalshi_markets, poly_markets
                     )
