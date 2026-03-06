@@ -107,10 +107,9 @@ class GroundTruthRouter:
         hit so we return the highest-confidence tradeable result.
         Never raises.
         """
-        # Pre-filter: only call fetch() on sources that claim this market.
-        # All can_handle() implementations are in-memory keyword checks — no I/O.
-        claimants = [s for s in self._sources if s.can_handle(market)]
-        if not claimants:
+        # Fast pre-check: bail early if no source claims this market at all.
+        # All can_handle() calls are in-memory keyword checks — no I/O.
+        if not any(s.can_handle(market) for s in self._sources):
             logger.debug("GroundTruthRouter: no source can handle %s", market.market_id)
             return None
 
@@ -118,8 +117,19 @@ class GroundTruthRouter:
         candidates: List[GroundTruthResult] = []
         none_reasons: List[str] = []
 
-        for source in claimants:
+        for source in self._sources:
             source_name = type(source).__name__
+
+            # Guard: re-check can_handle() immediately before fetch() so that a
+            # source's foreign-market or category exclusion cannot be bypassed,
+            # even if a higher-level cache or pre-filter list is stale.
+            if not source.can_handle(market):
+                logger.debug(
+                    "Router: %s skipped — can_handle=False for %s",
+                    source_name, market.market_id,
+                )
+                continue
+
             logger.debug(
                 "GroundTruthRouter: trying %s for %s",
                 source_name, market.market_id,
