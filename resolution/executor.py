@@ -56,12 +56,15 @@ MAX_POSITION_FRACTION = 0.20      # hard cap: 20% of total bankroll per position
 # only the tiers that are "due" based on elapsed time actually run.
 
 TIER_1_INTERVAL = 15       # seconds – active-watch markets (<2h remaining)
-TIER_2_INTERVAL = 300      # seconds – regular-scan markets (2–24h remaining)
+TIER_2_INTERVAL = 150      # seconds – regular-scan markets (2–24h remaining)
+                            # Halved from 300s: doubles the T2 batch per cycle so
+                            # the full T2 pool is swept twice as fast at any scan rate.
 TIER_3_INTERVAL = 1800     # seconds – discovery markets (>24h remaining)
 
 # Full platform fetch to discover markets not yet in the registry.
-# Runs at the same cadence as Tier 3 (30 min) by default.
-DISCOVERY_INTERVAL = 1800  # seconds
+# 900s (15 min): new markets enter the pool every 15 min instead of 30 min,
+# halving the window where fresh listings are invisible to the scanner.
+DISCOVERY_INTERVAL = 900   # seconds
 
 # Stagger API calls within a tier batch to avoid burst patterns that
 # look like abuse to rate limiters.
@@ -387,10 +390,10 @@ class ResolutionBot:
         only the work that is actually *due* in this cycle runs:
 
           Always:     Tier 1 market refresh + gap detection (small fast set)
-                      Rotating Tier 2 batch (covers all T2 in TIER_2_INTERVAL)
+                      Rotating Tier 2 batch (covers all T2 in TIER_2_INTERVAL=150s)
                       Rotating Tier 3 batch (covers all T3 in TIER_3_INTERVAL)
                       Position monitoring
-          Periodically: Discovery scan (full platform fetch, every DISCOVERY_INTERVAL)
+          Periodically: Discovery scan (full platform fetch, every DISCOVERY_INTERVAL=900s)
 
         Parameters
         ----------
@@ -490,9 +493,12 @@ class ResolutionBot:
             for m in t3_markets:
                 self._registry.ingest(m)   # ingest recomputes tier → may promote
 
-        # Active markets for this cycle = Tier 1 (all) + Tier 2 batch.
-        # These are the only markets that get full gap detection + GT evaluation.
-        active_markets = t1_markets + t2_markets
+        # Active markets for this cycle = Tier 1 (all) + Tier 2 batch + Tier 3 batch.
+        # T3 markets are included so that long-dated markets receive GT evaluation
+        # every cycle instead of only during discovery.  The T3 batch is already
+        # a small rotating slice (TIER_3_INTERVAL=1800s ÷ cycle), so the added
+        # API load per cycle is modest.
+        active_markets = t1_markets + t2_markets + (t3_markets if t3_batch_raw else [])
         summary["markets_scanned"] = len(active_markets)
         summary["t1_scanned"]      = len(t1_markets)
         summary["t2_scanned"]      = len(t2_markets)
