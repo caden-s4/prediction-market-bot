@@ -196,9 +196,18 @@ _DETECT_KEYWORDS = tuple(_INSTRUMENT_MAP.keys()) + (
     "close above", "close below", "close at", "settle above", "settle below",
 )
 
-# Module-level price cache: symbol → (fetched_at_monotonic, price)
+# Module-level price cache: symbol → (fetched_at_monotonic, price, source_key)
+# Caches both successes AND failures to prevent the same broken symbol from
+# being retried on every market that references it within the same cycle.
+#
+# TTL policy:
+#   Success → 60 s (_CACHE_TTL): re-fetch at most once per minute per symbol.
+#   Failure → 30 s (_FAILURE_CACHE_TTL): skip retries within the same cycle
+#             (typical cycle is 15–20 s) so unresponsive APIs don't burn
+#             N×timeout when N markets share the same underlying instrument.
 _PRICE_CACHE: dict = {}
-_CACHE_TTL = 60  # one request per symbol per minute max
+_CACHE_TTL = 60          # seconds — success cache
+_FAILURE_CACHE_TTL = 30  # seconds — failure cache (within-cycle dedup)
 
 # Futures symbols that roll quarterly (March/June/September/December).
 # Around the rollover window (2nd–3rd week of the expiry month) the
@@ -582,7 +591,14 @@ class FinancialDataSource(DataSource):
         cached = _PRICE_CACHE.get(symbol)
         if cached:
             fetched_at, price, source_key = cached
-            if now - fetched_at < _CACHE_TTL:
+            ttl = _CACHE_TTL if price is not None else _FAILURE_CACHE_TTL
+            if now - fetched_at < ttl:
+                if price is None:
+                    logger.debug(
+                        "FinancialSource: %s — skipping all APIs (cached failure, "
+                        "%.0fs ago, retry in %.0fs)",
+                        symbol, now - fetched_at, ttl - (now - fetched_at),
+                    )
                 return price, source_key
 
         td_price = self._fetch_price_twelve_data(symbol)
@@ -599,6 +615,14 @@ class FinancialDataSource(DataSource):
             _PRICE_CACHE[symbol] = (time.monotonic(), price, source_key)
             logger.debug(
                 "FinancialSource: %s price=%.4f (source=%s)", symbol, price, source_key
+            )
+        else:
+            # Cache the failure so subsequent markets referencing the same instrument
+            # this cycle skip all API calls immediately instead of re-hitting timeouts.
+            _PRICE_CACHE[symbol] = (time.monotonic(), None, "")
+            logger.debug(
+                "FinancialSource: %s — all APIs failed; caching miss for %ds",
+                symbol, _FAILURE_CACHE_TTL,
             )
         return price, source_key
 
