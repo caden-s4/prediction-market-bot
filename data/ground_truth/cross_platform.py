@@ -42,7 +42,10 @@ MIN_SIMILARITY = 0.60
 POLYMARKET_AS_GT_CONFIDENCE = 0.78
 
 # How long cached pairs remain valid before triggering a rebuild.
-_PAIR_CACHE_TTL = timedelta(minutes=30)
+# Fuzzy title matching is O(K×P) SequenceMatcher work — expensive at scale.
+# Market structure changes slowly; 8 hours is a safe rebuild cadence that
+# keeps pairs fresh without burning CPU every discovery cycle.
+_PAIR_CACHE_TTL = timedelta(hours=8)
 
 
 def _normalize_title(title: str) -> str:
@@ -161,6 +164,10 @@ class CrossPlatformSource:
                 )
 
         self._pairs = pairs
+        # Always stamp _last_built — even for an empty result.  Failing to set
+        # this (e.g. if we returned early on an exception) would leave
+        # _last_built = None, making needs_rebuild() return True forever and
+        # re-running the expensive O(K×P) loop on every subsequent cycle.
         self._last_built = datetime.utcnow()
         next_rebuild = self._last_built + _PAIR_CACHE_TTL
         logger.info(
