@@ -107,11 +107,7 @@ MIN_EV = 0.02
 CONFIDENCE_GATE_LIVE                = 0.80
 CONFIDENCE_GATE_GHOST_CROSS_PLATFORM = 0.50
 
-# Time-adjusted entry gap constants (mirrors gap_detector.py).
-# min_gap = _GAP_BASE + hours_remaining × _GAP_TIME_PREMIUM
-# Applied in _try_execute() after the confidence gate.
-_GAP_BASE         = 0.04   # 4% floor at any horizon
-_GAP_TIME_PREMIUM = 0.030  # +3.0% per hour remaining (doubled — curve was too flat)
+# Time-adjusted entry gap uses a tiered curve (see _minimum_gap_for_entry).
 
 # Per-series exposure cap: all markets sharing a root ticker (e.g. KXPAYROLLS)
 # are driven by the same underlying data point and are 100% correlated.  Without
@@ -122,14 +118,24 @@ MAX_SERIES_EXPOSURE_FRACTION = 0.15
 
 def _minimum_gap_for_entry(hours_remaining: float) -> float:
     """
-    Minimum fee-adjusted gap required at this time horizon.
+    Minimum fee-adjusted gap required at this time horizon — tiered curve.
 
-    Larger gaps are required early — the further from resolution, the more
-    time for the edge to evaporate.
+    Steeper requirements further from resolution; cliff steps at tier
+    boundaries intentionally penalise long-horizon signals hard.
 
-      4.0 h → 16.0%    1.0 h → 7.0%    0.25 h (15 min) → 4.75%
+      < 1h             0.04                      (4.0% floor)
+      1 – 4 h          0.04 + h × 0.015          (2h → 7.0%,  4h → 10.0%)
+      4 – 8 h          0.10 + h × 0.020          (4h → 18.0%, 8h → 26.0%)
+      > 8 h            0.25 + h × 0.030          (8h → 49.0%, 15h → 70.0%)
     """
-    return _GAP_BASE + hours_remaining * _GAP_TIME_PREMIUM
+    if hours_remaining < 1.0:
+        return 0.04
+    elif hours_remaining < 4.0:
+        return 0.04 + hours_remaining * 0.015
+    elif hours_remaining <= 8.0:
+        return 0.10 + hours_remaining * 0.020
+    else:
+        return 0.25 + hours_remaining * 0.030
 
 
 def _check_minimum_ev(
@@ -1143,13 +1149,11 @@ class ResolutionBot:
         if signal.effective_gap < _min_gap:
             logger.info(
                 "ResolutionBot: SKIP %s — gap %.1f%% below time-adjusted "
-                "minimum %.1f%% (%.2fh remaining; base=%.0f%%+%.0f%%/h)",
+                "minimum %.1f%% (%.2fh remaining)",
                 mid,
                 signal.effective_gap * 100,
                 _min_gap * 100,
                 market.hours_to_resolution,
-                _GAP_BASE * 100,
-                _GAP_TIME_PREMIUM * 100,
             )
             return None
         # ──────────────────────────────────────────────────────────────────────
