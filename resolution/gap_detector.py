@@ -35,8 +35,8 @@ Time-adjusted minimum gap:
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from data.ground_truth.base import GroundTruthResult, SourceType
@@ -105,16 +105,18 @@ class GapDetector:
         self._fee_cache = fee_cache
         self._base_gap = base_gap
         # Signal cache for the fuzzy cross-platform scan.
-        # The gap evaluation loop (265 Kalshi × 96 Poly) runs every cycle and
-        # dominates cycle time when it triggers build_pairs() or when fee cache
-        # is cold for matched pairs.  We cache the computed signal list against
-        # the pairs-rebuild timestamp: as long as _cross_platform._last_built
-        # hasn't changed, the same pairs are in effect and we return the cached
-        # list immediately rather than re-running the O(K) evaluation loop.
-        # Signals remain live enough for ghost trades; _try_execute() validates
-        # current order-book prices before any real placement.
+        # The gap evaluation loop (K Kalshi × P Poly) dominates cycle time:
+        # build_pairs() is O(K×P) SequenceMatcher work, and the fee-cache
+        # lookups for matched pairs add further latency on cold starts.
+        # We cache the computed signal list with a monotonic-clock TTL that
+        # matches _PAIR_CACHE_TTL (8 h).  On cache-hit cycles the function
+        # returns in O(1) with a single float comparison — no loop, no I/O.
+        # Signals are stale by at most 8 h, which is fine: _try_execute()
+        # re-validates live order-book prices before any real placement.
+        _FUZZY_SIGNAL_CACHE_TTL = 8 * 3600  # seconds — must match _PAIR_CACHE_TTL
+        self._fuzzy_signal_cache_ttl: float = _FUZZY_SIGNAL_CACHE_TTL
         self._fuzzy_signals_cache: List[GapSignal] = []
-        self._fuzzy_signals_pairs_ts: Optional[datetime] = None  # _last_built when cached
+        self._fuzzy_signals_cached_at: float = 0.0  # time.monotonic() stamp
 
     # ── Cross-platform detection ──────────────────────────────────────────────
 
@@ -290,33 +292,30 @@ class GapDetector:
         if not kalshi_markets or not polymarket_markets:
             return []
 
+        # ── Signal cache fast-path ────────────────────────────────────────────
+        # A single float comparison.  If the cache is warm, return immediately
+        # — no pair rebuild check, no loop, no I/O.  This is the path taken on
+        # every normal cycle between discovery rebuilds.
+        now = time.monotonic()
+        if now - self._fuzzy_signals_cached_at < self._fuzzy_signal_cache_ttl:
+            logger.debug(
+                "GapDetector[cross]: cache hit — returning %d signal(s) "
+                "(%.0fs remaining in %dh window)",
+                len(self._fuzzy_signals_cache),
+                self._fuzzy_signal_cache_ttl - (now - self._fuzzy_signals_cached_at),
+                int(self._fuzzy_signal_cache_ttl / 3600),
+            )
+            return self._fuzzy_signals_cache
+
+        # ── Cache miss: rebuild pairs if stale, then re-evaluate gaps ────────
         # Lazy-initialise
         if not hasattr(self, "_cross_platform"):
             self._cross_platform = CrossPlatformSource()
 
-        # Rebuild pairs if stale (TTL-gated; expensive O(K×P) SequenceMatcher work).
+        # build_pairs() is the expensive O(K×P) SequenceMatcher step.
+        # needs_rebuild() is a pure in-memory TTL check (no I/O).
         if self._cross_platform.needs_rebuild():
             self._cross_platform.build_pairs(kalshi_markets, polymarket_markets)
-            # Invalidate signal cache: pairs changed, must re-evaluate gaps.
-            self._fuzzy_signals_pairs_ts = None
-
-        # Signal cache: if the pairs haven't been rebuilt since we last ran the
-        # gap evaluation loop, return the cached signal list immediately.
-        # This avoids the O(K) evaluation loop + fee lookups every 15-second cycle;
-        # only runs when needs_rebuild() fires (every _PAIR_CACHE_TTL = 30 min).
-        current_pairs_ts = self._cross_platform._last_built
-        if (
-            self._fuzzy_signals_pairs_ts is not None
-            and current_pairs_ts is not None
-            and self._fuzzy_signals_pairs_ts >= current_pairs_ts
-        ):
-            logger.debug(
-                "GapDetector[cross]: returning %d cached signal(s) "
-                "(pairs unchanged since %s UTC)",
-                len(self._fuzzy_signals_cache),
-                current_pairs_ts.strftime("%H:%M:%S"),
-            )
-            return self._fuzzy_signals_cache
 
         pm_by_id: Dict[str, Market] = {m.market_id: m for m in polymarket_markets}
         signals: List[GapSignal] = []
@@ -395,9 +394,10 @@ class GapDetector:
             len(signals), len(kalshi_markets), len(polymarket_markets),
         )
 
-        # Store in signal cache keyed to the current pairs rebuild timestamp.
-        # Next cycle: if _last_built hasn't advanced, skip directly to return above.
+        # ── Store in signal cache ─────────────────────────────────────────────
+        # Stamp the cache with the current monotonic time.  All cycles within
+        # the next _fuzzy_signal_cache_ttl seconds will hit the fast-path above.
         self._fuzzy_signals_cache = signals
-        self._fuzzy_signals_pairs_ts = self._cross_platform._last_built
+        self._fuzzy_signals_cached_at = time.monotonic()
 
         return signals
