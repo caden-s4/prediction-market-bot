@@ -381,8 +381,17 @@ def _print_near_miss_pairs(coordinator: BotCoordinator, top_n: int = 10) -> None
     print()
 
 
+def _series_root_hist(market_id: str) -> str:
+    idx = market_id.find("-")
+    return market_id[:idx] if idx != -1 else market_id
+
+
+def _fmt_pnl(v: float) -> str:
+    return f"+${v:.2f}" if v >= 0 else f"-${abs(v):.2f}"
+
+
 def _print_history(coordinator: BotCoordinator) -> None:
-    """Print all trades resolved this session with P&L and capture details."""
+    """Print all trades resolved this session with summary stats and P&L breakdown."""
     resolved = coordinator.get_resolved_positions()
     sep  = "=" * _SEP_W
     thin = "-" * _SEP_W
@@ -394,23 +403,69 @@ def _print_history(coordinator: BotCoordinator) -> None:
 
     if not resolved:
         print("  No trades resolved this session.")
-    else:
-        total_pnl = 0.0
-        for r in resolved:
-            action  = r.action.replace("_", " ").upper()
-            pnl_s   = f"+${r.pnl:.2f}" if r.pnl >= 0 else f"-${abs(r.pnl):.2f}"
-            cap_s   = f"{r.capture:.0%}" if r.capture is not None else "n/a"
-            ts      = r.resolved_at.strftime("%H:%M:%S") if r.resolved_at else "?"
-            total_pnl += r.pnl
-            print(f"  {action:<10}  ${r.size_usd:<6.0f}  "
-                  f"entry={r.entry_price:.3f}  exit={r.exit_price:.3f}  "
-                  f"pnl={pnl_s}  capture={cap_s}")
-            print(f"    conf={r.confidence:.2f}  src={r.source}  "
-                  f"closed={ts}  [{r.market_id}]")
-            print(f"  {thin}")
-        total_s = f"+${total_pnl:.2f}" if total_pnl >= 0 else f"-${abs(total_pnl):.2f}"
-        print(f"  Session P&L: {total_s} across {len(resolved)} trade(s)")
+        print(sep)
+        print()
+        return
 
+    # --- aggregate stats ---
+    total_pnl    = sum(r.pnl for r in resolved)
+    total_invest = sum(r.size_usd for r in resolved)
+    roi          = total_pnl / total_invest if total_invest else 0.0
+
+    wins      = [r for r in resolved if r.pnl > 0.005]
+    losses    = [r for r in resolved if r.pnl < -0.005]
+    scratches = [r for r in resolved if abs(r.pnl) <= 0.005]
+    win_rate  = len(wins) / len(resolved) if resolved else 0.0
+
+    captures = [r.capture for r in resolved if r.capture is not None]
+    avg_cap  = sum(captures) / len(captures) if captures else None
+
+    best  = max(resolved, key=lambda r: r.pnl)
+    worst = min(resolved, key=lambda r: r.pnl)
+
+    print(f"  P&L      : {_fmt_pnl(total_pnl)}   ROI: {roi:+.1%}   invested: ${total_invest:.0f}")
+    print(f"  Results  : {len(wins)}W / {len(losses)}L / {len(scratches)}S   "
+          f"win rate: {win_rate:.0%}")
+    cap_s = f"{avg_cap:.0%}" if avg_cap is not None else "n/a"
+    print(f"  Avg cap  : {cap_s}")
+    print(f"  Best     : {_fmt_pnl(best.pnl)}  [{best.market_id}]")
+    print(f"  Worst    : {_fmt_pnl(worst.pnl)}  [{worst.market_id}]")
+
+    # --- per-series breakdown ---
+    series_map: dict = {}
+    for r in resolved:
+        root = _series_root_hist(r.market_id)
+        if root not in series_map:
+            series_map[root] = {"count": 0, "pnl": 0.0}
+        series_map[root]["count"] += 1
+        series_map[root]["pnl"]   += r.pnl
+
+    if len(series_map) > 1:
+        print(f"\n  {thin}")
+        print("  BY SERIES")
+        print(f"  {thin}")
+        for root, agg in sorted(series_map.items(), key=lambda x: -abs(x[1]["pnl"])):
+            print(f"  {root:<30}  {agg['count']:>2} trade(s)   {_fmt_pnl(agg['pnl'])}")
+
+    # --- individual trades ---
+    print(f"\n  {thin}")
+    print("  TRADES")
+    print(f"  {thin}")
+    for r in resolved:
+        if r.pnl > 0.005:
+            result = "WIN    "
+        elif r.pnl < -0.005:
+            result = "LOSS   "
+        else:
+            result = "SCRATCH"
+        cap_s = f"{r.capture:.0%}" if r.capture is not None else "n/a"
+        ts    = r.resolved_at.strftime("%H:%M:%S") if r.resolved_at else "?"
+        print(f"  {result}  {_fmt_pnl(r.pnl):<10}  cap={cap_s:<5}  "
+              f"conf={r.confidence:.2f}  entry={r.entry_price:.3f}  exit={r.exit_price:.3f}")
+        print(f"    src={r.source}  closed={ts}  [{r.market_id}]")
+
+    print(f"\n  {thin}")
+    print(f"  Session P&L: {_fmt_pnl(total_pnl)} across {len(resolved)} trade(s)")
     print(sep)
     print()
 
