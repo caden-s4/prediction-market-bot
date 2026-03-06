@@ -274,6 +274,8 @@ class FREDEconomicSource(DataSource):
                     )
                     return None
                 latest_level, prior_level, obs_date = pair
+                if self._obs_too_old_for_market(series_id, obs_date, market):
+                    return None
                 monthly_change = latest_level - prior_level
                 logger.info(
                     "FREDEconSource: PAYEMS: %.0f - %.0f = %+.0fk jobs added "
@@ -313,6 +315,9 @@ class FREDEconomicSource(DataSource):
             if obs is None:
                 return None
             value, obs_date = obs
+
+            if self._obs_too_old_for_market(series_id, obs_date, market):
+                return None
 
             ground_truth_prob = 1.0 if (value > threshold) == is_above else 0.0
             outcome_str = "YES" if ground_truth_prob == 1.0 else "NO"
@@ -547,6 +552,42 @@ class FREDEconomicSource(DataSource):
                 "FREDEconSource: error fetching %s pair: %s", series_id, exc
             )
             return None
+
+    def _obs_too_old_for_market(
+        self, series_id: str, obs_date: datetime, market: Market
+    ) -> bool:
+        """Return True if the FRED observation belongs to a prior release cycle.
+
+        For monthly series: if obs_date is more than 45 days before the market's
+        resolution date the data is from the wrong month.  Example: January
+        payrolls (obs ~Jan 31) must not price a February payrolls market that
+        resolves in March (~45 days later).
+
+        Non-monthly series (daily, weekly, quarterly) are not gated here —
+        their existing staleness check in _fetch_series/_fetch_two_observations
+        is sufficient.
+        """
+        meta = FRED_SERIES.get(series_id, {})
+        if meta.get("frequency") != "monthly":
+            return False
+        try:
+            resolution_date = market.resolution_date
+            # Normalise to naive datetime for arithmetic with obs_date (also naive)
+            if getattr(resolution_date, "tzinfo", None) is not None:
+                resolution_date = resolution_date.replace(tzinfo=None)
+            delta_days = (resolution_date - obs_date).days
+            if delta_days > 45:
+                logger.info(
+                    "FREDEconSource: %s observation %s too old for market "
+                    "resolving %s — skipping",
+                    series_id,
+                    obs_date.strftime("%Y-%m-%d"),
+                    market.resolution_date.strftime("%Y-%m-%d"),
+                )
+                return True
+        except Exception:
+            pass
+        return False
 
     @staticmethod
     def _extract_threshold_and_direction(
