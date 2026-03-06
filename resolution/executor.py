@@ -56,12 +56,15 @@ MAX_POSITION_FRACTION = 0.20      # hard cap: 20% of total bankroll per position
 # only the tiers that are "due" based on elapsed time actually run.
 
 TIER_1_INTERVAL = 15       # seconds – active-watch markets (<2h remaining)
-TIER_2_INTERVAL = 300      # seconds – regular-scan markets (2–24h remaining)
+TIER_2_INTERVAL = 150      # seconds – regular-scan markets (2–24h remaining)
+                            # Halved from 300s: doubles the T2 batch per cycle so
+                            # the full T2 pool is swept twice as fast at any scan rate.
 TIER_3_INTERVAL = 1800     # seconds – discovery markets (>24h remaining)
 
 # Full platform fetch to discover markets not yet in the registry.
-# Runs at the same cadence as Tier 3 (30 min) by default.
-DISCOVERY_INTERVAL = 1800  # seconds
+# 900s (15 min): new markets enter the pool every 15 min instead of 30 min,
+# halving the window where fresh listings are invisible to the scanner.
+DISCOVERY_INTERVAL = 900   # seconds
 
 # Stagger API calls within a tier batch to avoid burst patterns that
 # look like abuse to rate limiters.
@@ -387,10 +390,10 @@ class ResolutionBot:
         only the work that is actually *due* in this cycle runs:
 
           Always:     Tier 1 market refresh + gap detection (small fast set)
-                      Rotating Tier 2 batch (covers all T2 in TIER_2_INTERVAL)
+                      Rotating Tier 2 batch (covers all T2 in TIER_2_INTERVAL=150s)
                       Rotating Tier 3 batch (covers all T3 in TIER_3_INTERVAL)
                       Position monitoring
-          Periodically: Discovery scan (full platform fetch, every DISCOVERY_INTERVAL)
+          Periodically: Discovery scan (full platform fetch, every DISCOVERY_INTERVAL=900s)
 
         Parameters
         ----------
@@ -490,9 +493,12 @@ class ResolutionBot:
             for m in t3_markets:
                 self._registry.ingest(m)   # ingest recomputes tier → may promote
 
-        # Active markets for this cycle = Tier 1 (all) + Tier 2 batch.
-        # These are the only markets that get full gap detection + GT evaluation.
-        active_markets = t1_markets + t2_markets
+        # Active markets for this cycle = Tier 1 (all) + Tier 2 batch + Tier 3 batch.
+        # T3 markets are included so that long-dated markets receive GT evaluation
+        # every cycle instead of only during discovery.  The T3 batch is already
+        # a small rotating slice (TIER_3_INTERVAL=1800s ÷ cycle), so the added
+        # API load per cycle is modest.
+        active_markets = t1_markets + t2_markets + (t3_markets if t3_batch_raw else [])
         summary["markets_scanned"] = len(active_markets)
         summary["t1_scanned"]      = len(t1_markets)
         summary["t2_scanned"]      = len(t2_markets)
@@ -814,9 +820,10 @@ class ResolutionBot:
 
         # Coverage diagnostic counters — reset to 0 on every call; these are
         # per-cycle (per-batch) counts, never cumulative across cycles.
-        n_novelty: int = 0       # novelty prop-bets filtered at ingest; always 0 here
-        n_no_source: int = 0     # no data source covers this market
-        n_no_prob: int = 0       # source found but couldn't extract a probability
+        n_novelty: int = 0              # novelty prop-bets filtered at ingest; always 0 here
+        n_no_source_fast_skip: int = 0  # skipped instantly — no source claims this market
+        n_no_source: int = 0            # source claimed it but fetch() returned None (slow)
+        n_no_prob: int = 0              # source found but couldn't extract a probability
         n_covered: int = 0       # source returned a usable probability
         n_gap_too_small: int = 0 # covered but gap < minimum trading threshold
         coverage_sources: Dict[str, int] = {}  # source_name → count of markets covered
@@ -918,7 +925,8 @@ class ResolutionBot:
             # ── Normal GT fetch path ──────────────────────────────────────────
             else:
                 if not self._ground_truth.can_any_source_handle(market):
-                    n_no_source += 1
+                    # Fast-path skip: zero network calls, zero wait.
+                    n_no_source_fast_skip += 1
                     if prefix is not None:
                         _bracket_gt[prefix] = None
                     continue
@@ -992,10 +1000,11 @@ class ResolutionBot:
         )
         logger.info(
             "ResolutionBot: GT coverage summary — "
-            "excluded_novelty=%d no_source=%d no_prob=%d covered=%d (sources: %s) "
+            "excluded_novelty=%d no_source_fast_skip=%d no_source=%d "
+            "no_prob=%d covered=%d (sources: %s) "
             "gap_too_small=%d actionable=%d",
-            n_novelty, n_no_source, n_no_prob, n_covered, sources_str,
-            n_gap_too_small, len(signals),
+            n_novelty, n_no_source_fast_skip, n_no_source, n_no_prob,
+            n_covered, sources_str, n_gap_too_small, len(signals),
         )
 
         # Aggregate per-source timing log (only real HTTP fetches, not cache hits).
@@ -1145,8 +1154,16 @@ class ResolutionBot:
         # 9.5% at 30 min (min=4.4%).  This gate runs after confidence (so a
         # high-confidence early signal still needs a real gap) and before the
         # order-book + EV checks (no point fetching books for a gap we'll reject).
+        #
+        # Cross-platform ghost bypass: in dry_run mode, cross-platform signals
+        # skip this gate entirely.  The gap formula grows unboundedly (>24h needs
+        # 97%+), which would block all long-dated cross-platform pairs like Trump
+        # presidency markets before we can validate whether they're profitable.
+        # Ghost trades are zero-risk; we want the track record.  Live execution
+        # still enforces the full gate.
         _min_gap = _minimum_gap_for_entry(market.hours_to_resolution)
-        if signal.effective_gap < _min_gap:
+        _cross_ghost_bypass = self._dry_run and is_cross
+        if not _cross_ghost_bypass and signal.effective_gap < _min_gap:
             logger.info(
                 "ResolutionBot: SKIP %s — gap %.1f%% below time-adjusted "
                 "minimum %.1f%% (%.2fh remaining)",
@@ -1156,6 +1173,16 @@ class ResolutionBot:
                 market.hours_to_resolution,
             )
             return None
+        if _cross_ghost_bypass and signal.effective_gap < _min_gap:
+            logger.info(
+                "ResolutionBot: CROSS-PLATFORM GHOST GAP BYPASS %s — "
+                "gap %.1f%% below live minimum %.1f%% (%.2fh remaining) "
+                "— recording ghost trade for accuracy validation",
+                mid,
+                signal.effective_gap * 100,
+                _min_gap * 100,
+                market.hours_to_resolution,
+            )
         # ──────────────────────────────────────────────────────────────────────
 
         # ── Human review check (LARGE_DIVERGENCE) ─────────────────────────────
