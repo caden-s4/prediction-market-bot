@@ -24,12 +24,19 @@ Promotion rules:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List
 
 from data.markets.base import Market
+
+# Sticky-T1 persistence file — lives in the project root.
+# Stores a JSON list of market IDs that have sticky_t1=True so they survive
+# a bot restart and are immediately re-promoted to T1 on the next ingest.
+_STICKY_FILE = Path(__file__).parent.parent / ".tier_sticky.json"
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +87,9 @@ class TierRegistry:
 
     def __init__(self) -> None:
         self._entries: Dict[str, MarketEntry] = {}   # market_id → entry
+        # Market IDs loaded from disk at startup — applied to newly ingested
+        # markets in ingest() so they are immediately re-promoted to T1.
+        self._sticky_ids: frozenset = self._load_sticky_file()
 
     # ── Tier assignment ────────────────────────────────────────────────────────
 
@@ -127,10 +137,17 @@ class TierRegistry:
                     "Check hours_to_resolution calculation.",
                     market.market_id, market.hours_to_resolution, TIER_1_MAX_HOURS,
                 )
-            self._entries[market.market_id] = MarketEntry(market=market, tier=tier)
+            # Auto-restore sticky_t1 from disk for markets seen in a prior session.
+            is_sticky = market.market_id in self._sticky_ids
+            if is_sticky:
+                tier = 1
+            self._entries[market.market_id] = MarketEntry(
+                market=market, tier=tier, sticky_t1=is_sticky
+            )
             logger.debug(
-                "TierRegistry: new market %s → T%d (%.1fh left)",
+                "TierRegistry: new market %s → T%d (%.1fh left%s)",
                 market.market_id, tier, market.hours_to_resolution,
+                ", sticky restored" if is_sticky else "",
             )
             return tier
 
@@ -180,6 +197,7 @@ class TierRegistry:
                     "TierRegistry: %s T%d → T1 (gap signal urgent, %.1fh remaining)",
                     market_id, old_tier, entry.market.hours_to_resolution,
                 )
+            self._save_sticky()
 
     def clear_urgent(self, market_id: str) -> None:
         """
@@ -212,8 +230,7 @@ class TierRegistry:
 
         Call this when the gap is confirmed closed (position entered, gap < 4%
         for multiple consecutive cycles, or the market is near resolution and
-        should be evicted soon anyway).  The bot restart also clears sticky_t1
-        implicitly since it lives only in memory.
+        should be evicted soon anyway).
         """
         entry = self._entries.get(market_id)
         if entry and entry.sticky_t1:
@@ -228,6 +245,7 @@ class TierRegistry:
                         "(gap confirmed closed, %.1fh remaining)",
                         market_id, new_tier, entry.market.hours_to_resolution,
                     )
+            self._save_sticky()
 
     # ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -293,6 +311,40 @@ class TierRegistry:
             counts[f"t{e.tier}"] = counts.get(f"t{e.tier}", 0) + 1
         counts["total"] = len(self._entries)
         return counts
+
+    # ── Sticky-T1 disk persistence ─────────────────────────────────────────────
+
+    def _load_sticky_file(self) -> frozenset:
+        """Load sticky market IDs from .tier_sticky.json. Returns empty set on any error."""
+        try:
+            if _STICKY_FILE.exists():
+                data = json.loads(_STICKY_FILE.read_text())
+                if isinstance(data, list):
+                    ids = frozenset(str(x) for x in data)
+                    logger.info(
+                        "TierRegistry: loaded %d sticky T1 market(s) from disk", len(ids)
+                    )
+                    return ids
+                logger.warning(
+                    "TierRegistry: %s has unexpected format — starting empty",
+                    _STICKY_FILE.name,
+                )
+        except Exception as exc:
+            logger.warning(
+                "TierRegistry: could not load %s: %s — starting with empty sticky set",
+                _STICKY_FILE.name, exc,
+            )
+        return frozenset()
+
+    def _save_sticky(self) -> None:
+        """Write current sticky market IDs to .tier_sticky.json immediately."""
+        ids = [mid for mid, e in self._entries.items() if e.sticky_t1]
+        try:
+            _STICKY_FILE.write_text(json.dumps(ids))
+        except Exception as exc:
+            logger.warning(
+                "TierRegistry: could not write %s: %s", _STICKY_FILE.name, exc
+            )
 
     def get_sticky_market_ids(self) -> List[str]:
         """Return market IDs where sticky_t1 is True (for persistence across restarts)."""

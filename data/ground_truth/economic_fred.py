@@ -219,6 +219,9 @@ class FREDEconomicSource(DataSource):
         # value=None means the series was fetched but found stale; avoids
         # re-hitting the API until cache_hours have elapsed.
         self._cache: Dict[str, Tuple[Optional[float], Optional[datetime], datetime]] = {}
+        # Cache for series that need two observations (MoM delta).
+        # series_id → (latest, prior, obs_date_or_None, fetched_at: datetime)
+        self._pair_cache: Dict[str, Tuple[Optional[float], Optional[float], Optional[datetime], datetime]] = {}
         logger.info(
             "FREDEconSource: initialized with %d series, datetime-based cache enabled",
             len(FRED_SERIES),
@@ -246,11 +249,6 @@ class FREDEconomicSource(DataSource):
                 )
                 return None
 
-            obs = self._fetch_series(series_id)
-            if obs is None:
-                return None
-            value, obs_date = obs
-
             threshold, is_above = self._extract_threshold_and_direction(market)
             if threshold is None:
                 logger.debug(
@@ -259,10 +257,70 @@ class FREDEconomicSource(DataSource):
                 )
                 return None
 
-            ground_truth_prob = 1.0 if (value > threshold) == is_above else 0.0
-            direction_str = "above" if is_above else "below"
-            outcome_str = "YES" if ground_truth_prob == 1.0 else "NO"
             meta = FRED_SERIES[series_id]
+            direction_str = "above" if is_above else "below"
+
+            # ── PAYEMS: compare month-over-month change, not the raw level ────
+            # PAYEMS reports the absolute level of total nonfarm payrolls (thousands).
+            # Markets ask "were X jobs added?" — that requires the MoM delta.
+            # Fetch two observations; return None if fewer than two are available.
+            if series_id == "PAYEMS":
+                pair = self._fetch_two_observations("PAYEMS")
+                if pair is None:
+                    logger.info(
+                        "FREDEconSource: PAYEMS skipped for %s — "
+                        "insufficient observations for month-over-month calculation",
+                        market.market_id,
+                    )
+                    return None
+                latest_level, prior_level, obs_date = pair
+                if self._obs_too_old_for_market(series_id, obs_date, market):
+                    return None
+                monthly_change = latest_level - prior_level
+                logger.info(
+                    "FREDEconSource: PAYEMS: %.0f - %.0f = %+.0fk jobs added "
+                    "vs threshold %.0fk (market=%s obs=%s)",
+                    latest_level, prior_level, monthly_change, threshold,
+                    market.market_id, obs_date.strftime("%Y-%m-%d"),
+                )
+                ground_truth_prob = 1.0 if (monthly_change > threshold) == is_above else 0.0
+                outcome_str = "YES" if ground_truth_prob == 1.0 else "NO"
+                return GroundTruthResult(
+                    ground_truth_prob=ground_truth_prob,
+                    confidence=_CONFIDENCE,
+                    source_type=SourceType.HARD,
+                    source_name="FRED/PAYEMS",
+                    source_url="https://fred.stlouisfed.org/series/PAYEMS",
+                    raw_data={
+                        "series_id": "PAYEMS",
+                        "series_name": meta["name"],
+                        "latest_level": latest_level,
+                        "prior_level": prior_level,
+                        "monthly_change": monthly_change,
+                        "obs_date": obs_date.strftime("%Y-%m-%d"),
+                        "threshold": threshold,
+                        "direction": direction_str,
+                    },
+                    reasoning=(
+                        f"PAYEMS: {latest_level:.0f} - {prior_level:.0f} = "
+                        f"{monthly_change:+.0f}k jobs added "
+                        f"(obs {obs_date:%Y-%m-%d}), "
+                        f"threshold={threshold:.0f}k ({direction_str}). "
+                        f"→ {outcome_str} confidence={_CONFIDENCE:.2f}"
+                    ),
+                    data_published_at=obs_date.replace(tzinfo=timezone.utc),
+                )
+
+            obs = self._fetch_series(series_id)
+            if obs is None:
+                return None
+            value, obs_date = obs
+
+            if self._obs_too_old_for_market(series_id, obs_date, market):
+                return None
+
+            ground_truth_prob = 1.0 if (value > threshold) == is_above else 0.0
+            outcome_str = "YES" if ground_truth_prob == 1.0 else "NO"
 
             logger.info(
                 "FREDEconSource: %s series=%s value=%.4f threshold=%.4f "
@@ -403,6 +461,133 @@ class FREDEconomicSource(DataSource):
         except Exception as exc:
             logger.warning("FREDEconSource: error fetching %s: %s", series_id, exc)
             return None
+
+    def _fetch_two_observations(
+        self, series_id: str
+    ) -> Optional[Tuple[float, float, datetime]]:
+        """
+        Fetch the two most recent valid FRED observations for series_id.
+
+        Returns (latest_value, prior_value, latest_obs_date), or None if fewer
+        than two valid observations are available or the data is too stale.
+        Used for series like PAYEMS where the market resolves on the MoM delta,
+        not the absolute level.
+        """
+        meta = FRED_SERIES.get(series_id, {})
+        cache_hours = meta.get("cache_hours", 1)
+
+        now = datetime.utcnow()
+        cached = self._pair_cache.get(series_id)
+        if cached is not None:
+            latest, prior, obs_date, fetched_at = cached
+            age_hours = (now - fetched_at).total_seconds() / 3600
+            if age_hours < cache_hours:
+                if latest is None or prior is None:
+                    logger.debug(
+                        "FREDEconSource: %s pair known-stale in cache (age=%.1fh)",
+                        series_id, age_hours,
+                    )
+                    return None
+                logger.debug(
+                    "FREDEconSource: %s pair from cache (age=%.1fh)", series_id, age_hours
+                )
+                return latest, prior, obs_date
+
+        try:
+            resp = requests.get(
+                _FRED_OBS_URL,
+                params={
+                    "series_id": series_id,
+                    "api_key": _FRED_API_KEY,
+                    "file_type": "json",
+                    "sort_order": "desc",
+                    "limit": 2,
+                },
+                timeout=_TIMEOUT,
+            )
+            resp.raise_for_status()
+            observations = resp.json().get("observations", [])
+            valid_obs = [o for o in observations if o.get("value", "") not in (".", "")]
+
+            if len(valid_obs) < 2:
+                logger.warning(
+                    "FREDEconSource: %s returned %d valid observation(s) — "
+                    "need 2 for month-over-month delta; returning None",
+                    series_id, len(valid_obs),
+                )
+                self._pair_cache[series_id] = (None, None, None, now)
+                return None
+
+            latest_val = float(valid_obs[0]["value"])
+            prior_val  = float(valid_obs[1]["value"])
+            obs_date   = datetime.strptime(valid_obs[0]["date"], "%Y-%m-%d")
+
+            # Staleness check on the latest observation
+            lag_days     = meta.get("lag_days", 7)
+            max_age_days = lag_days + 7
+            data_age_days = (datetime.utcnow() - obs_date).days
+            if data_age_days > max_age_days:
+                logger.warning(
+                    "FREDEconSource: %s data from %s is %dd old — exceeds "
+                    "%dd limit (lag=%d+7); caching None (stale)",
+                    series_id, valid_obs[0]["date"], data_age_days, max_age_days, lag_days,
+                )
+                self._pair_cache[series_id] = (None, None, obs_date, now)
+                return None
+
+            self._pair_cache[series_id] = (latest_val, prior_val, obs_date, now)
+            logger.debug(
+                "FREDEconSource: fetched %s pair latest=%.0f prior=%.0f (obs %s)",
+                series_id, latest_val, prior_val, valid_obs[0]["date"],
+            )
+            return latest_val, prior_val, obs_date
+
+        except requests.exceptions.Timeout:
+            logger.warning(
+                "FREDEconSource: timeout fetching %s pair (limit=%ds)", series_id, _TIMEOUT
+            )
+            return None
+        except Exception as exc:
+            logger.warning(
+                "FREDEconSource: error fetching %s pair: %s", series_id, exc
+            )
+            return None
+
+    def _obs_too_old_for_market(
+        self, series_id: str, obs_date: datetime, market: Market
+    ) -> bool:
+        """Return True if the FRED observation belongs to a prior release cycle.
+
+        For monthly series: if obs_date is more than 45 days before the market's
+        resolution date the data is from the wrong month.  Example: January
+        payrolls (obs ~Jan 31) must not price a February payrolls market that
+        resolves in March (~45 days later).
+
+        Non-monthly series (daily, weekly, quarterly) are not gated here —
+        their existing staleness check in _fetch_series/_fetch_two_observations
+        is sufficient.
+        """
+        meta = FRED_SERIES.get(series_id, {})
+        if meta.get("frequency") != "monthly":
+            return False
+        try:
+            resolution_date = market.resolution_date
+            # Normalise to naive datetime for arithmetic with obs_date (also naive)
+            if getattr(resolution_date, "tzinfo", None) is not None:
+                resolution_date = resolution_date.replace(tzinfo=None)
+            delta_days = (resolution_date - obs_date).days
+            if delta_days > 45:
+                logger.info(
+                    "FREDEconSource: %s observation %s too old for market "
+                    "resolving %s — skipping",
+                    series_id,
+                    obs_date.strftime("%Y-%m-%d"),
+                    market.resolution_date.strftime("%Y-%m-%d"),
+                )
+                return True
+        except Exception:
+            pass
+        return False
 
     @staticmethod
     def _extract_threshold_and_direction(

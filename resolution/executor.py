@@ -107,30 +107,35 @@ MIN_EV = 0.02
 CONFIDENCE_GATE_LIVE                = 0.80
 CONFIDENCE_GATE_GHOST_CROSS_PLATFORM = 0.50
 
-# Time-adjusted entry gap constants (mirrors gap_detector.py).
-# min_gap = _GAP_BASE + hours_remaining × _GAP_TIME_PREMIUM
-# Applied in _try_execute() after the confidence gate.
-_GAP_BASE         = 0.04   # 4% floor at any horizon
-_GAP_TIME_PREMIUM = 0.030  # +3.0% per hour remaining (doubled — curve was too flat)
+# Time-adjusted entry gap uses a tiered curve (see _minimum_gap_for_entry).
 
-# Per-series exposure cap: bracket markets from the same series
-# (same FRED indicator, gas series, etc.) are 100% correlated.  Without a cap
-# the bot can fire $480 across 10 payroll brackets from a single FRED read,
-# meaning one bad data point wipes the entire series allocation in one cycle.
-# Cap total exposure per series at 30% of bankroll (1.5× the per-position cap).
-MAX_SERIES_EXPOSURE_FRACTION = 0.30
+# Per-series exposure cap: all markets sharing a root ticker (e.g. KXPAYROLLS)
+# are driven by the same underlying data point and are 100% correlated.  Without
+# a cap a single bad FRED observation can commit the entire bankroll across all
+# strike levels and expiry dates.  Cap at 15% of bankroll across the root series.
+MAX_SERIES_EXPOSURE_FRACTION = 0.15
 
 
 def _minimum_gap_for_entry(hours_remaining: float) -> float:
     """
-    Minimum fee-adjusted gap required at this time horizon.
+    Minimum fee-adjusted gap required at this time horizon — tiered curve.
 
-    Larger gaps are required early — the further from resolution, the more
-    time for the edge to evaporate.
+    Steeper requirements further from resolution; cliff steps at tier
+    boundaries intentionally penalise long-horizon signals hard.
 
-      4.0 h → 16.0%    1.0 h → 7.0%    0.25 h (15 min) → 4.75%
+      < 1h             0.04                      (4.0% floor)
+      1 – 4 h          0.04 + h × 0.015          (2h → 7.0%,  4h → 10.0%)
+      4 – 8 h          0.10 + h × 0.020          (4h → 18.0%, 8h → 26.0%)
+      > 8 h            0.25 + h × 0.030          (8h → 49.0%, 15h → 70.0%)
     """
-    return _GAP_BASE + hours_remaining * _GAP_TIME_PREMIUM
+    if hours_remaining < 1.0:
+        return 0.04
+    elif hours_remaining < 4.0:
+        return 0.04 + hours_remaining * 0.015
+    elif hours_remaining <= 8.0:
+        return 0.10 + hours_remaining * 0.020
+    else:
+        return 0.25 + hours_remaining * 0.030
 
 
 def _check_minimum_ev(
@@ -211,6 +216,22 @@ class ResolvedPosition:
     confidence: float    # source_confidence at entry
     source: str          # e.g. "FRED/PAYEMS", "cross-platform"
     resolved_at: datetime
+
+
+def _series_root(market_id: str) -> Optional[str]:
+    """Return the root ticker for any hyphenated market ID, or None for bare IDs.
+
+    Groups all markets that share the same underlying data series regardless of
+    expiry date or strike level.  Used for the per-series exposure cap.
+
+      KXPAYROLLS-26FEB-T100000  →  "KXPAYROLLS"
+      KXAAAGASW-26MAR02-2.888   →  "KXAAAGASW"
+      KXNASDAQ100U-26MAR02H1600 →  "KXNASDAQ100U"
+      KXSOME-SINGLETON          →  "KXSOME"
+      SOMEMARKET                →  None  (no hyphen — not part of a series)
+    """
+    idx = market_id.find("-")
+    return market_id[:idx] if idx != -1 else None
 
 
 def _bracket_prefix(market_id: str) -> Optional[str]:
@@ -1128,13 +1149,11 @@ class ResolutionBot:
         if signal.effective_gap < _min_gap:
             logger.info(
                 "ResolutionBot: SKIP %s — gap %.1f%% below time-adjusted "
-                "minimum %.1f%% (%.2fh remaining; base=%.0f%%+%.0f%%/h)",
+                "minimum %.1f%% (%.2fh remaining)",
                 mid,
                 signal.effective_gap * 100,
                 _min_gap * 100,
                 market.hours_to_resolution,
-                _GAP_BASE * 100,
-                _GAP_TIME_PREMIUM * 100,
             )
             return None
         # ──────────────────────────────────────────────────────────────────────
@@ -1289,35 +1308,23 @@ class ResolutionBot:
             return None
 
         # ── Per-series exposure cap ────────────────────────────────────────────
-        # Bracket markets in the same series (same underlying FRED indicator,
-        # gas price, etc.) are perfectly correlated.  Without a cap a single bad
-        # FRED observation can commit the whole bankroll across all strike levels.
-        # Cap total active exposure per series at MAX_SERIES_EXPOSURE_FRACTION.
-        prefix = _bracket_prefix(mid)
-        if prefix is not None:
+        # All markets sharing a root ticker (e.g. KXPAYROLLS) are driven by the
+        # same underlying data point and are 100% correlated.  Cap total active
+        # exposure per root-series at MAX_SERIES_EXPOSURE_FRACTION (15%).
+        series_root = _series_root(mid)
+        if series_root is not None:
             series_exposure = sum(
                 r.size_usd for r_id, r in self._positions.items()
-                if _bracket_prefix(r_id) == prefix
+                if _series_root(r_id) == series_root
             )
-            max_series = self._bankroll.total_usd * MAX_SERIES_EXPOSURE_FRACTION
-            remaining = max_series - series_exposure
-            if remaining <= 0:
+            max_series    = self._bankroll.total_usd * MAX_SERIES_EXPOSURE_FRACTION
+            existing_pct  = series_exposure / self._bankroll.total_usd * 100
+            if series_exposure + size_usd > max_series:
                 logger.info(
-                    "ResolutionBot: SKIP %s – series cap reached "
-                    "(series=%s exposure=$%.0f limit=$%.0f)",
-                    mid, prefix, series_exposure, max_series,
-                )
-                return None
-            if size_usd > remaining:
-                logger.info(
-                    "ResolutionBot: %s size capped by series limit "
-                    "(series=%s $%.2f → $%.2f, used=$%.0f limit=$%.0f)",
-                    mid, prefix, size_usd, remaining, series_exposure, max_series,
-                )
-                size_usd = round(remaining, 2)
-            if size_usd < 1.0:
-                logger.info(
-                    "ResolutionBot: SKIP %s – size below $1 after series cap", mid
+                    "ResolutionBot: SKIP %s — series exposure cap reached "
+                    "(%.0f%% already in %s, max %d%%)",
+                    mid, existing_pct, series_root,
+                    round(MAX_SERIES_EXPOSURE_FRACTION * 100),
                 )
                 return None
         # ──────────────────────────────────────────────────────────────────────
