@@ -27,6 +27,7 @@ A result validator runs as a post-step before returning any tradeable result:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import replace as dc_replace
 from typing import List, Optional
@@ -43,6 +44,26 @@ from .rotten_tomatoes import RottenTomatoesSource
 from .sports import SportsDataSource
 
 logger = logging.getLogger(__name__)
+
+# ── Per-category source toggles ───────────────────────────────────────────────
+# Read once at import time from environment / .env file.
+# All default to True so the bot works out-of-the-box without any extra config.
+# Set to "false" / "0" / "no" in .env to disable an entire source category.
+
+def _bool_env(name: str, default: bool = True) -> bool:
+    val = os.environ.get(name, "").strip().lower()
+    if val in ("false", "0", "no", "off"):
+        return False
+    if val in ("true", "1", "yes", "on"):
+        return True
+    return default
+
+_GT_SPORTS_ENABLED      = _bool_env("GT_SPORTS_ENABLED",      default=True)
+_GT_ECONOMIC_ENABLED    = _bool_env("GT_ECONOMIC_ENABLED",    default=True)
+_GT_FINANCIAL_ENABLED   = _bool_env("GT_FINANCIAL_ENABLED",   default=True)
+_GT_CONGRESS_ENABLED    = _bool_env("GT_CONGRESS_ENABLED",    default=True)
+_GT_REGULATORY_ENABLED  = _bool_env("GT_REGULATORY_ENABLED",  default=True)
+_GT_ENTERTAINMENT_ENABLED = _bool_env("GT_ENTERTAINMENT_ENABLED", default=True)
 
 # Novelty / subjective prop-bet patterns that no data source can resolve.
 # Markets matching these are logged as excluded_novelty and skipped entirely.
@@ -79,6 +100,31 @@ _NOVELTY_RE = re.compile(
 )
 
 
+def _build_default_sources() -> List[DataSource]:
+    """Build the default source list, respecting GT_*_ENABLED toggles."""
+    sources: List[DataSource] = []
+    if _GT_SPORTS_ENABLED:
+        sources.append(SportsDataSource())
+    if _GT_ECONOMIC_ENABLED:
+        sources.append(EconomicDataSource())
+        sources.append(EIADataSource())      # active only when EIA_API_KEY is set
+        sources.append(FREDEconomicSource()) # active only when FRED_API_KEY is set
+    if _GT_FINANCIAL_ENABLED:
+        sources.append(FinancialDataSource())
+    if _GT_CONGRESS_ENABLED:
+        sources.append(CongressSource())
+    if _GT_REGULATORY_ENABLED:
+        sources.append(FederalRegisterSource())
+    if _GT_ENTERTAINMENT_ENABLED:
+        sources.append(RottenTomatoesSource())
+    return sources
+
+
+def _log_active_sources(sources: List[DataSource]) -> None:
+    names = [type(s).__name__ for s in sources]
+    logger.info("GroundTruthRouter: active sources — %s", ", ".join(names) or "none")
+
+
 class GroundTruthRouter:
     """
     Tries each data source in order and returns the best result.
@@ -87,16 +133,11 @@ class GroundTruthRouter:
     """
 
     def __init__(self, sources: Optional[List[DataSource]] = None) -> None:
-        self._sources: List[DataSource] = sources or [
-            SportsDataSource(),
-            EconomicDataSource(),
-            EIADataSource(),           # weekly gas prices (active only when EIA_API_KEY is set)
-            FREDEconomicSource(),      # 0.90 confidence — FRED JSON API (requires FRED_API_KEY)
-            FinancialDataSource(),
-            CongressSource(),          # bill passage status (specific, definitive outcomes)
-            FederalRegisterSource(),   # regulatory filings (broad political/legal coverage)
-            RottenTomatoesSource(),    # Tomatometer scores for RT-score markets
-        ]
+        if sources is not None:
+            self._sources = sources
+        else:
+            self._sources = _build_default_sources()
+        _log_active_sources(self._sources)
 
     def fetch(self, market: Market) -> Optional[GroundTruthResult]:
         """
