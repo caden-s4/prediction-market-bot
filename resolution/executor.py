@@ -219,6 +219,7 @@ class ResolvedPosition:
     confidence: float    # source_confidence at entry
     source: str          # e.g. "FRED/PAYEMS", "cross-platform"
     resolved_at: datetime
+    entered_at: Optional[datetime] = None  # when the trade was opened
 
 
 def _series_root(market_id: str) -> Optional[str]:
@@ -1734,6 +1735,7 @@ class ResolutionBot:
             confidence=rec.source_confidence,
             source=src,
             resolved_at=datetime.utcnow(),
+            entered_at=datetime.utcfromtimestamp(rec.entry_time),
         ))
 
         self._save_positions()
