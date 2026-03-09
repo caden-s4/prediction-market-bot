@@ -91,6 +91,11 @@ CYCLE_ERROR_FRACTION = 1.50
 # generates dozens of "Nasdaq below 27000" contracts all expressing the same bet.
 MAX_SIGNALS_PER_SOURCE_ACTION = 2
 
+# How many consecutive cycles a market must return no_source (slow path) before it
+# is promoted to the permanent-skip list and treated like no_source_fast_skip (0 ms).
+# At 5 cycles × ~0.1s × 500 markets = 250s of wasted fetch time eliminated.
+_NO_SOURCE_STREAK_THRESHOLD = 5
+
 # If the live order-book mid-price deviates more than this from the scanner price,
 # the scanner data is stale. Skip the trade rather than entering at a price that
 # no longer exists in the real order book.
@@ -353,6 +358,12 @@ class ResolutionBot:
         # urgent T1 flags are only cleared when GT actually returned a usable signal
         # (not when GT returned None due to the series-mismatch buffer or no source).
         self._last_gt_evaluated_ids: frozenset = frozenset()
+        # Consecutive no_source cycle counter per market_id.
+        # Incremented each cycle a market passes can_any_source_handle() but
+        # fetch() still returns None; reset to 0 when fetch() returns data.
+        # Once the count hits _NO_SOURCE_STREAK_THRESHOLD the market is promoted
+        # to permanent-skip (treated identically to no_source_fast_skip).
+        self._no_source_streak: Dict[str, int] = {}
         # Timestamp of when this instance was created — used by the startup
         # stabilization guard to delay new trade entry until the first full
         # scan cycle has completed and in-memory state is populated.
@@ -826,6 +837,7 @@ class ResolutionBot:
         # per-cycle (per-batch) counts, never cumulative across cycles.
         n_novelty: int = 0              # novelty prop-bets filtered at ingest; always 0 here
         n_no_source_fast_skip: int = 0  # skipped instantly — no source claims this market
+        n_no_source_perm_skip: int = 0  # streak >= threshold — promoted to permanent skip
         n_no_source: int = 0            # source claimed it but fetch() returned None (slow)
         n_no_prob: int = 0              # source found but couldn't extract a probability
         n_covered: int = 0       # source returned a usable probability
@@ -940,6 +952,26 @@ class ResolutionBot:
                     if prefix is not None:
                         _bracket_gt[prefix] = None
                     continue
+
+                # Permanent-skip: market has a source that claims it but fetch()
+                # has returned None for _NO_SOURCE_STREAK_THRESHOLD consecutive
+                # cycles.  Stop calling fetch() until the streak resets (i.e. until
+                # the market is refreshed or a source begins returning data).
+                if (
+                    self._no_source_streak.get(market.market_id, 0)
+                    >= _NO_SOURCE_STREAK_THRESHOLD
+                ):
+                    n_no_source_perm_skip += 1
+                    _source_timing["no_source_perm_skip"] = _source_timing.get(
+                        "no_source_perm_skip", 0.0
+                    )  # 0.0 — no fetch issued
+                    _source_fetch_count["no_source_perm_skip"] = (
+                        _source_fetch_count.get("no_source_perm_skip", 0) + 1
+                    )
+                    if prefix is not None:
+                        _bracket_gt[prefix] = None
+                    continue
+
                 _gt_t0 = time.monotonic()
                 gt = self._ground_truth.fetch(market)
                 _gt_elapsed = time.monotonic() - _gt_t0
@@ -956,8 +988,15 @@ class ResolutionBot:
                 if prefix is not None:
                     _bracket_gt[prefix] = gt
                 if gt is None:
+                    # Increment streak — if this market never yields data it will
+                    # be promoted to permanent-skip after _NO_SOURCE_STREAK_THRESHOLD cycles.
+                    self._no_source_streak[market.market_id] = (
+                        self._no_source_streak.get(market.market_id, 0) + 1
+                    )
                     n_no_source += 1
                     continue
+                # fetch() returned data — reset streak so the market stays live.
+                self._no_source_streak.pop(market.market_id, None)
                 if gt.ground_truth_prob is None:
                     n_no_prob += 1
                     continue
@@ -1010,10 +1049,11 @@ class ResolutionBot:
         )
         logger.info(
             "ResolutionBot: GT coverage summary — "
-            "excluded_novelty=%d no_source_fast_skip=%d no_source=%d "
-            "no_prob=%d covered=%d (sources: %s) "
+            "excluded_novelty=%d no_source_fast_skip=%d no_source_perm_skip=%d "
+            "no_source=%d no_prob=%d covered=%d (sources: %s) "
             "gap_too_small=%d actionable=%d",
-            n_novelty, n_no_source_fast_skip, n_no_source, n_no_prob,
+            n_novelty, n_no_source_fast_skip, n_no_source_perm_skip,
+            n_no_source, n_no_prob,
             n_covered, sources_str, n_gap_too_small, len(signals),
         )
 
