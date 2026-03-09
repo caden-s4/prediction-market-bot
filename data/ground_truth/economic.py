@@ -57,7 +57,7 @@ _SERIES_STALENESS: Dict[str, Tuple[int, int]] = {
     # Daily / near-real-time
     "DFF":          (24,    72),   # Fed Funds Rate: daily; stale after 3 days
     # Weekly
-    "GASREGCOVW":   (24,   144),   # US avg retail gas price: weekly (EIA/Monday); 6-day max
+    "GASREGCOVW":   (24,   192),   # US avg retail gas price: weekly (EIA/Monday); 8-day max
     "ICSA":         (24,   168),   # Initial Claims: weekly; stale after 7 days
     # Monthly
     "UNRATE":   (24,  1080),   # Unemployment: monthly; allow up to 45 days
@@ -175,13 +175,13 @@ class EconomicDataSource(DataSource):
                     "GASREGCOVW raw value: %s (date: %s) for %s",
                     latest_value, latest_date, market.market_id,
                 )
-                # Hard staleness cutoff for weekly series: if data is older than 6 days
-                # (144h) we are at the tail end of the weekly cycle (publication is
-                # expected the next Monday ~5pm ET).  Trading on week-old gas prices
-                # that are about to be superseded produces wrong directional signals.
-                # This check runs before _compute_prob so that even within the
-                # _compute_confidence window (< 144h) we don't bet against a near-
-                # certain market price that is anticipating the newer publication.
+                # Hard staleness cutoff for weekly series: if data is older than 8 days
+                # (192h) it is genuinely stale.  GASREGCOVW releases every Monday ~5pm ET;
+                # on a Saturday the most recent reading will be ~157h old, which is normal
+                # and must not be blocked.  192h gives a full Mon→Tue buffer before the
+                # next release is overdue.  This check runs before _compute_prob so that
+                # even within the _compute_confidence window we don't trade on data that
+                # is unambiguously superseded.
                 if latest_date:
                     try:
                         release_dt = datetime.strptime(latest_date, "%Y-%m-%d").replace(
@@ -190,10 +190,10 @@ class EconomicDataSource(DataSource):
                         hours_since_data = (
                             datetime.now(timezone.utc) - release_dt
                         ).total_seconds() / 3600
-                        if hours_since_data >= 144:
+                        if hours_since_data >= 192:
                             logger.info(
                                 "EconSource: GASREGCOVW data from %s is %.0fh old — "
-                                "exceeds 6-day weekly-series limit; skipping %s",
+                                "exceeds 8-day weekly-series limit; skipping %s",
                                 latest_date, hours_since_data, market.market_id,
                             )
                             return None
