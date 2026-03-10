@@ -51,6 +51,14 @@ logger = logging.getLogger(__name__)
 KELLY_FRACTION = 0.12             # 12% fractional Kelly (conservative for thin books)
 MAX_POSITION_FRACTION = 0.20      # hard cap: 20% of total bankroll per position
 
+# Hard stop for financial-source positions (Yahoo Finance / Twelve Data / Alpha Vantage).
+# If the market price moves this many points against our entry, exit immediately —
+# before the decay monitor even runs.  Overridable via FINANCIAL_HARD_STOP_THRESHOLD env var.
+FINANCIAL_HARD_STOP_THRESHOLD = 0.20
+
+# Source-name prefixes that identify a financial ground-truth source.
+_FINANCIAL_SOURCE_PREFIXES = ("Yahoo Finance/", "Twelve Data/", "Alpha Vantage/")
+
 # ── Tiered scan intervals ──────────────────────────────────────────────────────
 # The main loop sleeps TIER_1_INTERVAL between cycles.  Within each cycle,
 # only the tiers that are "due" based on elapsed time actually run.
@@ -1739,11 +1747,72 @@ class ResolutionBot:
 
     # ── Position monitoring ───────────────────────────────────────────────────
 
+    @staticmethod
+    def _is_financial_source(rec: "TradeRecord") -> bool:
+        """Return True if this position was opened from a financial price source."""
+        if not rec.signal or not rec.signal.ground_truth_result:
+            return False
+        src = rec.signal.ground_truth_result.source_name or ""
+        return src.startswith(_FINANCIAL_SOURCE_PREFIXES)
+
     def _monitor_positions(self) -> int:
-        """Run decay monitor on all open positions. Returns # of exits triggered."""
+        """Run hard-stop check then decay monitor on all open positions.
+
+        Financial hard stop fires first: if a financial-source position has
+        moved FINANCIAL_HARD_STOP_THRESHOLD points against entry, exit
+        immediately and skip the decay monitor for that position.
+        The decay monitor handles everything else.
+
+        Returns the total number of exits triggered.
+        """
         if not self._positions:
             return 0
 
+        exits = 0
+
+        # ── Pass 1: financial hard stop ───────────────────────────────────────
+        # Iterate over a snapshot so we can safely pop from self._positions.
+        for mid, rec in list(self._positions.items()):
+            if not self._is_financial_source(rec):
+                continue
+            current_price = self._get_current_price(rec.market)
+            if current_price is None:
+                continue
+
+            # Direction-aware adverse move (positive = moved against our position).
+            if rec.action == "buy_yes":
+                move = rec.entry_price - current_price
+            else:
+                move = current_price - rec.entry_price
+
+            if move < FINANCIAL_HARD_STOP_THRESHOLD:
+                continue
+
+            # Compute realised P&L using correct Kalshi contract economics.
+            if rec.action == "buy_yes":
+                nc = rec.size_usd / rec.entry_price if rec.entry_price > 1e-9 else 0.0
+                pnl = (current_price - rec.entry_price) * nc
+            else:
+                no_entry = 1.0 - rec.entry_price
+                nc = rec.size_usd / no_entry if no_entry > 1e-9 else 0.0
+                pnl = (rec.entry_price - current_price) * nc
+
+            src_name = rec.signal.ground_truth_result.source_name  # guaranteed non-None here
+            logger.warning(
+                "ResolutionBot: FINANCIAL_HARD_STOP %s [%s] — "
+                "entry=%.4f current=%.4f move=%.4f >= threshold=%.4f "
+                "contracts=%.2f pnl=$%.2f",
+                mid, src_name,
+                rec.entry_price, current_price, move, FINANCIAL_HARD_STOP_THRESHOLD,
+                nc, pnl,
+            )
+            self._exit_position(mid, pnl, current_price=current_price)
+            exits += 1
+
+        if not self._positions:
+            return exits
+
+        # ── Pass 2: decay monitor (remaining positions only) ─────────────────
         open_positions = []
         for rec in self._positions.values():
             current_price = self._get_current_price(rec.market)
@@ -1762,7 +1831,6 @@ class ResolutionBot:
             ))
 
         decisions = self._decay.evaluate(open_positions)
-        exits = 0
         for decision in decisions:
             mid = decision.position.market_id
             logger.info(
