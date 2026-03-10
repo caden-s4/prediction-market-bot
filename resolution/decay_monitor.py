@@ -18,11 +18,15 @@ Exit rules:
      exit, hold and let it resolve (only if source confidence was very high).
      If source confidence < 0.9, exit anyway to avoid oracle disputes.
 
-Theoretical maximum gain:
-  For a position bought at entry_price expecting convergence to ground_truth_prob:
-    theo_max = (ground_truth_prob - entry_price) * size_usd   (for YES buy)
+Theoretical maximum gain (Kalshi contract economics):
+  On Kalshi, buying a YES contract at price p costs p per contract.
+  num_contracts = size_usd / entry_price   (for YES buy)
+  num_contracts = size_usd / (1 - entry_price)   (for NO buy)
+
+  For a YES position:
+    theo_max = (ground_truth_prob - entry_price) * num_contracts
   Current gain:
-    current_gain = (current_price - entry_price) * size_usd
+    current_gain = (current_price - entry_price) * num_contracts
   Capture ratio = current_gain / theo_max
 """
 
@@ -105,13 +109,18 @@ class DecayMonitor:
         hours_left = pos.market.hours_to_resolution
         current_price = pos.current_price
 
-        # Direction-aware gain calculation
+        # Direction-aware gain calculation using Kalshi contract economics.
+        # Cost of a YES contract = entry_price per contract → num_contracts = size / entry_price.
+        # Cost of a NO contract  = (1 - entry_price) per contract → num_contracts = size / (1 - entry_price).
         if pos.action == "buy_yes":
-            theo_max = (pos.ground_truth_prob - pos.entry_price) * pos.size_usd
-            current_gain = (current_price - pos.entry_price) * pos.size_usd
+            num_contracts = pos.size_usd / pos.entry_price if pos.entry_price > 1e-9 else 0.0
+            theo_max = (pos.ground_truth_prob - pos.entry_price) * num_contracts
+            current_gain = (current_price - pos.entry_price) * num_contracts
         else:  # buy_no = sold YES
-            theo_max = (pos.entry_price - pos.ground_truth_prob) * pos.size_usd
-            current_gain = (pos.entry_price - current_price) * pos.size_usd
+            no_entry = 1.0 - pos.entry_price
+            num_contracts = pos.size_usd / no_entry if no_entry > 1e-9 else 0.0
+            theo_max = (pos.entry_price - pos.ground_truth_prob) * num_contracts
+            current_gain = (pos.entry_price - current_price) * num_contracts
 
         capture_ratio = current_gain / theo_max if theo_max > 1e-6 else 0.0
 

@@ -470,14 +470,7 @@ def _print_history(coordinator: BotCoordinator) -> None:
         cap_s     = f"{r.capture:.0%}" if r.capture is not None else "n/a"
         entered_s = r.entered_at.strftime("%m-%d %H:%M") if r.entered_at else "?"
         closed_s  = r.resolved_at.strftime("%m-%d %H:%M") if r.resolved_at else "?"
-        # Derive contract count: size_usd / entry_price (YES contracts) or / (1-entry_price) (NO)
-        if r.entry_price > 0:
-            if r.action == "buy_yes":
-                n_contracts = r.size_usd / r.entry_price
-            else:
-                n_contracts = r.size_usd / max(1.0 - r.entry_price, 0.001)
-        else:
-            n_contracts = 0.0
+        n_contracts = r.num_contracts
         direction = "YES" if r.action == "buy_yes" else "NO "
         print(f"  {result}  {_fmt_pnl(r.pnl):<10}  cap={cap_s:<5}  "
               f"conf={r.confidence:.2f}  {direction}  "

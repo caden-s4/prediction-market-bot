@@ -216,9 +216,10 @@ class ResolvedPosition:
     """A closed trade — appended to _resolved_positions for session-level history."""
     market_id: str
     action: str          # "buy_yes" | "buy_no"
-    size_usd: float      # dollars wagered
+    size_usd: float      # dollars wagered (cost basis)
     entry_price: float   # YES price at entry
     exit_price: float    # YES price at exit (or 1.0/0.0 at market resolution)
+    num_contracts: float # contracts held = size_usd / entry_price (YES) or / (1-entry_price) (NO)
     pnl: float           # realized P&L in dollars
     capture: float       # pnl / theoretical_max  (positive = with the signal)
     confidence: float    # source_confidence at entry
@@ -1513,9 +1514,15 @@ class ResolutionBot:
             order_id=order_id,
         )
         self._save_positions()
+        _entry = signal.target_price
+        if signal.action == "buy_yes":
+            _entry_nc = size_usd / _entry if _entry > 1e-9 else 0.0
+        else:
+            _no_e = 1.0 - _entry
+            _entry_nc = size_usd / _no_e if _no_e > 1e-9 else 0.0
         logger.info(
-            "ResolutionBot: TRADE %s %s @ %.4f size=$%.2f (order=%s)\n  → \"%s\"",
-            signal.action, mid, signal.target_price, size_usd, order_id,
+            "ResolutionBot: TRADE %s %s @ %.4f size=$%.2f contracts=%.2f (order=%s)\n  → \"%s\"",
+            signal.action, mid, _entry, size_usd, _entry_nc, order_id,
             market.question,
         )
         return {
@@ -1523,8 +1530,9 @@ class ResolutionBot:
             "question": market.question,
             "market_id": mid,
             "platform": market.platform,
-            "price": signal.target_price,
+            "price": _entry,
             "size_usd": size_usd,
+            "num_contracts": round(_entry_nc, 4),
             "hours_left": round(market.hours_to_resolution, 1),
             "source": gt.source_name if gt else "unknown",
         }
@@ -1786,16 +1794,24 @@ class ResolutionBot:
         self._bankroll.release(market_id, realized_pnl_usd=realized_pnl_usd)
 
         # Record in resolved history (session-only; drives 'history' command).
+        # Kalshi contract economics: cost per contract = entry_price (YES) or 1-entry_price (NO).
+        if rec.action == "buy_yes":
+            _nc = rec.size_usd / rec.entry_price if rec.entry_price > 1e-9 else 0.0
+        else:
+            _no_entry = 1.0 - rec.entry_price
+            _nc = rec.size_usd / _no_entry if _no_entry > 1e-9 else 0.0
+
         exit_price = current_price
-        if exit_price is None and rec.size_usd > 0:
-            offset = realized_pnl_usd / rec.size_usd
+        if exit_price is None and _nc > 0:
+            # Back-calculate exit price from realized P&L: pnl = (exit - entry) * num_contracts
+            offset = realized_pnl_usd / _nc
             raw = (rec.entry_price + offset) if rec.action == "buy_yes" else (rec.entry_price - offset)
             exit_price = max(0.0, min(1.0, raw))
         if capture is None:
             if rec.action == "buy_yes":
-                theo = (rec.ground_truth_prob - rec.entry_price) * rec.size_usd
+                theo = (rec.ground_truth_prob - rec.entry_price) * _nc
             else:
-                theo = (rec.entry_price - rec.ground_truth_prob) * rec.size_usd
+                theo = (rec.entry_price - rec.ground_truth_prob) * _nc
             capture = realized_pnl_usd / theo if theo > 1e-6 else 0.0
         src = "unknown"
         if rec.signal and rec.signal.ground_truth_result:
@@ -1808,6 +1824,7 @@ class ResolutionBot:
             size_usd=rec.size_usd,
             entry_price=rec.entry_price,
             exit_price=exit_price or rec.entry_price,
+            num_contracts=_nc,
             pnl=realized_pnl_usd,
             capture=capture,
             confidence=rec.source_confidence,
@@ -1832,7 +1849,8 @@ class ResolutionBot:
                         "ResolutionBot: exit order failed for %s: %s", market_id, exc
                     )
         logger.info(
-            "ResolutionBot: EXITED %s pnl=$%.2f", market_id, realized_pnl_usd
+            "ResolutionBot: EXITED %s entry=%.4f exit=%.4f contracts=%.2f pnl=$%.2f",
+            market_id, rec.entry_price, exit_price or rec.entry_price, _nc, realized_pnl_usd,
         )
 
     def clear_positions(self) -> int:
