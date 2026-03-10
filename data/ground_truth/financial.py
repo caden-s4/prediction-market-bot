@@ -484,6 +484,7 @@ class FinancialDataSource(DataSource):
                     "direction": direction_str,
                     "margin_pct": round(margin_pct, 2),
                     "near_futures_rollover": near_rollover,
+                    "rollover_risk": near_rollover,
                 },
                 reasoning=(
                     f"{instrument_name}: current={current_price:.4f} (via {price_source}), "
@@ -493,6 +494,7 @@ class FinancialDataSource(DataSource):
                     f"→ {outcome_str} "
                     f"confidence={confidence:.2f} "
                     f"(spatial={spatial_conf:.2f} time={time_conf:.2f} floor={time_floor:.2f})"
+                    + (" [ROLLOVER_RISK: size will be reduced to 25%]" if near_rollover else "")
                 ),
             )
 

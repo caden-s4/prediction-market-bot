@@ -1396,6 +1396,27 @@ class ResolutionBot:
             logger.info("ResolutionBot: SKIP %s – size too small ($%.2f)", mid, size_usd)
             return None
 
+        # Rollover risk: futures contract is within its quarterly changeover window.
+        # The continuous-contract price can gap as the front month rolls, which may
+        # create spurious signals.  Trade is still allowed — the margin/confidence
+        # gates already filtered out weak setups — but position size is cut to 25%
+        # so the bot is not heavily exposed if the price gaps at changeover.
+        _gt_raw = (signal.ground_truth_result.raw_data or {}) if signal.ground_truth_result else {}
+        if _gt_raw.get("rollover_risk"):
+            _full_size = size_usd
+            size_usd = round(size_usd * 0.25, 2)
+            logger.warning(
+                "ResolutionBot: ROLLOVER_RISK — %s (%s) is in the quarterly futures "
+                "rollover window; sizing down $%.2f → $%.2f (25%% of normal)",
+                mid, _gt_raw.get("symbol", "?"), _full_size, size_usd,
+            )
+            if size_usd < 1.0:
+                logger.info(
+                    "ResolutionBot: SKIP %s – post-rollover size too small ($%.2f)",
+                    mid, size_usd,
+                )
+                return None
+
         # ── Per-series exposure cap ────────────────────────────────────────────
         # All markets sharing a root ticker (e.g. KXPAYROLLS) are driven by the
         # same underlying data point and are 100% correlated.  Cap total active
