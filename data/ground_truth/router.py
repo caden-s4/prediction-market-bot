@@ -6,11 +6,12 @@ returns the highest-confidence tradeable result.  This prevents a low-confidence
 in-progress sports signal from shadowing a fresh FRED release that would trade.
 
 Source priority (used only as tiebreaker when confidence is equal):
-  1. Sports     → ESPN API (live scores, final results)
-  2. Economic   → FRED / BLS (data releases, rate decisions)
-  3. Financial  → Twelve Data / Alpha Vantage / Yahoo Finance (prices)
-  4. Congress   → Congress.gov (bill passage, signed/vetoed legislation)
-  5. Regulatory → Federal Register / CourtListener (filings, rulings)
+  1. SportsLive → ESPN live polling + ShockDetector (in-progress game signals)
+  2. Sports     → ESPN API (live scores, final results)
+  3. Economic   → FRED / BLS (data releases, rate decisions)
+  4. Financial  → Twelve Data / Alpha Vantage / Yahoo Finance (prices)
+  5. Congress   → Congress.gov (bill passage, signed/vetoed legislation)
+  6. Regulatory → Federal Register / CourtListener (filings, rulings)
 
 If no source can handle the market, returns None and logs per-source failure
 reasons at DEBUG level so you can track which categories need new data sources.
@@ -42,6 +43,11 @@ from .federal_register import FederalRegisterSource
 from .financial import FinancialDataSource
 from .rotten_tomatoes import RottenTomatoesSource
 from .sports import SportsDataSource
+# SportsLiveSource is imported lazily inside _build_default_sources() to avoid
+# a circular import: live_source → data.ground_truth (package __init__) → router
+# → live_source.  The lazy import is safe because _build_default_sources() is
+# called only once at GroundTruthRouter instantiation time, after all modules
+# have finished loading.
 
 logger = logging.getLogger(__name__)
 
@@ -124,9 +130,16 @@ def _register(
 
 def _build_default_sources() -> List[DataSource]:
     """Build the default source list, respecting GT_*_ENABLED toggles."""
+    # Lazy import to avoid circular dependency:
+    # live_source → data.ground_truth (package) → router → live_source
+    from data.sports.live_source import SportsLiveSource  # noqa: PLC0415
+
     _PAPER_ONLY_SOURCES.clear()
     sources: List[DataSource] = []
-    _register(sources, _GT_SPORTS_MODE,       SportsDataSource())
+    # SportsLiveSource is prepended before SportsDataSource so that shock
+    # signals (high-confidence, sub-second latency) shadow the slower
+    # final-only ESPN scoreboard results for in-progress game markets.
+    _register(sources, _GT_SPORTS_MODE,       SportsLiveSource(), SportsDataSource())
     _register(sources, _GT_ECONOMIC_MODE,     EconomicDataSource(),
                                               EIADataSource(),        # active only when EIA_API_KEY is set
                                               FREDEconomicSource())   # active only when FRED_API_KEY is set
