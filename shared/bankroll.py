@@ -9,6 +9,11 @@ Tracks:
 
 100% of the bankroll is available for resolution drift trades, subject to
 the per-position cap (default 20% of total) and fractional Kelly sizing.
+
+Sports-specific risk controls (applied via sports_size_usd()):
+  max_exposure_per_game  : 8% of bankroll on any single game
+  max_exposure_per_sport : 20% of bankroll on any single sport simultaneously
+  edge_scaled_sizing     : base_size × (shock_magnitude / 0.15), capped at 2×
 """
 
 from __future__ import annotations
@@ -19,6 +24,12 @@ from threading import RLock
 from typing import Dict
 
 logger = logging.getLogger(__name__)
+
+# Sports exposure limits
+_MAX_GAME_EXPOSURE_FRAC = 0.08    # 8% per game
+_MAX_SPORT_EXPOSURE_FRAC = 0.20   # 20% per sport
+_SHOCK_BASE = 0.15                # shock of 0.15 = 1× base size
+_SHOCK_MAX_MULT = 2.0             # cap edge multiplier at 2×
 
 
 class Bankroll:
@@ -47,6 +58,11 @@ class Bankroll:
 
         # market_id → reserved_usd
         self._reservations: Dict[str, float] = {}
+
+        # Sports exposure tracking: game_id → reserved_usd, sport → reserved_usd
+        # These are separate from _reservations to allow sport-level aggregation.
+        self._game_exposure: Dict[str, float] = {}    # game_id → usd
+        self._sport_exposure: Dict[str, float] = {}   # sport → usd
 
     # ── Capital queries ───────────────────────────────────────────────────────
 
@@ -116,6 +132,111 @@ class Bankroll:
                 "Bankroll: released %s pnl=%.4f (daily=%.4f total=%.2f)",
                 market_id, realized_pnl_usd, self._daily_pnl_usd, self._total_usd,
             )
+
+    # ── Sports risk controls ──────────────────────────────────────────────────
+
+    def sports_size_usd(
+        self,
+        base_size_usd: float,
+        game_id: str,
+        sport: str,
+        shock_magnitude: float = 0.15,
+    ) -> float:
+        """
+        Compute the allowable sports position size after applying:
+          1. Edge-scaled sizing: base × (shock / 0.15), capped at 2×
+          2. Per-game exposure cap: never exceed 8% of total bankroll on one game
+          3. Per-sport exposure cap: never exceed 20% of total bankroll on one sport
+
+        Returns the final clamped size in USD (may be 0.0 if caps are exhausted).
+        Does NOT reserve capital — call reserve() separately.
+        """
+        with self._lock:
+            # Edge-scaled sizing
+            mult = min(shock_magnitude / _SHOCK_BASE, _SHOCK_MAX_MULT)
+            edge_sized = base_size_usd * mult
+
+            # Per-game cap
+            game_used = self._game_exposure.get(game_id, 0.0)
+            game_limit = self._total_usd * _MAX_GAME_EXPOSURE_FRAC
+            game_headroom = max(0.0, game_limit - game_used)
+
+            # Per-sport cap
+            sport_used = self._sport_exposure.get(sport, 0.0)
+            sport_limit = self._total_usd * _MAX_SPORT_EXPOSURE_FRAC
+            sport_headroom = max(0.0, sport_limit - sport_used)
+
+            final = min(edge_sized, game_headroom, sport_headroom)
+
+            logger.debug(
+                "Bankroll.sports_size_usd: game=%s sport=%s shock=%.2f mult=%.1f "
+                "edge_sized=%.2f game_headroom=%.2f sport_headroom=%.2f → %.2f",
+                game_id, sport, shock_magnitude, mult,
+                edge_sized, game_headroom, sport_headroom, final,
+            )
+            return final
+
+    def reserve_sports(
+        self,
+        market_id: str,
+        game_id: str,
+        sport: str,
+        amount_usd: float,
+    ) -> bool:
+        """
+        Reserve capital for a sports trade, tracking game and sport exposure.
+
+        Calls the base reserve() first; if that succeeds, updates the game/sport
+        exposure counters. Returns False if reserve() fails.
+        """
+        if not self.reserve(market_id, amount_usd):
+            return False
+        with self._lock:
+            self._game_exposure[game_id] = (
+                self._game_exposure.get(game_id, 0.0) + amount_usd
+            )
+            self._sport_exposure[sport] = (
+                self._sport_exposure.get(sport, 0.0) + amount_usd
+            )
+            logger.debug(
+                "Bankroll.reserve_sports: %s game=%s sport=%s +$%.2f "
+                "(game_total=%.2f sport_total=%.2f)",
+                market_id, game_id, sport, amount_usd,
+                self._game_exposure[game_id],
+                self._sport_exposure[sport],
+            )
+        return True
+
+    def release_sports(
+        self,
+        market_id: str,
+        game_id: str,
+        sport: str,
+        realized_pnl_usd: float = 0.0,
+    ) -> None:
+        """
+        Release a sports trade reservation and update game/sport exposure counters.
+        """
+        with self._lock:
+            reserved = self._reservations.get(market_id, 0.0)
+            self._game_exposure[game_id] = max(
+                0.0, self._game_exposure.get(game_id, 0.0) - reserved
+            )
+            self._sport_exposure[sport] = max(
+                0.0, self._sport_exposure.get(sport, 0.0) - reserved
+            )
+        # Delegate to base release for the bookkeeping
+        self.release(market_id, realized_pnl_usd)
+
+    def sports_exposure_summary(self) -> dict:
+        """Return current game and sport exposure for monitoring."""
+        with self._lock:
+            return {
+                "game_exposure": dict(self._game_exposure),
+                "sport_exposure": dict(self._sport_exposure),
+                "max_game_pct": _MAX_GAME_EXPOSURE_FRAC * 100,
+                "max_sport_pct": _MAX_SPORT_EXPOSURE_FRAC * 100,
+            }
 
     # ── Daily reset ───────────────────────────────────────────────────────────
 
