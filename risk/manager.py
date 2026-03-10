@@ -78,6 +78,7 @@ class RiskManager:
         self._max_daily_loss = max_daily_loss_usd
 
         self._open_positions: Dict[str, float] = {}   # market_id → USD at risk
+        self._position_platforms: Dict[str, str] = {}  # market_id → platform
         self._daily_pnl: float = 0.0
         self._pnl_date: date = datetime.now(timezone.utc).date()
 
@@ -95,6 +96,19 @@ class RiskManager:
     def daily_pnl(self) -> float:
         self._maybe_reset_daily_pnl()
         return self._daily_pnl
+
+    @property
+    def is_halted(self) -> bool:
+        """True if the daily loss limit is configured and has been hit."""
+        return self._max_daily_loss > 0 and self._daily_pnl <= -self._max_daily_loss
+
+    @property
+    def open_positions(self) -> Dict[str, tuple]:
+        """Return {market_id: (platform, size_usd)} for all tracked open positions."""
+        return {
+            mid: (self._position_platforms.get(mid, "unknown"), size)
+            for mid, size in self._open_positions.items()
+        }
 
     def check(self, signal: Signal) -> RiskDecision:
         """
@@ -176,14 +190,16 @@ class RiskManager:
 
     # ── Position lifecycle ─────────────────────────────────────────────────────
 
-    def record_open(self, market_id: str, size_usd: float) -> None:
+    def record_open(self, market_id: str, size_usd: float, platform: str = "unknown") -> None:
         """Call after a trade is successfully placed."""
         self._open_positions[market_id] = size_usd
-        logger.debug("RiskManager: opened %s $%.2f", market_id, size_usd)
+        self._position_platforms[market_id] = platform
+        logger.debug("RiskManager: opened %s/%s $%.2f", platform, market_id, size_usd)
 
     def record_close(self, market_id: str, pnl_usd: float) -> None:
         """Call after a position resolves or is manually exited."""
         self._open_positions.pop(market_id, None)
+        self._position_platforms.pop(market_id, None)
         self._daily_pnl += pnl_usd
         self._bankroll += pnl_usd
         logger.debug(

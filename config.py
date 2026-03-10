@@ -115,7 +115,7 @@ class BotConfig:
     def from_env(cls) -> "BotConfig":
         shared_window = float(_get("RESOLUTION_WINDOW_HOURS", "720.0"))
         return cls(
-            dry_run=_get("DRY_RUN", "true").lower() != "false",
+            dry_run=_get("LIVE_TRADING", "false").lower() != "true",
             bankroll_usd=float(_get("BANKROLL_USD", "1000.0")),
             fee_cache_ttl_seconds=int(_get("FEE_CACHE_TTL_SECONDS", "900")),
             resolution_window_hours=shared_window,

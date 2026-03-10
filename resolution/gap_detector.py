@@ -18,17 +18,21 @@ Fee-adjusted gap calculation:
   (or just taker_fee_poly for single-platform signals)
 
 Time-adjusted minimum gap:
-  min_gap = BASE_GAP_THRESHOLD + hours_to_resolution × TIME_GAP_PREMIUM
+  min_gap = min(BASE_GAP_THRESHOLD + hours_to_resolution × TIME_GAP_PREMIUM, MAX_MIN_GAP)
   BASE_GAP_THRESHOLD = 0.04  (4% floor — minimum gap at any horizon)
   TIME_GAP_PREMIUM   = 0.030 (extra 3.0% per hour remaining)
+  MAX_MIN_GAP        = 0.25  (cap — near-certain signals must never be blocked)
 
   Examples:
-    4 h remaining  → 0.04 + 4.00 × 0.030 = 0.160  (16.0%)
-    1 h remaining  → 0.04 + 1.00 × 0.030 = 0.070  ( 7.0%)
-    15 min (0.25h) → 0.04 + 0.25 × 0.030 = 0.048  ( 4.8%)
+    4 h remaining  → min(0.04 + 4.00 × 0.030, 0.25) = 0.160  (16.0%)
+    1 h remaining  → min(0.04 + 1.00 × 0.030, 0.25) = 0.070  ( 7.0%)
+    15 min (0.25h) → min(0.04 + 0.25 × 0.030, 0.25) = 0.048  ( 4.8%)
+    15 h remaining → min(0.04 + 15.0 × 0.030, 0.25) = 0.250  (25.0%) ← capped
 
   Rationale: the closer to resolution, the less time for the world to change.
   A 9.5% gap at 3.8 hours is not the same edge as a 9.5% gap at 30 minutes.
+  The cap prevents the formula from blocking near-certain signals (e.g. gap=99.5%)
+  on long-duration markets where hours_left × 0.030 would otherwise exceed 25%.
   Early entries require substantially larger mispricings to justify the time risk.
 """
 
@@ -49,6 +53,7 @@ logger = logging.getLogger(__name__)
 # Time-adjusted minimum gap: min_gap = BASE_GAP_THRESHOLD + hours × TIME_GAP_PREMIUM
 BASE_GAP_THRESHOLD = 0.04    # 4% floor — applies even at t=0
 TIME_GAP_PREMIUM   = 0.030   # additional 3.0% required per hour of remaining time
+MAX_MIN_GAP        = 0.25    # cap — near-certain signals must not be blocked by duration
 
 # Minimum hours remaining to act (avoid resolution chaos in last few minutes)
 MIN_HOURS_TO_RESOLUTION = 0.25  # 15 minutes
@@ -170,12 +175,14 @@ class GapDetector:
             )
             return None
 
+        _uncapped_gap = self._base_gap + market.hours_to_resolution * TIME_GAP_PREMIUM
+        _cap_note = f" capped@{MAX_MIN_GAP:.2f}" if _uncapped_gap > MAX_MIN_GAP else ""
         reasoning = (
             f"Information signal: market_price={market.yes_price:.3f} "
             f"ground_truth={ground_truth_prob:.3f} raw_gap={raw_gap:.3f} "
             f"taker_fee={fee:.3f} effective_gap={effective_gap:.3f} "
             f"min_gap={min_gap:.3f} "
-            f"({self._base_gap:.2f}+{market.hours_to_resolution:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f})"
+            f"({self._base_gap:.2f}+{market.hours_to_resolution:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f}{_cap_note})"
         )
         logger.info("GapDetector: %s – %s", market.market_id, reasoning)
 
@@ -231,12 +238,14 @@ class GapDetector:
             )
             return None
 
+        _uncapped_cross = self._base_gap + hours * TIME_GAP_PREMIUM
+        _cap_note_cross = f" capped@{MAX_MIN_GAP:.2f}" if _uncapped_cross > MAX_MIN_GAP else ""
         reasoning = (
             f"Cross-platform gap: poly={poly.yes_price:.3f} kalshi={kalshi.yes_price:.3f} "
             f"raw_gap={raw_gap:.3f} lagging_fee={lagging_fee:.3f} "
             f"effective_gap={effective_gap:.3f} ({platform_label}) "
             f"min_gap={min_gap:.3f} "
-            f"({self._base_gap:.2f}+{hours:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f})"
+            f"({self._base_gap:.2f}+{hours:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f}{_cap_note_cross})"
         )
         logger.info(
             "GapDetector: FLAGGED %s/%s – %s",
@@ -259,12 +268,15 @@ class GapDetector:
         """
         Return the minimum effective gap required given hours to resolution.
 
-        min_gap = base_gap + hours × TIME_GAP_PREMIUM
+        min_gap = min(base_gap + hours × TIME_GAP_PREMIUM, MAX_MIN_GAP)
 
         The further from resolution, the larger the gap must be to justify
-        entering: early positions have more time to go wrong.
+        entering: early positions have more time to go wrong.  The cap at
+        MAX_MIN_GAP (0.25) ensures that near-certain signals (e.g. gas price
+        gap=99.5%) are never blocked purely because the market has many hours
+        left — the formula would otherwise demand min_gap=0.499 at 15.3h.
         """
-        return self._base_gap + hours * TIME_GAP_PREMIUM
+        return min(self._base_gap + hours * TIME_GAP_PREMIUM, MAX_MIN_GAP)
 
     def _enough_time(self, market: Market) -> bool:
         """Return False if market is resolving too soon to safely trade."""

@@ -15,7 +15,7 @@ Usage
 Environment
 -----------
 Copy .env.example → .env and fill in credentials. See SETUP.txt for details.
-Set DRY_RUN=true to simulate without placing real orders (default).
+Set LIVE_TRADING=false (default) to simulate without placing real orders.
 
 Demo vs Production note
 -----------------------
@@ -617,7 +617,7 @@ def main() -> None:
         logger.warning(
             "GHOST TRADE mode – simulated trades will be tracked this session "
             "but NO real orders will be placed and positions reset on restart. "
-            "Set DRY_RUN=false in .env to trade live."
+            "Set LIVE_TRADING=true in .env to trade live."
         )
 
     coordinator = BotCoordinator(config=cfg)

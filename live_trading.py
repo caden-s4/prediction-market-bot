@@ -157,8 +157,22 @@ class LiveExecutionEngine:
 
 def make_signal_callback(risk_manager, execution_engine, event_db, alert_manager):
     """Return a callback that the SignalEngine calls whenever signals fire."""
+    _halt_alerted = False
 
     def on_signals(signals):
+        nonlocal _halt_alerted
+
+        # Fire a one-time alert the first time the halt is detected.
+        if risk_manager.is_halted and not _halt_alerted:
+            _halt_alerted = True
+            alert_manager.alert_daily_loss_limit(
+                daily_loss_usd=-risk_manager.daily_pnl,
+                limit_usd=risk_manager._max_daily_loss,
+                open_positions=len(risk_manager._open_positions),
+            )
+        elif not risk_manager.is_halted:
+            _halt_alerted = False  # reset after midnight roll
+
         for signal in signals:
             # Log every signal (fired or not)
             event_db.log_signal(signal, fired=True)
@@ -181,7 +195,9 @@ def make_signal_callback(risk_manager, execution_engine, event_db, alert_manager
             # Execute
             success = execution_engine.execute(signal, decision)
             if success:
-                risk_manager.record_open(signal.market_id, decision.position_size_usd)
+                risk_manager.record_open(
+                    signal.market_id, decision.position_size_usd, signal.platform
+                )
 
     return on_signals
 
@@ -221,6 +237,47 @@ def discover_market_pairs(kalshi_client, poly_client, signal_engine, recorder, l
 
 
 # ── Periodic snapshot task ────────────────────────────────────────────────────
+
+async def position_reconciliation_loop(risk_manager, kalshi_client, interval: int = 60) -> None:
+    """
+    Periodically reconcile open positions tracked by RiskManager against live
+    exchange state.  When a position no longer appears in the exchange response
+    (i.e. it has settled), call record_close() so the stale entry is removed.
+
+    This is most critical when the daily loss limit is active: the signal
+    callback drops all incoming signals after a halt, which means record_close()
+    would never be called for positions that resolve while the bot is halted.
+    Without this loop those market IDs stay in _open_positions permanently,
+    causing phantom exposure and blocking re-entry after the midnight reset.
+
+    PnL is recorded as 0.0 because the live trading bot does not yet have a
+    settlement-result endpoint; the bankroll reconciliation should be handled
+    by a separate balance-sync job.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        open_pos = risk_manager.open_positions
+        if not open_pos:
+            continue
+        try:
+            # Fetch current exchange positions (Kalshi only for now; Polymarket
+            # does not expose a first-class positions endpoint).
+            if kalshi_client is None:
+                continue
+            live = {p.market_id for p in kalshi_client.get_positions()}
+            for market_id, (platform, size_usd) in list(open_pos.items()):
+                if platform != "kalshi":
+                    continue
+                if market_id not in live:
+                    logger.warning(
+                        "PositionReconciler: %s no longer on exchange – "
+                        "marking closed (pnl unknown, recorded as $0)",
+                        market_id,
+                    )
+                    risk_manager.record_close(market_id, pnl_usd=0.0)
+        except Exception as exc:
+            logger.warning("PositionReconciler: exchange poll failed – %s", exc)
+
 
 async def snapshot_loop(event_db, risk_manager, alert_manager, interval: int = 60):
     """Write a portfolio snapshot every `interval` seconds and check drawdown."""
@@ -409,6 +466,10 @@ async def run_live(cfg: AppConfig, dry_run: bool, scan_interval: int) -> None:
         asyncio.create_task(
             snapshot_loop(event_db, risk_manager, alert_manager, interval=60),
             name="snapshot_loop",
+        ),
+        asyncio.create_task(
+            position_reconciliation_loop(risk_manager, kalshi_rest, interval=60),
+            name="position_reconciliation",
         ),
     ]
     if kalshi_adapter:
