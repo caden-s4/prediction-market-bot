@@ -214,6 +214,10 @@ class TradeRecord:
     size_usd: float
     ground_truth_prob: float
     source_confidence: float
+    # Distance of the underlying price from the market's resolution threshold at
+    # entry time (raw_data["margin_pct"]).  Stored here so the decay monitor can
+    # reference it on every cycle without touching the signal object.
+    distance_pct: float = 0.0
     entry_time: float = field(default_factory=time.time)
     order_id: Optional[str] = None
     requires_human_review: bool = False   # set on startup if gt_prob flipped >50% since entry
@@ -233,7 +237,8 @@ class ResolvedPosition:
     confidence: float    # source_confidence at entry
     source: str          # e.g. "FRED/PAYEMS", "cross-platform"
     resolved_at: datetime
-    entered_at: Optional[datetime] = None  # when the trade was opened
+    entered_at: Optional[datetime] = None      # when the trade was opened
+    dynamic_exit_threshold: Optional[float] = None  # capture threshold that triggered exit
 
 
 def _series_root(market_id: str) -> Optional[str]:
@@ -303,6 +308,7 @@ class ResolutionBot:
         scan_interval: int = 300,
         state_store: Optional[StateStore] = None,
         alert_manager: Optional[AlertManager] = None,
+        dynamic_exit_enabled: bool = True,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
@@ -323,7 +329,7 @@ class ResolutionBot:
         self._gap_detector = GapDetector(fee_cache)
         self._ground_truth = GroundTruthRouter()
         self._confidence = ConfidenceScorer()
-        self._decay = DecayMonitor()
+        self._decay = DecayMonitor(dynamic_exit_enabled=dynamic_exit_enabled)
 
         # ── Tiered market registry ─────────────────────────────────────────────
         # Tracks every known market and which scan tier it belongs to.
@@ -1509,6 +1515,7 @@ class ResolutionBot:
             else signal.reference_price
         )
 
+        _gt_raw_entry = (signal.ground_truth_result.raw_data or {}) if signal.ground_truth_result else {}
         self._positions[mid] = TradeRecord(
             market_id=mid,
             platform=market.platform,
@@ -1519,6 +1526,7 @@ class ResolutionBot:
             size_usd=size_usd,
             ground_truth_prob=gt_prob,
             source_confidence=score.source_confidence,
+            distance_pct=float(_gt_raw_entry.get("margin_pct", 0.0)),
             order_id=order_id,
         )
         self._save_positions()
@@ -1828,6 +1836,7 @@ class ResolutionBot:
                 size_usd=rec.size_usd,
                 source_confidence=rec.source_confidence,
                 action=rec.action,
+                distance_pct=rec.distance_pct,
             ))
 
         decisions = self._decay.evaluate(open_positions)
@@ -1845,6 +1854,7 @@ class ResolutionBot:
                     mid, decision.current_gain_usd,
                     current_price=decision.position.current_price,
                     capture=decision.capture_ratio,
+                    dynamic_exit_threshold=decision.dynamic_exit_threshold,
                 )
                 exits += 1
         return exits
@@ -1855,6 +1865,7 @@ class ResolutionBot:
         realized_pnl_usd: float,
         current_price: Optional[float] = None,
         capture: Optional[float] = None,
+        dynamic_exit_threshold: Optional[float] = None,
     ) -> None:
         rec = self._positions.pop(market_id, None)
         if not rec:
@@ -1899,6 +1910,7 @@ class ResolutionBot:
             source=src,
             resolved_at=datetime.utcnow(),
             entered_at=datetime.utcfromtimestamp(rec.entry_time),
+            dynamic_exit_threshold=dynamic_exit_threshold,
         ))
 
         self._save_positions()
@@ -1916,9 +1928,11 @@ class ResolutionBot:
                     logger.warning(
                         "ResolutionBot: exit order failed for %s: %s", market_id, exc
                     )
+        _thresh_str = f" exit_thresh={dynamic_exit_threshold:.0%}" if dynamic_exit_threshold is not None else ""
         logger.info(
-            "ResolutionBot: EXITED %s entry=%.4f exit=%.4f contracts=%.2f pnl=$%.2f",
+            "ResolutionBot: EXITED %s entry=%.4f exit=%.4f contracts=%.2f pnl=$%.2f%s",
             market_id, rec.entry_price, exit_price or rec.entry_price, _nc, realized_pnl_usd,
+            _thresh_str,
         )
 
     def clear_positions(self) -> int:
