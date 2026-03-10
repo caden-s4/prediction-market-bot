@@ -11,6 +11,14 @@ cycle.
 
 If ESPN returns an error or timeout the last known state is preserved and
 marked stale=True. Stale data is never traded.
+
+Phase 2 additions:
+  - CompletedGame dataclass tracks games that have just transitioned to final
+  - _recently_completed registry holds post-game data for up to 5 minutes
+  - A game is "confirmed" after 2 consecutive ESPN "post" readings (~30s apart)
+    to guard against transient data errors that revert
+  - get_newly_confirmed_finals() returns games confirmed on the current cycle
+  - refresh_if_stale() resets the newly-confirmed list each cycle
 """
 
 from __future__ import annotations
@@ -88,6 +96,27 @@ class GameSnapshot:
     fetched_at: float = field(default_factory=time.monotonic)
 
 
+@dataclass
+class CompletedGame:
+    """
+    Represents a game confirmed as final on ESPN.
+
+    A game is inserted here the first time ESPN shows state='post'.
+    It becomes confirmed=True on the second consecutive 'post' reading,
+    roughly 30 seconds later, guarding against transient data glitches.
+    """
+    game_id: str
+    sport: str
+    home_team: str
+    away_team: str
+    home_score: int
+    away_score: int
+    winner: str               # "home" | "away" | "tie"
+    first_seen_final_at: float  # wall-clock time (time.time())
+    confirmed: bool = False
+    confirmed_at: Optional[float] = None
+
+
 # ── Cache ──────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -101,6 +130,13 @@ _sport_cache: Dict[str, _SportCache] = {}
 
 # game_id → GameSnapshot (maintained across cycles)
 _game_snapshots: Dict[str, GameSnapshot] = {}
+
+# game_id → CompletedGame (retained for 5 minutes after going final)
+_recently_completed: Dict[str, CompletedGame] = {}
+_COMPLETED_RETENTION_SECS = 300  # 5 minutes
+
+# Games confirmed as final on the current cycle (reset each refresh_if_stale call)
+_newly_confirmed_this_cycle: List[CompletedGame] = []
 
 
 # ── ESPN fetch ─────────────────────────────────────────────────────────────────
@@ -326,6 +362,43 @@ def _parse_nba_event(event: dict, sport: str = "nba") -> Optional[NBAState]:
         return None
 
 
+# ── Completed game parsing ────────────────────────────────────────────────────
+
+def _parse_completed_event(event: dict) -> Optional[tuple]:
+    """Return (game_id, home_team, away_team, home_score, away_score) for a
+    completed ESPN event, or None if the event is not in a final state."""
+    try:
+        status = event.get("status", {})
+        status_type = status.get("type", {})
+        state = status_type.get("state", "pre")
+        completed = status_type.get("completed", False)
+
+        if state != "post" or not completed:
+            return None
+
+        game_id = event.get("id", "")
+        if not game_id:
+            return None
+
+        comp = (event.get("competitions") or [{}])[0]
+        competitors = comp.get("competitors", [])
+        home = next((c for c in competitors if c.get("homeAway") == "home"), {})
+        away = next((c for c in competitors if c.get("homeAway") == "away"), {})
+
+        def _team(c: dict) -> str:
+            return c.get("team", {}).get("displayName", "") or c.get("team", {}).get("name", "")
+
+        def _score(c: dict) -> int:
+            try:
+                return int(c.get("score", "0"))
+            except ValueError:
+                return 0
+
+        return (game_id, _team(home), _team(away), _score(home), _score(away))
+    except Exception:
+        return None
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 def refresh_if_stale() -> None:
@@ -335,7 +408,12 @@ def refresh_if_stale() -> None:
     Call this exactly once at the start of each bot cycle before reading any
     game state. Never call it mid-cycle — all evaluations within a cycle share
     the same snapshot.
+
+    Resets the newly-confirmed finals list each cycle so consumers see only
+    games that transitioned to confirmed on this specific cycle.
     """
+    global _newly_confirmed_this_cycle
+    _newly_confirmed_this_cycle = []
     for sport in SPORT_PATHS:
         events = _fetch_sport(sport)
         _update_snapshots(sport, events)
@@ -399,6 +477,73 @@ def _update_snapshots(sport: str, events: list) -> None:
         logger.debug("LiveGameMonitor: removing completed/pre-game %s from snapshots", gid)
         del _game_snapshots[gid]
 
+    # ── Track completed games for resolution lag detection ────────────────────
+    now_wall = time.time()
+    for event in events:
+        parsed = _parse_completed_event(event)
+        if parsed is None:
+            continue
+        game_id, home, away, home_score, away_score = parsed
+
+        # Determine winner
+        if home_score > away_score:
+            winner = "home"
+        elif away_score > home_score:
+            winner = "away"
+        else:
+            winner = "tie"
+
+        existing_cg = _recently_completed.get(game_id)
+        if existing_cg is None:
+            # First time seeing this game as final — start stability watch
+            _recently_completed[game_id] = CompletedGame(
+                game_id=game_id,
+                sport=sport,
+                home_team=home,
+                away_team=away,
+                home_score=home_score,
+                away_score=away_score,
+                winner=winner,
+                first_seen_final_at=now_wall,
+                confirmed=False,
+            )
+            logger.info(
+                "LiveGameMonitor: %s %s vs %s went FINAL (score %d-%d) — "
+                "waiting for confirmation",
+                sport.upper(), home, away, home_score, away_score,
+            )
+        elif not existing_cg.confirmed:
+            # Second consecutive final reading — confirm
+            confirmed_cg = CompletedGame(
+                game_id=game_id,
+                sport=sport,
+                home_team=home,
+                away_team=away,
+                home_score=home_score,
+                away_score=away_score,
+                winner=winner,
+                first_seen_final_at=existing_cg.first_seen_final_at,
+                confirmed=True,
+                confirmed_at=now_wall,
+            )
+            _recently_completed[game_id] = confirmed_cg
+            _newly_confirmed_this_cycle.append(confirmed_cg)
+            logger.info(
+                "LiveGameMonitor: %s %s vs %s CONFIRMED FINAL (winner=%s) "
+                "after %.0fs",
+                sport.upper(), home, away, winner,
+                now_wall - existing_cg.first_seen_final_at,
+            )
+        # Already confirmed — no-op; resolution detector handles it
+
+    # Clean up old completed game entries to avoid unbounded memory growth
+    stale_cg = [
+        gid for gid, cg in _recently_completed.items()
+        if now_wall - cg.first_seen_final_at > _COMPLETED_RETENTION_SECS
+    ]
+    for gid in stale_cg:
+        del _recently_completed[gid]
+
 
 def get_active_snapshots() -> List[GameSnapshot]:
     """Return all currently in-progress game snapshots."""
@@ -414,3 +559,27 @@ def is_sport_stale(sport: str) -> bool:
     """Return True if the last ESPN fetch for this sport failed."""
     cached = _sport_cache.get(sport)
     return cached is None or cached.stale
+
+
+def get_newly_confirmed_finals() -> List[CompletedGame]:
+    """
+    Return games confirmed as final on the current cycle.
+
+    A game appears here exactly once — on the cycle where its second
+    consecutive ESPN 'post' reading is processed (~30 seconds after the
+    first final reading).  Subsequent cycles return an empty list for
+    the same game.
+
+    Must be called after refresh_if_stale() for the current cycle.
+    """
+    return list(_newly_confirmed_this_cycle)
+
+
+def get_recently_completed(game_id: str) -> Optional[CompletedGame]:
+    """Return a completed game by ID, or None if not in the registry."""
+    return _recently_completed.get(game_id)
+
+
+def get_all_recently_completed() -> List[CompletedGame]:
+    """Return all games in the recently-completed registry (confirmed or not)."""
+    return list(_recently_completed.values())
