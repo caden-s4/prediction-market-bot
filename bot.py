@@ -251,7 +251,7 @@ class BotCoordinator:
         if not self._cfg.bot.dry_run:
             raise RuntimeError(
                 "set_virtual_bankroll() is only available in dry-run mode. "
-                "Set DRY_RUN=true in .env to use virtual capital."
+                "Set LIVE_TRADING=false in .env to use virtual capital."
             )
         if amount_usd <= 0:
             raise ValueError(f"Virtual bankroll must be positive, got {amount_usd}")

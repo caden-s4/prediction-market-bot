@@ -119,9 +119,9 @@ SECTION 3 – BOT SETTINGS
 
 --- 3a. Core ---
 
-    DRY_RUN=true
+    LIVE_TRADING=false
         Always start here. Logs everything, places nothing.
-        Set false only after verifying dry-run output looks correct.
+        Set to true only after verifying paper-trading output looks correct.
 
     BANKROLL_USD=1000.0
         Total capital. All of it is available for resolution drift trades,
@@ -204,7 +204,7 @@ SECTION 4 – INSTALL AND FIRST RUN
        python main.py --log-level INFO
 
 5. Switch to live trading:
-       Edit .env: DRY_RUN=false, KALSHI_ENV=prod, RESOLUTION_WINDOW_HOURS=24
+       Edit .env: LIVE_TRADING=true, KALSHI_ENV=prod, RESOLUTION_WINDOW_HOURS=24
        Restart: python main.py
 
 
@@ -239,7 +239,7 @@ SECTION 5 – ARCHITECTURE
 SECTION 6 – PAPER TRADING CHECKLIST
 ================================================================================
 
-Run DRY_RUN=true for at least 2 weeks before going live. Verify:
+Run with LIVE_TRADING=false for at least 2 weeks before going live. Verify:
 
   [ ] Scanner finds candidate markets in every cycle
   [ ] Ground truth sources return data for at least some markets
@@ -261,7 +261,7 @@ SECTION 7 – SECURITY CHECKLIST
         Verify: git log --all -- .env  (must return nothing)
   [ ] Polymarket private key stored ONLY in .env on your machine
   [ ] Kalshi key has minimal required permissions
-  [ ] DRY_RUN=true confirmed before switching to false
+  [ ] LIVE_TRADING=false confirmed before switching to true
   [ ] KALSHI_ENV=demo confirmed before switching to prod
   [ ] BANKROLL_USD matches your actual deposited amount
   [ ] MAX_DAILY_LOSS_USD set before going live
