@@ -38,7 +38,7 @@ from resolution.confidence import ConfidenceScorer
 from resolution.decay_monitor import (
     DecayAction, DecayMonitor, OpenResolutionPosition,
 )
-from resolution.gap_detector import GapDetector, GapSignal
+from resolution.gap_detector import GapDetector, GapSignal, MAX_MIN_GAP
 from resolution.scanner import ResolutionScanner
 from resolution.tier_registry import TierRegistry
 from shared.bankroll import Bankroll
@@ -134,7 +134,9 @@ MAX_SERIES_EXPOSURE_FRACTION = 0.15
 
 def _minimum_gap_for_entry(hours_remaining: float) -> float:
     """
-    Minimum fee-adjusted gap required at this time horizon — tiered curve.
+    Minimum fee-adjusted gap required at this time horizon — tiered curve,
+    capped at MAX_MIN_GAP (shared with gap_detector.py) so long-dated signals
+    are never blocked by an unbounded requirement.
 
     Steeper requirements further from resolution; cliff steps at tier
     boundaries intentionally penalise long-horizon signals hard.
@@ -142,16 +144,17 @@ def _minimum_gap_for_entry(hours_remaining: float) -> float:
       < 1h             0.04                      (4.0% floor)
       1 – 4 h          0.04 + h × 0.015          (2h → 7.0%,  4h → 10.0%)
       4 – 8 h          0.10 + h × 0.020          (4h → 18.0%, 8h → 26.0%)
-      > 8 h            0.25 + h × 0.030          (8h → 49.0%, 15h → 70.0%)
+      > 8 h            0.25 + h × 0.030          (capped at MAX_MIN_GAP = 25.0%)
     """
     if hours_remaining < 1.0:
-        return 0.04
+        raw = 0.04
     elif hours_remaining < 4.0:
-        return 0.04 + hours_remaining * 0.015
+        raw = 0.04 + hours_remaining * 0.015
     elif hours_remaining <= 8.0:
-        return 0.10 + hours_remaining * 0.020
+        raw = 0.10 + hours_remaining * 0.020
     else:
-        return 0.25 + hours_remaining * 0.030
+        raw = 0.25 + hours_remaining * 0.030
+    return min(raw, MAX_MIN_GAP)
 
 
 def _check_minimum_ev(
