@@ -30,7 +30,7 @@ from dataclasses import dataclass, field, replace as dc_replace
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
-from data.ground_truth.router import GroundTruthRouter
+from data.ground_truth.router import GroundTruthRouter, is_paper_only
 from data.markets.base import BaseMarketClient, Market, Order, Side
 from data.markets.polymarket_ws import PolymarketWSManager
 from monitoring.alerts import AlertManager
@@ -1549,12 +1549,19 @@ class ResolutionBot:
         # limit_price: the taker limit (live ask for YES, live bid for NO).
         # Falls back to signal.target_price only when not provided (dry-run log).
         order_price = limit_price if limit_price is not None else signal.target_price
-        if self._dry_run:
+        _src_name = (
+            signal.ground_truth_result.source_name
+            if signal.ground_truth_result
+            else ""
+        )
+        _paper = self._dry_run or is_paper_only(_src_name)
+        if _paper:
             ghost_id = f"ghost_{market.market_id}_{int(time.time())}"
+            _reason = "global dry-run" if self._dry_run else f"category paper-only ({_src_name})"
             logger.info(
                 "ResolutionBot [GHOST TRADE]: %s %s @ %.4f size=$%.2f fee=%.4f "
-                "(simulated — no real order placed, order_id=%s)",
-                signal.action, market.market_id, order_price, size_usd, fee, ghost_id,
+                "(simulated — %s, order_id=%s)",
+                signal.action, market.market_id, order_price, size_usd, fee, _reason, ghost_id,
             )
             return ghost_id
 

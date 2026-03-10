@@ -47,23 +47,31 @@ logger = logging.getLogger(__name__)
 
 # ── Per-category source toggles ───────────────────────────────────────────────
 # Read once at import time from environment / .env file.
-# All default to True so the bot works out-of-the-box without any extra config.
-# Set to "false" / "0" / "no" in .env to disable an entire source category.
+# Each GT_*_ENABLED variable accepts three values:
+#   false  — disabled: category not scanned, no API calls, no signals
+#   paper  — paper trade only: signals generated and logged but orders always simulated
+#   true   — live: follows the global LIVE_TRADING setting (default)
 
-def _bool_env(name: str, default: bool = True) -> bool:
+def _gt_mode(name: str) -> str:
+    """Return 'off', 'paper', or 'live' for a GT_*_ENABLED env var."""
     val = os.environ.get(name, "").strip().lower()
-    if val in ("false", "0", "no", "off"):
-        return False
-    if val in ("true", "1", "yes", "on"):
-        return True
-    return default
+    if val in ("false", "0", "no", "off", "disabled", ""):
+        return "off"
+    if val in ("paper", "simulate", "test", "dry"):
+        return "paper"
+    # true / 1 / yes / on / live / real → live (follows global LIVE_TRADING)
+    return "live"
 
-_GT_SPORTS_ENABLED      = _bool_env("GT_SPORTS_ENABLED",      default=True)
-_GT_ECONOMIC_ENABLED    = _bool_env("GT_ECONOMIC_ENABLED",    default=True)
-_GT_FINANCIAL_ENABLED   = _bool_env("GT_FINANCIAL_ENABLED",   default=True)
-_GT_CONGRESS_ENABLED    = _bool_env("GT_CONGRESS_ENABLED",    default=True)
-_GT_REGULATORY_ENABLED  = _bool_env("GT_REGULATORY_ENABLED",  default=True)
-_GT_ENTERTAINMENT_ENABLED = _bool_env("GT_ENTERTAINMENT_ENABLED", default=True)
+_GT_SPORTS_MODE         = _gt_mode("GT_SPORTS_ENABLED")
+_GT_ECONOMIC_MODE       = _gt_mode("GT_ECONOMIC_ENABLED")
+_GT_FINANCIAL_MODE      = _gt_mode("GT_FINANCIAL_ENABLED")
+_GT_CONGRESS_MODE       = _gt_mode("GT_CONGRESS_ENABLED")
+_GT_REGULATORY_MODE     = _gt_mode("GT_REGULATORY_ENABLED")
+_GT_ENTERTAINMENT_MODE  = _gt_mode("GT_ENTERTAINMENT_ENABLED")
+
+# Source class names that are in paper-only mode — checked at order placement.
+# Populated by _build_default_sources(); exported via is_paper_only().
+_PAPER_ONLY_SOURCES: set[str] = set()
 
 # Novelty / subjective prop-bet patterns that no data source can resolve.
 # Markets matching these are logged as excluded_novelty and skipped entirely.
@@ -100,24 +108,38 @@ _NOVELTY_RE = re.compile(
 )
 
 
+def _register(
+    sources: List[DataSource],
+    mode: str,
+    *instances: DataSource,
+) -> None:
+    """Append sources to the list and mark them paper-only if mode == 'paper'."""
+    if mode == "off":
+        return
+    for src in instances:
+        sources.append(src)
+        if mode == "paper":
+            _PAPER_ONLY_SOURCES.add(type(src).__name__)
+
+
 def _build_default_sources() -> List[DataSource]:
     """Build the default source list, respecting GT_*_ENABLED toggles."""
+    _PAPER_ONLY_SOURCES.clear()
     sources: List[DataSource] = []
-    if _GT_SPORTS_ENABLED:
-        sources.append(SportsDataSource())
-    if _GT_ECONOMIC_ENABLED:
-        sources.append(EconomicDataSource())
-        sources.append(EIADataSource())      # active only when EIA_API_KEY is set
-        sources.append(FREDEconomicSource()) # active only when FRED_API_KEY is set
-    if _GT_FINANCIAL_ENABLED:
-        sources.append(FinancialDataSource())
-    if _GT_CONGRESS_ENABLED:
-        sources.append(CongressSource())
-    if _GT_REGULATORY_ENABLED:
-        sources.append(FederalRegisterSource())
-    if _GT_ENTERTAINMENT_ENABLED:
-        sources.append(RottenTomatoesSource())
+    _register(sources, _GT_SPORTS_MODE,       SportsDataSource())
+    _register(sources, _GT_ECONOMIC_MODE,     EconomicDataSource(),
+                                              EIADataSource(),        # active only when EIA_API_KEY is set
+                                              FREDEconomicSource())   # active only when FRED_API_KEY is set
+    _register(sources, _GT_FINANCIAL_MODE,    FinancialDataSource())
+    _register(sources, _GT_CONGRESS_MODE,     CongressSource())
+    _register(sources, _GT_REGULATORY_MODE,   FederalRegisterSource())
+    _register(sources, _GT_ENTERTAINMENT_MODE, RottenTomatoesSource())
     return sources
+
+
+def is_paper_only(source_name: str) -> bool:
+    """Return True if the source's category is set to paper-trade mode."""
+    return source_name in _PAPER_ONLY_SOURCES
 
 
 def _log_active_sources(sources: List[DataSource]) -> None:
