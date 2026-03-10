@@ -447,6 +447,16 @@ class FinancialDataSource(DataSource):
             outcome_str = "YES" if ground_truth_prob == 1.0 else "NO"
             near_rollover = self._near_futures_rollover(symbol)
             if near_rollover:
+                if symbol == "CL=F":
+                    # Crude oil futures gaps on rollover are too wide and
+                    # unpredictable to trade safely.  Block entirely.
+                    logger.warning(
+                        "FinancialSource: CL=F skipped — active rollover window, "
+                        "too much gap risk",
+                    )
+                    return None
+                # Other futures (NQ=F, ES=F, …) rollover risk is lower — still
+                # trade but executor will reduce position size to 25%.
                 logger.warning(
                     "FinancialSource: %s (%s) is within the quarterly rollover window "
                     "— continuous-contract price may gap at contract changeover; "
@@ -548,8 +558,11 @@ class FinancialDataSource(DataSource):
         Around this window Yahoo Finance's continuous-contract price (NQ=F etc.)
         can gap as the front month changes, which could look like a massive price
         move and flip our ground_truth_prob from 1.0 to 0.0 spuriously.
-        We flag the result rather than blocking it — the gap size still needs to
-        be ≥5% to trade, which filters most rollover-induced noise.
+
+        Callers differentiate by symbol:
+          CL=F  – crude oil gaps are too wide; caller returns None (no trade).
+          Others – lower gap risk; caller sets rollover_risk=True so the executor
+                   applies a 25% size reduction.
         """
         if symbol not in _FUTURES_SYMBOLS:
             return False
