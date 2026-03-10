@@ -156,6 +156,17 @@ class AlertManager:
         # Use a per-market category key so each market gets its own rate-limit slot.
         self._send(f"human_review_{market_id}", msg)
 
+    def alert_daily_loss_limit(self, daily_loss_usd: float, limit_usd: float, open_positions: int) -> None:
+        """Send a one-time alert when the daily loss circuit-breaker trips."""
+        msg = (
+            f"🛑 DAILY LOSS LIMIT TRIGGERED\n"
+            f"Loss today: ${daily_loss_usd:.2f}  /  Limit: ${limit_usd:.2f}\n"
+            f"Open positions still being monitored: {open_positions}\n"
+            f"No new trades will be placed until UTC midnight reset.\n"
+            f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
+        )
+        self._send("daily_loss_limit", msg)
+
     def alert_trade(
         self,
         action: str,
