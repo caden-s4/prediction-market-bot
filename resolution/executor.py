@@ -51,6 +51,14 @@ logger = logging.getLogger(__name__)
 KELLY_FRACTION = 0.12             # 12% fractional Kelly (conservative for thin books)
 MAX_POSITION_FRACTION = 0.20      # hard cap: 20% of total bankroll per position
 
+# Hard stop for financial-source positions (Yahoo Finance / Twelve Data / Alpha Vantage).
+# If the market price moves this many points against our entry, exit immediately —
+# before the decay monitor even runs.  Overridable via FINANCIAL_HARD_STOP_THRESHOLD env var.
+FINANCIAL_HARD_STOP_THRESHOLD = 0.20
+
+# Source-name prefixes that identify a financial ground-truth source.
+_FINANCIAL_SOURCE_PREFIXES = ("Yahoo Finance/", "Twelve Data/", "Alpha Vantage/")
+
 # ── Tiered scan intervals ──────────────────────────────────────────────────────
 # The main loop sleeps TIER_1_INTERVAL between cycles.  Within each cycle,
 # only the tiers that are "due" based on elapsed time actually run.
@@ -206,6 +214,10 @@ class TradeRecord:
     size_usd: float
     ground_truth_prob: float
     source_confidence: float
+    # Distance of the underlying price from the market's resolution threshold at
+    # entry time (raw_data["margin_pct"]).  Stored here so the decay monitor can
+    # reference it on every cycle without touching the signal object.
+    distance_pct: float = 0.0
     entry_time: float = field(default_factory=time.time)
     order_id: Optional[str] = None
     requires_human_review: bool = False   # set on startup if gt_prob flipped >50% since entry
@@ -216,15 +228,17 @@ class ResolvedPosition:
     """A closed trade — appended to _resolved_positions for session-level history."""
     market_id: str
     action: str          # "buy_yes" | "buy_no"
-    size_usd: float      # dollars wagered
+    size_usd: float      # dollars wagered (cost basis)
     entry_price: float   # YES price at entry
     exit_price: float    # YES price at exit (or 1.0/0.0 at market resolution)
+    num_contracts: float # contracts held = size_usd / entry_price (YES) or / (1-entry_price) (NO)
     pnl: float           # realized P&L in dollars
     capture: float       # pnl / theoretical_max  (positive = with the signal)
     confidence: float    # source_confidence at entry
     source: str          # e.g. "FRED/PAYEMS", "cross-platform"
     resolved_at: datetime
-    entered_at: Optional[datetime] = None  # when the trade was opened
+    entered_at: Optional[datetime] = None      # when the trade was opened
+    dynamic_exit_threshold: Optional[float] = None  # capture threshold that triggered exit
 
 
 def _series_root(market_id: str) -> Optional[str]:
@@ -294,6 +308,7 @@ class ResolutionBot:
         scan_interval: int = 300,
         state_store: Optional[StateStore] = None,
         alert_manager: Optional[AlertManager] = None,
+        dynamic_exit_enabled: bool = True,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
@@ -314,7 +329,7 @@ class ResolutionBot:
         self._gap_detector = GapDetector(fee_cache)
         self._ground_truth = GroundTruthRouter()
         self._confidence = ConfidenceScorer()
-        self._decay = DecayMonitor()
+        self._decay = DecayMonitor(dynamic_exit_enabled=dynamic_exit_enabled)
 
         # ── Tiered market registry ─────────────────────────────────────────────
         # Tracks every known market and which scan tier it belongs to.
@@ -1396,6 +1411,27 @@ class ResolutionBot:
             logger.info("ResolutionBot: SKIP %s – size too small ($%.2f)", mid, size_usd)
             return None
 
+        # Rollover risk: futures contract is within its quarterly changeover window.
+        # The continuous-contract price can gap as the front month rolls, which may
+        # create spurious signals.  Trade is still allowed — the margin/confidence
+        # gates already filtered out weak setups — but position size is cut to 25%
+        # so the bot is not heavily exposed if the price gaps at changeover.
+        _gt_raw = (signal.ground_truth_result.raw_data or {}) if signal.ground_truth_result else {}
+        if _gt_raw.get("rollover_risk"):
+            _full_size = size_usd
+            size_usd = round(size_usd * 0.25, 2)
+            logger.warning(
+                "ResolutionBot: ROLLOVER_RISK — %s (%s) is in the quarterly futures "
+                "rollover window; sizing down $%.2f → $%.2f (25%% of normal)",
+                mid, _gt_raw.get("symbol", "?"), _full_size, size_usd,
+            )
+            if size_usd < 1.0:
+                logger.info(
+                    "ResolutionBot: SKIP %s – post-rollover size too small ($%.2f)",
+                    mid, size_usd,
+                )
+                return None
+
         # ── Per-series exposure cap ────────────────────────────────────────────
         # All markets sharing a root ticker (e.g. KXPAYROLLS) are driven by the
         # same underlying data point and are 100% correlated.  Cap total active
@@ -1479,6 +1515,7 @@ class ResolutionBot:
             else signal.reference_price
         )
 
+        _gt_raw_entry = (signal.ground_truth_result.raw_data or {}) if signal.ground_truth_result else {}
         self._positions[mid] = TradeRecord(
             market_id=mid,
             platform=market.platform,
@@ -1489,12 +1526,19 @@ class ResolutionBot:
             size_usd=size_usd,
             ground_truth_prob=gt_prob,
             source_confidence=score.source_confidence,
+            distance_pct=float(_gt_raw_entry.get("margin_pct", 0.0)),
             order_id=order_id,
         )
         self._save_positions()
+        _entry = signal.target_price
+        if signal.action == "buy_yes":
+            _entry_nc = size_usd / _entry if _entry > 1e-9 else 0.0
+        else:
+            _no_e = 1.0 - _entry
+            _entry_nc = size_usd / _no_e if _no_e > 1e-9 else 0.0
         logger.info(
-            "ResolutionBot: TRADE %s %s @ %.4f size=$%.2f (order=%s)\n  → \"%s\"",
-            signal.action, mid, signal.target_price, size_usd, order_id,
+            "ResolutionBot: TRADE %s %s @ %.4f size=$%.2f contracts=%.2f (order=%s)\n  → \"%s\"",
+            signal.action, mid, _entry, size_usd, _entry_nc, order_id,
             market.question,
         )
         return {
@@ -1502,8 +1546,9 @@ class ResolutionBot:
             "question": market.question,
             "market_id": mid,
             "platform": market.platform,
-            "price": signal.target_price,
+            "price": _entry,
             "size_usd": size_usd,
+            "num_contracts": round(_entry_nc, 4),
             "hours_left": round(market.hours_to_resolution, 1),
             "source": gt.source_name if gt else "unknown",
         }
@@ -1710,11 +1755,72 @@ class ResolutionBot:
 
     # ── Position monitoring ───────────────────────────────────────────────────
 
+    @staticmethod
+    def _is_financial_source(rec: "TradeRecord") -> bool:
+        """Return True if this position was opened from a financial price source."""
+        if not rec.signal or not rec.signal.ground_truth_result:
+            return False
+        src = rec.signal.ground_truth_result.source_name or ""
+        return src.startswith(_FINANCIAL_SOURCE_PREFIXES)
+
     def _monitor_positions(self) -> int:
-        """Run decay monitor on all open positions. Returns # of exits triggered."""
+        """Run hard-stop check then decay monitor on all open positions.
+
+        Financial hard stop fires first: if a financial-source position has
+        moved FINANCIAL_HARD_STOP_THRESHOLD points against entry, exit
+        immediately and skip the decay monitor for that position.
+        The decay monitor handles everything else.
+
+        Returns the total number of exits triggered.
+        """
         if not self._positions:
             return 0
 
+        exits = 0
+
+        # ── Pass 1: financial hard stop ───────────────────────────────────────
+        # Iterate over a snapshot so we can safely pop from self._positions.
+        for mid, rec in list(self._positions.items()):
+            if not self._is_financial_source(rec):
+                continue
+            current_price = self._get_current_price(rec.market)
+            if current_price is None:
+                continue
+
+            # Direction-aware adverse move (positive = moved against our position).
+            if rec.action == "buy_yes":
+                move = rec.entry_price - current_price
+            else:
+                move = current_price - rec.entry_price
+
+            if move < FINANCIAL_HARD_STOP_THRESHOLD:
+                continue
+
+            # Compute realised P&L using correct Kalshi contract economics.
+            if rec.action == "buy_yes":
+                nc = rec.size_usd / rec.entry_price if rec.entry_price > 1e-9 else 0.0
+                pnl = (current_price - rec.entry_price) * nc
+            else:
+                no_entry = 1.0 - rec.entry_price
+                nc = rec.size_usd / no_entry if no_entry > 1e-9 else 0.0
+                pnl = (rec.entry_price - current_price) * nc
+
+            src_name = rec.signal.ground_truth_result.source_name  # guaranteed non-None here
+            logger.warning(
+                "ResolutionBot: FINANCIAL_HARD_STOP %s [%s] — "
+                "entry=%.4f current=%.4f move=%.4f >= threshold=%.4f "
+                "contracts=%.2f pnl=$%.2f",
+                mid, src_name,
+                rec.entry_price, current_price, move, FINANCIAL_HARD_STOP_THRESHOLD,
+                nc, pnl,
+            )
+            self._exit_position(mid, pnl, current_price=current_price)
+            exits += 1
+
+        if not self._positions:
+            return exits
+
+        # ── Pass 2: decay monitor (remaining positions only) ─────────────────
         open_positions = []
         for rec in self._positions.values():
             current_price = self._get_current_price(rec.market)
@@ -1730,10 +1836,10 @@ class ResolutionBot:
                 size_usd=rec.size_usd,
                 source_confidence=rec.source_confidence,
                 action=rec.action,
+                distance_pct=rec.distance_pct,
             ))
 
         decisions = self._decay.evaluate(open_positions)
-        exits = 0
         for decision in decisions:
             mid = decision.position.market_id
             logger.info(
@@ -1748,6 +1854,7 @@ class ResolutionBot:
                     mid, decision.current_gain_usd,
                     current_price=decision.position.current_price,
                     capture=decision.capture_ratio,
+                    dynamic_exit_threshold=decision.dynamic_exit_threshold,
                 )
                 exits += 1
         return exits
@@ -1758,6 +1865,7 @@ class ResolutionBot:
         realized_pnl_usd: float,
         current_price: Optional[float] = None,
         capture: Optional[float] = None,
+        dynamic_exit_threshold: Optional[float] = None,
     ) -> None:
         rec = self._positions.pop(market_id, None)
         if not rec:
@@ -1765,16 +1873,24 @@ class ResolutionBot:
         self._bankroll.release(market_id, realized_pnl_usd=realized_pnl_usd)
 
         # Record in resolved history (session-only; drives 'history' command).
+        # Kalshi contract economics: cost per contract = entry_price (YES) or 1-entry_price (NO).
+        if rec.action == "buy_yes":
+            _nc = rec.size_usd / rec.entry_price if rec.entry_price > 1e-9 else 0.0
+        else:
+            _no_entry = 1.0 - rec.entry_price
+            _nc = rec.size_usd / _no_entry if _no_entry > 1e-9 else 0.0
+
         exit_price = current_price
-        if exit_price is None and rec.size_usd > 0:
-            offset = realized_pnl_usd / rec.size_usd
+        if exit_price is None and _nc > 0:
+            # Back-calculate exit price from realized P&L: pnl = (exit - entry) * num_contracts
+            offset = realized_pnl_usd / _nc
             raw = (rec.entry_price + offset) if rec.action == "buy_yes" else (rec.entry_price - offset)
             exit_price = max(0.0, min(1.0, raw))
         if capture is None:
             if rec.action == "buy_yes":
-                theo = (rec.ground_truth_prob - rec.entry_price) * rec.size_usd
+                theo = (rec.ground_truth_prob - rec.entry_price) * _nc
             else:
-                theo = (rec.entry_price - rec.ground_truth_prob) * rec.size_usd
+                theo = (rec.entry_price - rec.ground_truth_prob) * _nc
             capture = realized_pnl_usd / theo if theo > 1e-6 else 0.0
         src = "unknown"
         if rec.signal and rec.signal.ground_truth_result:
@@ -1787,12 +1903,14 @@ class ResolutionBot:
             size_usd=rec.size_usd,
             entry_price=rec.entry_price,
             exit_price=exit_price or rec.entry_price,
+            num_contracts=_nc,
             pnl=realized_pnl_usd,
             capture=capture,
             confidence=rec.source_confidence,
             source=src,
             resolved_at=datetime.utcnow(),
             entered_at=datetime.utcfromtimestamp(rec.entry_time),
+            dynamic_exit_threshold=dynamic_exit_threshold,
         ))
 
         self._save_positions()
@@ -1810,8 +1928,11 @@ class ResolutionBot:
                     logger.warning(
                         "ResolutionBot: exit order failed for %s: %s", market_id, exc
                     )
+        _thresh_str = f" exit_thresh={dynamic_exit_threshold:.0%}" if dynamic_exit_threshold is not None else ""
         logger.info(
-            "ResolutionBot: EXITED %s pnl=$%.2f", market_id, realized_pnl_usd
+            "ResolutionBot: EXITED %s entry=%.4f exit=%.4f contracts=%.2f pnl=$%.2f%s",
+            market_id, rec.entry_price, exit_price or rec.entry_price, _nc, realized_pnl_usd,
+            _thresh_str,
         )
 
     def clear_positions(self) -> int:

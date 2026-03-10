@@ -112,6 +112,18 @@ class BotConfig:
     resolution_max_position_fraction: float     # Hard cap per position (default 20%)
     resolution_scan_interval_seconds: int       # How often to poll (default 300 = 5 min)
 
+    # ── Risk controls ──────────────────────────────────────────────────────
+    # If a position opened from a financial source (Yahoo Finance / Twelve Data /
+    # Alpha Vantage) moves this many probability points against entry, it is
+    # exited immediately regardless of capture percentage or time remaining.
+    # Set to 1.0 to effectively disable.  Env var: FINANCIAL_HARD_STOP_THRESHOLD.
+    financial_hard_stop_threshold: float        # default 0.20 (20 points)
+
+    # When True, the decay monitor's early-exit capture threshold is determined
+    # by a confidence × distance-from-threshold lookup table instead of the fixed
+    # 80% floor.  Set DYNAMIC_EXIT_ENABLED=false to instantly revert to 80%.
+    dynamic_exit_enabled: bool                  # default True
+
     @classmethod
     def from_env(cls) -> "BotConfig":
         shared_window = float(_get("RESOLUTION_WINDOW_HOURS", "720.0"))
@@ -126,6 +138,8 @@ class BotConfig:
             resolution_kelly_fraction=float(_get("RESOLUTION_KELLY_FRACTION", "0.12")),
             resolution_max_position_fraction=float(_get("RESOLUTION_MAX_POSITION_FRACTION", "0.20")),
             resolution_scan_interval_seconds=int(float(_get("RESOLUTION_SCAN_INTERVAL_SECONDS", "300"))),
+            financial_hard_stop_threshold=float(_get("FINANCIAL_HARD_STOP_THRESHOLD", "0.20")),
+            dynamic_exit_enabled=_get("DYNAMIC_EXIT_ENABLED", "true").lower() != "false",
         )
 
 
