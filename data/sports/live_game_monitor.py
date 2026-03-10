@@ -138,6 +138,10 @@ _COMPLETED_RETENTION_SECS = 300  # 5 minutes
 # Games confirmed as final on the current cycle (reset each refresh_if_stale call)
 _newly_confirmed_this_cycle: List[CompletedGame] = []
 
+# Per-cycle ESPN fetch timing: sport → ms for the fetch that happened this cycle.
+# A cached hit records 0.0 ms (no I/O).  Reset each refresh_if_stale() call.
+_cycle_fetch_ms: Dict[str, float] = {}
+
 
 # ── ESPN fetch ─────────────────────────────────────────────────────────────────
 
@@ -145,12 +149,19 @@ def _fetch_sport(sport: str) -> List[dict]:
     """Return the ESPN events list for a sport, using the 15-second cache.
 
     Sets stale=True on the cache entry if the fetch fails.
+    Logs each fetch with duration and whether it was served from cache.
     """
+    global _cycle_fetch_ms
     path = SPORT_PATHS[sport]
-    now = time.monotonic()
+    t0 = time.monotonic()
     cached = _sport_cache.get(sport)
 
-    if cached and (now - cached.fetched_at) < _FETCH_TTL:
+    if cached and (t0 - cached.fetched_at) < _FETCH_TTL:
+        _cycle_fetch_ms[sport] = 0.0  # cache hit — no I/O cost
+        logger.debug(
+            "SportsLiveMonitor: fetched %s in 0ms (cached=True, %d events)",
+            sport, len(cached.raw_events),
+        )
         return cached.raw_events
 
     url = f"{_ESPN_BASE}/{path}/scoreboard"
@@ -158,8 +169,13 @@ def _fetch_sport(sport: str) -> List[dict]:
         resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
         resp.raise_for_status()
         events = resp.json().get("events", [])
-        _sport_cache[sport] = _SportCache(fetched_at=now, raw_events=events, stale=False)
-        logger.debug("LiveGameMonitor: fetched %d events for %s", len(events), sport)
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        _sport_cache[sport] = _SportCache(fetched_at=t0, raw_events=events, stale=False)
+        _cycle_fetch_ms[sport] = elapsed_ms
+        logger.info(
+            "SportsLiveMonitor: fetched %s in %.0fms (cached=False, %d events)",
+            sport, elapsed_ms, len(events),
+        )
         return events
     except requests.exceptions.Timeout:
         logger.warning("LiveGameMonitor: ESPN timeout for %s — keeping last known state", sport)
@@ -168,16 +184,19 @@ def _fetch_sport(sport: str) -> List[dict]:
     except Exception as exc:
         logger.warning("LiveGameMonitor: unexpected error for %s: %s", sport, exc)
 
+    elapsed_ms = (time.monotonic() - t0) * 1000
+    _cycle_fetch_ms[sport] = elapsed_ms
+
     # On failure, preserve last data but mark stale
     if cached:
         _sport_cache[sport] = _SportCache(
-            fetched_at=now,
+            fetched_at=t0,
             raw_events=cached.raw_events,
             stale=True,
         )
         return cached.raw_events
 
-    _sport_cache[sport] = _SportCache(fetched_at=now, raw_events=[], stale=True)
+    _sport_cache[sport] = _SportCache(fetched_at=t0, raw_events=[], stale=True)
     return []
 
 
@@ -409,14 +428,30 @@ def refresh_if_stale() -> None:
     game state. Never call it mid-cycle — all evaluations within a cycle share
     the same snapshot.
 
-    Resets the newly-confirmed finals list each cycle so consumers see only
-    games that transitioned to confirmed on this specific cycle.
+    Resets the newly-confirmed finals list and per-cycle fetch timing each cycle
+    so consumers see only games/timings that arrived on this specific cycle.
     """
-    global _newly_confirmed_this_cycle
+    global _newly_confirmed_this_cycle, _cycle_fetch_ms
     _newly_confirmed_this_cycle = []
+    _cycle_fetch_ms = {}
     for sport in SPORT_PATHS:
         events = _fetch_sport(sport)
         _update_snapshots(sport, events)
+
+
+def get_cycle_fetch_ms() -> float:
+    """Return the total ESPN HTTP time spent this cycle (across all sports).
+
+    Cache hits contribute 0 ms.  Call after refresh_if_stale() for accurate
+    numbers.  Used by the executor to include sports fetch time in the GT
+    source timing summary line.
+    """
+    return sum(_cycle_fetch_ms.values())
+
+
+def get_per_sport_fetch_ms() -> Dict[str, float]:
+    """Return a copy of the per-sport fetch-time dict for the current cycle."""
+    return dict(_cycle_fetch_ms)
 
 
 def _update_snapshots(sport: str, events: list) -> None:

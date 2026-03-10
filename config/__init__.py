@@ -1,5 +1,5 @@
 """
-config.py – centralised settings loaded from environment / .env file.
+config – centralised settings loaded from environment / .env file.
 All other modules import from here; nothing reads os.environ directly.
 """
 
@@ -12,7 +12,7 @@ from typing import List, Optional
 
 from dotenv import load_dotenv
 
-_ENV_PATH = Path(__file__).parent / ".env"
+_ENV_PATH = Path(__file__).parent.parent / ".env"
 load_dotenv(_ENV_PATH, override=True)
 
 
@@ -156,11 +156,10 @@ class MonitoringConfig:
 
 @dataclass(frozen=True)
 class SignalTestSettings:
-    """Thin frozen mirror of SignalTestConfig for AppConfig (avoids circular import).
+    """Frozen signal-testing config stored on AppConfig.
 
-    The real SignalTestConfig lives in config/signal_testing.py and is built
-    from CLI args in main.py.  AppConfig stores this lightweight copy so all
-    modules can read test-mode flags via `cfg.signal_test`.
+    All modules read test-mode flags via ``cfg.signal_test``.
+    Built from CLI args by main.py via :meth:`from_cli_args`.
     """
 
     enabled: bool = False

@@ -31,7 +31,7 @@ import logging
 import os
 import re
 from dataclasses import replace as dc_replace
-from typing import List, Optional
+from typing import List, Optional, TYPE_CHECKING
 
 from data.markets.base import Market
 from .base import DataSource, GroundTruthResult
@@ -48,6 +48,9 @@ from .sports import SportsDataSource
 # → live_source.  The lazy import is safe because _build_default_sources() is
 # called only once at GroundTruthRouter instantiation time, after all modules
 # have finished loading.
+
+if TYPE_CHECKING:
+    from config import SignalTestSettings
 
 logger = logging.getLogger(__name__)
 
@@ -128,7 +131,9 @@ def _register(
             _PAPER_ONLY_SOURCES.add(type(src).__name__)
 
 
-def _build_default_sources() -> List[DataSource]:
+def _build_default_sources(
+    signal_test: Optional["SignalTestSettings"] = None,
+) -> List[DataSource]:
     """Build the default source list, respecting GT_*_ENABLED toggles."""
     # Lazy import to avoid circular dependency:
     # live_source → data.ground_truth (package) → router → live_source
@@ -139,7 +144,7 @@ def _build_default_sources() -> List[DataSource]:
     # SportsLiveSource is prepended before SportsDataSource so that shock
     # signals (high-confidence, sub-second latency) shadow the slower
     # final-only ESPN scoreboard results for in-progress game markets.
-    _register(sources, _GT_SPORTS_MODE,       SportsLiveSource(), SportsDataSource())
+    _register(sources, _GT_SPORTS_MODE,       SportsLiveSource(signal_test=signal_test), SportsDataSource())
     _register(sources, _GT_ECONOMIC_MODE,     EconomicDataSource(),
                                               EIADataSource(),        # active only when EIA_API_KEY is set
                                               FREDEconomicSource())   # active only when FRED_API_KEY is set
@@ -160,6 +165,77 @@ def _log_active_sources(sources: List[DataSource]) -> None:
     logger.info("GroundTruthRouter: active sources — %s", ", ".join(names) or "none")
 
 
+def _determine_verbose_verdict(
+    prob: Optional[float],
+    price: float,
+    gap: float,
+    conf: float,
+    min_gap: float,
+    signal_test: "SignalTestSettings",
+) -> str:
+    if prob is None:
+        return "no_source"
+    min_gap_eff = signal_test.effective_min_gap(min_gap)
+    conf_min    = signal_test.effective_min_confidence(0.80)
+    if gap < min_gap_eff:
+        return "gap_too_small"
+    if conf < conf_min:
+        return "conf_blocked"
+    return "actionable"
+
+
+# Maps signal name → list of source class names that implement it.
+# Kept here (not only in config/signal_testing.py) so router.py has no dep on
+# the config package at import time.
+_SIGNAL_TO_SOURCES: dict[str, list[str]] = {
+    "financial":         ["FinancialDataSource"],
+    "fred":              ["FREDEconomicSource"],
+    "sports_shock":      ["SportsLiveSource"],
+    "sports_staleness":  ["SportsLiveSource"],
+    "sports_panic":      ["SportsLiveSource"],
+    "sports_resolution": ["SportsLiveSource"],
+    "cross_platform":    [],  # not a GT source — handled by pairing logic
+}
+
+# Set of signal names whose source is SportsLiveSource (sub-signal filtering
+# happens inside live_source.py, not here at the class level).
+_SPORTS_SUB_SIGNALS = frozenset({
+    "sports_shock", "sports_staleness", "sports_panic", "sports_resolution",
+})
+
+
+def _source_class_names_for_active_signals(
+    active_signals: tuple,
+    suppress_signals: tuple,
+) -> Optional[set[str]]:
+    """Return the set of source class names that should run.
+
+    Returns None when no filtering is needed (all signals active).
+    """
+    from config.signal_testing import VALID_SIGNALS  # noqa: PLC0415
+
+    if not active_signals and not suppress_signals:
+        return None  # no filtering
+
+    allowed: set[str] = set()
+    if active_signals:
+        for sig in active_signals:
+            for cls_name in _SIGNAL_TO_SOURCES.get(sig, []):
+                allowed.add(cls_name)
+    else:
+        # suppress mode: include everyone not suppressed
+        all_class_names: set[str] = set()
+        for names in _SIGNAL_TO_SOURCES.values():
+            all_class_names.update(names)
+        suppressed: set[str] = set()
+        for sig in suppress_signals:
+            for cls_name in _SIGNAL_TO_SOURCES.get(sig, []):
+                suppressed.add(cls_name)
+        allowed = all_class_names - suppressed
+
+    return allowed
+
+
 class GroundTruthRouter:
     """
     Tries each data source in order and returns the best result.
@@ -167,12 +243,95 @@ class GroundTruthRouter:
     Designed to be extended: add new DataSource subclasses to _sources.
     """
 
-    def __init__(self, sources: Optional[List[DataSource]] = None) -> None:
+    def __init__(
+        self,
+        sources: Optional[List[DataSource]] = None,
+        signal_test: Optional["SignalTestSettings"] = None,
+    ) -> None:
+        self._signal_test = signal_test
         if sources is not None:
             self._sources = sources
         else:
-            self._sources = _build_default_sources()
+            self._sources = _build_default_sources(signal_test=signal_test)
         _log_active_sources(self._sources)
+        if signal_test and signal_test.enabled:
+            self._log_test_mode_sources()
+
+    def _log_test_mode_sources(self) -> None:
+        """Log which sources are active/suppressed in test mode."""
+        st = self._signal_test
+        if st is None or not st.enabled:
+            return
+        if st.active_signals:
+            logger.info(
+                "SignalTestMode: active_signals=%s — only these sources will run",
+                list(st.active_signals),
+            )
+        elif st.suppress_signals:
+            logger.info(
+                "SignalTestMode: suppress_signals=%s — these sources will be skipped",
+                list(st.suppress_signals),
+            )
+
+    def _is_source_allowed(self, source_name: str) -> bool:
+        """Return True if this source class should run given test-mode filters."""
+        st = self._signal_test
+        if st is None or not st.enabled:
+            return True
+        allowed = _source_class_names_for_active_signals(
+            st.active_signals, st.suppress_signals  # type: ignore[arg-type]
+        )
+        if allowed is None:
+            return True
+        return source_name in allowed
+
+    def _verbose_log(self, market: Market, source_name: str, result: Optional[GroundTruthResult], min_gap: float) -> None:
+        """Emit a verbose per-market decision-chain log line in test mode."""
+        st = self._signal_test
+        if st is None or not st.verbose:
+            return
+
+        if result is None:
+            logger.info(
+                "[%s] %s\n  source=%s  → no_source",
+                source_name, market.market_id, source_name,
+            )
+            return
+
+        prob        = result.ground_truth_prob
+        price       = market.yes_price
+        gap         = abs(prob - price) if prob is not None else 0.0
+        conf        = result.confidence
+        verdict     = _determine_verbose_verdict(prob, price, gap, conf, min_gap, st)
+
+        raw         = result.raw_data or {}
+        value_str   = str(raw.get("value", raw.get("raw_value", raw.get("score", ""))))
+        threshold   = raw.get("threshold", raw.get("strike", ""))
+        src_detail  = raw.get("source_detail", result.source_name)
+
+        lines = [
+            f"[{source_name}] {market.market_id}",
+            f"  source={src_detail}  value={value_str}  threshold={threshold}",
+            f"  prob={prob:.2f}  market_price={price:.2f}  gap={gap*100:.1f}%",
+        ]
+
+        min_gap_eff = st.effective_min_gap(min_gap)
+        conf_min    = st.effective_min_confidence(0.80)
+        if gap < min_gap_eff:
+            lines.append(
+                f"  min_gap={min_gap_eff:.2f}  → SMALL_GAP "
+                f"(would need gap > {min_gap_eff:.2f} to trade)"
+            )
+        else:
+            lines.append(f"  min_gap={min_gap_eff:.2f}  → gap OK")
+        if conf < conf_min:
+            lines.append(f"  confidence={conf:.2f}  → would FAIL gate (need {conf_min:.2f})")
+        else:
+            lines.append(f"  confidence={conf:.2f}  → would PASS gate")
+
+        lines.append(f"  verdict: {verdict}")
+        logger.info("\n".join(lines))
+
 
     def fetch(self, market: Market) -> Optional[GroundTruthResult]:
         """
@@ -185,7 +344,10 @@ class GroundTruthRouter:
         """
         # Fast pre-check: bail early if no source claims this market at all.
         # All can_handle() calls are in-memory keyword checks — no I/O.
-        if not any(s.can_handle(market) for s in self._sources):
+        active_sources = [
+            s for s in self._sources if self._is_source_allowed(type(s).__name__)
+        ]
+        if not any(s.can_handle(market) for s in active_sources):
             logger.debug("GroundTruthRouter: no source can handle %s", market.market_id)
             return None
 
@@ -193,7 +355,11 @@ class GroundTruthRouter:
         candidates: List[GroundTruthResult] = []
         none_reasons: List[str] = []
 
-        for source in self._sources:
+        # Default min_gap for verbose verdict (router doesn't have per-source config,
+        # uses the global resolution_min_gap=0.04 as floor; callers may override).
+        _default_min_gap = 0.04
+
+        for source in active_sources:
             source_name = type(source).__name__
 
             # Guard: re-check can_handle() immediately before fetch() so that a
@@ -219,6 +385,10 @@ class GroundTruthRouter:
                 )
                 none_reasons.append(f"{source_name}: raised {type(exc).__name__}: {exc}")
                 result = None
+
+            # Verbose decision-chain logging in test mode
+            if self._signal_test and self._signal_test.enabled and self._signal_test.verbose:
+                self._verbose_log(market, source_name, result, _default_min_gap)
 
             if result is None:
                 none_reasons.append(f"{source_name}: returned None (no relevant data found)")

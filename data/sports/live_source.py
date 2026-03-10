@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from data.markets.base import Market
 from data.ground_truth.base import DataSource, GroundTruthResult, SourceType
@@ -38,6 +38,9 @@ from .live_game_monitor import get_active_snapshots, is_sport_stale
 from .market_matcher import match_market
 from .shock_detector import get_cached_shock
 from .win_probability import compute_win_probability
+
+if TYPE_CHECKING:
+    from config import SignalTestSettings
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +61,22 @@ class SportsLiveSource(DataSource):
 
     Designed to be prepended to the GroundTruthRouter source list so it runs
     before the slower SportsDataSource for in-progress game markets.
+
+    In signal test mode, individual sports sub-signals (shock / staleness /
+    panic / resolution) can be activated or suppressed via signal_test config.
+    The router serves shock (and late-game) signals; staleness / panic /
+    resolution are co-ordinated by pipeline.py but respect the same config.
     """
+
+    def __init__(self, signal_test: Optional["SignalTestSettings"] = None) -> None:
+        self._signal_test = signal_test
+
+    def _sub_signal_active(self, sub: str) -> bool:
+        """Return True if the given sports sub-signal should run."""
+        st = self._signal_test
+        if st is None or not st.enabled:
+            return True
+        return st.is_signal_active(sub)
 
     def can_handle(self, market: Market) -> bool:
         """Fast in-memory check — no I/O."""
@@ -115,45 +133,55 @@ class SportsLiveSource(DataSource):
             )
             return None
 
-        # Check for a cached shock signal first
-        shock = get_cached_shock(snapshot.game_id)
-        if shock is not None and shock.confidence >= 0.85:
-            prob = self._directional_prob(shock.prob_after, match, snapshot)
-            elapsed_ms = (time.monotonic() - t0) * 1000
-            logger.info(
-                "SportsLiveSource: shock signal for %s | prob=%.3f conf=%.2f "
-                "shock=%.2f trigger=%r | elapsed=%.1fms",
-                market.market_id, prob, shock.confidence,
-                shock.shock_magnitude, shock.trigger_event, elapsed_ms,
-            )
-            return GroundTruthResult(
-                ground_truth_prob=prob,
-                confidence=shock.confidence,
-                source_type=SourceType.HARD,
-                source_name="SportsLiveSource/Shock",
-                source_url=f"https://site.api.espn.com/apis/site/v2/sports",
-                raw_data={
-                    "game_id": snapshot.game_id,
-                    "sport": sport,
-                    "home_team": snapshot.home_team,
-                    "away_team": snapshot.away_team,
-                    "prob_before": shock.prob_before,
-                    "prob_after": shock.prob_after,
-                    "shock_magnitude": shock.shock_magnitude,
-                    "trigger_event": shock.trigger_event,
-                    "seconds_remaining": shock.seconds_remaining,
-                    "signal_type": "shock",
-                },
-                reasoning=(
-                    f"SHOCK signal: {sport.upper()} {snapshot.home_team} vs "
-                    f"{snapshot.away_team} | prob {shock.prob_before:.2f}→"
-                    f"{shock.prob_after:.2f} (Δ{shock.shock_magnitude:.2f}) | "
-                    f"trigger={shock.trigger_event!r} | "
-                    f"{shock.seconds_remaining:.0f}s remaining"
-                ),
+        # Check for a cached shock signal first (suppressed in test mode if
+        # sports_shock is not in active_signals)
+        if self._sub_signal_active("sports_shock"):
+            shock = get_cached_shock(snapshot.game_id)
+            if shock is not None and shock.confidence >= 0.85:
+                prob = self._directional_prob(shock.prob_after, match, snapshot)
+                elapsed_ms = (time.monotonic() - t0) * 1000
+                logger.info(
+                    "SportsLiveSource: shock signal for %s | prob=%.3f conf=%.2f "
+                    "shock=%.2f trigger=%r | elapsed=%.1fms",
+                    market.market_id, prob, shock.confidence,
+                    shock.shock_magnitude, shock.trigger_event, elapsed_ms,
+                )
+                return GroundTruthResult(
+                    ground_truth_prob=prob,
+                    confidence=shock.confidence,
+                    source_type=SourceType.HARD,
+                    source_name="SportsLiveSource/Shock",
+                    source_url="https://site.api.espn.com/apis/site/v2/sports",
+                    raw_data={
+                        "game_id": snapshot.game_id,
+                        "sport": sport,
+                        "home_team": snapshot.home_team,
+                        "away_team": snapshot.away_team,
+                        "prob_before": shock.prob_before,
+                        "prob_after": shock.prob_after,
+                        "shock_magnitude": shock.shock_magnitude,
+                        "trigger_event": shock.trigger_event,
+                        "seconds_remaining": shock.seconds_remaining,
+                        "signal_type": "sports_shock",
+                        "sub_signal": "sports_shock",
+                    },
+                    reasoning=(
+                        f"SHOCK signal: {sport.upper()} {snapshot.home_team} vs "
+                        f"{snapshot.away_team} | prob {shock.prob_before:.2f}→"
+                        f"{shock.prob_after:.2f} (Δ{shock.shock_magnitude:.2f}) | "
+                        f"trigger={shock.trigger_event!r} | "
+                        f"{shock.seconds_remaining:.0f}s remaining"
+                    ),
+                )
+        else:
+            logger.debug(
+                "SportsLiveSource: sports_shock suppressed in test mode for %s",
+                market.market_id,
             )
 
-        # No shock — try non-shock late-game signal
+        # No shock — try non-shock late-game signal (also under sports_shock gate)
+        if not self._sub_signal_active("sports_shock"):
+            return None
         result = self._late_game_signal(market, snapshot, match, sport, t0)
         return result
 

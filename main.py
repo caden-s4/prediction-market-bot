@@ -8,9 +8,18 @@ platform.
 
 Usage
 -----
-    python main.py                   # run continuously (dry-run by default)
-    python main.py --once            # single scan cycle, then exit
-    python main.py --log-level DEBUG # verbose output
+    python main.py                              # run continuously (dry-run by default)
+    python main.py --once                       # single scan cycle, then exit
+    python main.py --log-level DEBUG            # verbose output
+
+    # Signal testing / isolation
+    python main.py --test-signal financial      # run only the financial signal
+    python main.py --test-signal sports_shock   # run only sports shock signal
+    python main.py --test-signal fred --min-confidence 0.7
+    python main.py --test-signal sports_resolution --min-gap 0.05
+    python main.py --suppress-signal fred --suppress-signal cross_platform
+    python main.py --compare financial fred     # side-by-side comparison
+    python main.py --replay logs/bot_log.1      # re-run from saved verbose log
 
 Environment
 -----------
@@ -44,7 +53,7 @@ _PST = ZoneInfo("America/Los_Angeles")
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from config import AppConfig
+from config import AppConfig, SignalTestSettings
 from bot import BotCoordinator
 from utils.logger import setup_logging
 
@@ -482,6 +491,177 @@ def _print_history(coordinator: BotCoordinator) -> None:
     print()
 
 
+def _print_test_mode_banner(st: SignalTestSettings) -> None:
+    """Print a prominent banner when signal test mode is active."""
+    W = 44
+    box_w = W + 2
+
+    def _pad(s: str) -> str:
+        return f"║  {s:<{W}}║"
+
+    lines = []
+    if st.active_signals:
+        signals_str = ", ".join(st.active_signals)
+        lines.append(f"SIGNAL TEST MODE — {signals_str} only")
+        lines.append("All other signals suppressed")
+    else:
+        suppressed_str = ", ".join(st.suppress_signals)
+        lines.append("SIGNAL TEST MODE — suppress mode")
+        lines.append(f"Suppressed: {suppressed_str}")
+
+    lines.append("Ghost mode forced ON")
+
+    if st.min_confidence_override is not None:
+        lines.append(f"Min confidence: {st.min_confidence_override:.2f} (override)")
+    else:
+        lines.append("Min confidence: 0.80 (default)")
+
+    if st.min_gap_override is not None:
+        lines.append(f"Min gap: {st.min_gap_override:.2f} (override)")
+
+    print(f"\n╔{'═' * box_w}╗")
+    for line in lines:
+        print(_pad(line[:W]))
+    print(f"╚{'═' * box_w}╝\n")
+
+
+def _run_compare_mode(
+    args: argparse.Namespace,
+    cfg: AppConfig,
+    signals_a: list,
+    signals_b: list,
+) -> None:
+    """Run two signal configs side-by-side and log differences."""
+    logger = logging.getLogger(__name__)
+
+    st_a = SignalTestSettings.from_cli_args(signals_a, None, args.min_confidence, args.min_gap)
+    st_b = SignalTestSettings.from_cli_args(signals_b, None, args.min_confidence, args.min_gap)
+
+    cfg_a = cfg.with_signal_test(st_a)
+    cfg_b = cfg.with_signal_test(st_b)
+
+    _print_test_mode_banner(st_a)
+    print(f"  COMPARE MODE: {signals_a}  vs  {signals_b}\n")
+
+    coord_a = BotCoordinator(config=cfg_a)
+    coord_b = BotCoordinator(config=cfg_b)
+
+    result_a = coord_a.run_once(skip_stabilization=True)
+    result_b = coord_b.run_once(skip_stabilization=True)
+
+    sep = "=" * 54
+    print(f"\n{sep}")
+    print(f"  COMPARE RESULTS")
+    print(sep)
+
+    sigs_a = result_a.get("signals_detail", [])
+    sigs_b = result_b.get("signals_detail", [])
+
+    ids_a = {s.get("market_id", s.get("question", "")) for s in sigs_a}
+    ids_b = {s.get("market_id", s.get("question", "")) for s in sigs_b}
+
+    only_a = ids_a - ids_b
+    only_b = ids_b - ids_a
+    both   = ids_a & ids_b
+
+    sig_a_str = ", ".join(signals_a)
+    sig_b_str = ", ".join(signals_b)
+
+    print(f"  [{sig_a_str}] only  : {len(only_a)} signal(s)")
+    print(f"  [{sig_b_str}] only  : {len(only_b)} signal(s)")
+    print(f"  Both agree (convergence): {len(both)} signal(s)")
+
+    if both:
+        print(f"\n  Convergence signals (both fired):")
+        for mid in sorted(both):
+            print(f"    {mid}")
+
+    if only_a:
+        print(f"\n  Only [{sig_a_str}]:")
+        for mid in sorted(only_a):
+            print(f"    {mid}")
+
+    if only_b:
+        print(f"\n  Only [{sig_b_str}]:")
+        for mid in sorted(only_b):
+            print(f"    {mid}")
+
+    print(sep)
+
+
+def _run_replay_mode(log_path: str) -> None:
+    """Re-run signal evaluation by parsing a verbose log file (no live API calls)."""
+    import re as _re
+
+    logger = logging.getLogger(__name__)
+    path = Path(log_path)
+    if not path.exists():
+        logger.error("Replay: log file not found: %s", log_path)
+        return
+
+    sep = "=" * 54
+    print(f"\n{sep}")
+    print(f"  REPLAY MODE — {path.name}")
+    print(sep)
+
+    # Parse verbose log entries emitted by _verbose_log() in router.py
+    # Format: "[SourceName] MARKET_ID\n  source=... value=... ..."
+    entry_re  = _re.compile(r"^\[(\w+)\] (\S+)$")
+    verdict_re = _re.compile(r"verdict:\s+(\w+)")
+
+    entries: list[dict] = []
+    current: dict | None = None
+
+    try:
+        text = path.read_text(errors="replace")
+    except Exception as exc:
+        logger.error("Replay: could not read %s: %s", log_path, exc)
+        return
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        m = entry_re.match(line)
+        if m:
+            if current:
+                entries.append(current)
+            current = {"source": m.group(1), "market_id": m.group(2), "verdict": "unknown", "lines": [line]}
+        elif current is not None:
+            current["lines"].append(line)
+            vm = verdict_re.search(line)
+            if vm:
+                current["verdict"] = vm.group(1)
+
+    if current:
+        entries.append(current)
+
+    if not entries:
+        print("  No verbose signal entries found in log file.")
+        print("  (Run with --test-signal <name> to generate verbose logs.)")
+        print(sep)
+        return
+
+    # Aggregate
+    from collections import Counter
+    verdict_counts: Counter = Counter(e["verdict"] for e in entries)
+    source_counts: Counter  = Counter(e["source"] for e in entries)
+
+    print(f"  Total entries parsed: {len(entries)}")
+    print(f"  Sources: {dict(source_counts)}")
+    print(f"\n  Verdict breakdown:")
+    for verdict, count in sorted(verdict_counts.items()):
+        print(f"    {verdict:<20} : {count}")
+
+    actionable = [e for e in entries if e["verdict"] == "actionable"]
+    if actionable:
+        print(f"\n  Actionable signals ({len(actionable)}):")
+        for e in actionable[:20]:
+            print(f"    [{e['source']}] {e['market_id']}")
+        if len(actionable) > 20:
+            print(f"    ... and {len(actionable) - 20} more")
+
+    print(sep)
+
+
 def _print_help() -> None:
     sep = "=" * _SEP_W
     print(f"\n{sep}")
@@ -594,6 +774,72 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the full market name and details for each trade fired",
     )
+
+    # ── Signal testing / isolation ─────────────────────────────────────────────
+    _sig_group = parser.add_argument_group("signal testing")
+    _sig_group.add_argument(
+        "--test-signal",
+        dest="test_signals",
+        metavar="SIGNAL",
+        action="append",
+        default=[],
+        help=(
+            "Run only this signal source; all others are suppressed. "
+            "Can be specified multiple times. "
+            "Valid: financial, fred, sports_shock, sports_staleness, "
+            "sports_panic, sports_resolution, cross_platform"
+        ),
+    )
+    _sig_group.add_argument(
+        "--suppress-signal",
+        dest="suppress_signals",
+        metavar="SIGNAL",
+        action="append",
+        default=[],
+        help=(
+            "Suppress this signal source even if it would normally fire. "
+            "Can be specified multiple times. "
+            "Ignored when --test-signal is also specified."
+        ),
+    )
+    _sig_group.add_argument(
+        "--min-confidence",
+        dest="min_confidence",
+        type=float,
+        default=None,
+        metavar="FLOAT",
+        help="Override the minimum confidence gate (0.0–1.0) for test mode.",
+    )
+    _sig_group.add_argument(
+        "--min-gap",
+        dest="min_gap",
+        type=float,
+        default=None,
+        metavar="FLOAT",
+        help="Override the minimum effective-gap threshold for test mode.",
+    )
+    _sig_group.add_argument(
+        "--compare",
+        dest="compare",
+        nargs=2,
+        metavar=("SIGNAL_A", "SIGNAL_B"),
+        default=None,
+        help=(
+            "Run two signal configs side-by-side and log differences. "
+            "Example: --compare financial fred"
+        ),
+    )
+    _sig_group.add_argument(
+        "--replay",
+        dest="replay",
+        metavar="LOG_FILE",
+        default=None,
+        help=(
+            "Re-run signal evaluation by parsing a saved verbose log file "
+            "(no live API calls). "
+            "Example: --replay logs/bot_log.1"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -607,11 +853,48 @@ def main() -> None:
     setup_logging(level=log_level, log_file=args.log_file)
     logger = logging.getLogger(__name__)
 
+    # ── Replay mode — no live API calls needed ─────────────────────────────────
+    if args.replay:
+        _run_replay_mode(args.replay)
+        return
+
     try:
         cfg = AppConfig.load()
     except EnvironmentError as exc:
         logger.error("Configuration error: %s", exc)
         sys.exit(1)
+
+    # ── Compare mode ───────────────────────────────────────────────────────────
+    if args.compare:
+        _run_compare_mode(args, cfg, [args.compare[0]], [args.compare[1]])
+        return
+
+    # ── Build signal test config from CLI args ─────────────────────────────────
+    signal_test = SignalTestSettings.disabled()
+    if args.test_signals or args.suppress_signals:
+        from config.signal_testing import VALID_SIGNALS  # noqa: PLC0415
+        for name in (args.test_signals or []) + (args.suppress_signals or []):
+            if name not in VALID_SIGNALS:
+                valid = ", ".join(sorted(VALID_SIGNALS))
+                logger.error("Unknown signal '%s'. Valid signals: %s", name, valid)
+                sys.exit(1)
+        signal_test = SignalTestSettings.from_cli_args(
+            active_signals=args.test_signals or None,
+            suppress_signals=args.suppress_signals or None,
+            min_confidence=args.min_confidence,
+            min_gap=args.min_gap,
+        )
+        cfg = cfg.with_signal_test(signal_test)
+
+        # Register active signals with SignalStats for per-cycle reporting
+        from resolution.signal_stats import SignalStats  # noqa: PLC0415
+        tracked = list(signal_test.active_signals or signal_test.suppress_signals)
+        if tracked:
+            SignalStats.get().set_active_signals(tracked)
+
+    # ── Startup banners ────────────────────────────────────────────────────────
+    if signal_test.enabled:
+        _print_test_mode_banner(signal_test)
 
     if cfg.bot.dry_run:
         logger.warning(
@@ -630,6 +913,9 @@ def main() -> None:
         logger.info("Running single scan cycle (--once mode)")
         result = coordinator.run_once(skip_stabilization=True)
         _print_summary(result, cfg, show_names=show_names)
+        if signal_test.enabled:
+            from resolution.signal_stats import SignalStats  # noqa: PLC0415
+            SignalStats.get().end_cycle(print_report=True)
     else:
         interval = cfg.bot.resolution_scan_interval_seconds
         logger.info("Starting continuous scan (interval=%ds)", interval)
@@ -637,6 +923,7 @@ def main() -> None:
         _start_command_listener(coordinator, scan_event, cfg)
         _inhibit_sleep()
         try:
+            cycle_count = 0
             while True:
                 try:
                     # Skip the startup stabilization guard in continuous mode.
@@ -650,6 +937,10 @@ def main() -> None:
                     # evaluation; there is nothing stale to guard against.
                     result = coordinator.run_once(skip_stabilization=True)
                     _print_summary(result, cfg, show_names=show_names)
+                    cycle_count += 1
+                    if signal_test.enabled:
+                        from resolution.signal_stats import SignalStats  # noqa: PLC0415
+                        SignalStats.get().end_cycle(print_report=True)
                 except KeyboardInterrupt:
                     logger.info("Stopped by user")
                     break

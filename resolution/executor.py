@@ -1073,6 +1073,16 @@ class ResolutionBot:
                 f"{src}:{cnt}x{elapsed / max(cnt, 1):.1f}s"
                 for src, cnt, elapsed in timing_parts
             )
+
+            # Append total ESPN sports fetch time so it's visible alongside GT timings.
+            try:
+                from data.sports.live_game_monitor import get_cycle_fetch_ms  # noqa: PLC0415
+                sports_fetch_ms = get_cycle_fetch_ms()
+                if sports_fetch_ms > 0:
+                    timing_str += f"  espn_fetch:{sports_fetch_ms:.0f}ms"
+            except Exception:
+                pass
+
             logger.info("ResolutionBot: GT source timing — %s", timing_str)
 
         # Persist evaluated set so run_once can guard the clear_urgent logic.
