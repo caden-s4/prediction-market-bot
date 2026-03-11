@@ -136,6 +136,25 @@ _ECON_FOREIGN_INDICATORS = frozenset({
 })
 
 
+# ── Ticker month parser ────────────────────────────────────────────────────────
+# Matches the YYMON date segment in Kalshi market IDs.
+# Examples: KXCPI-26FEB → ("26", "FEB"); KXCPI-26MAR02-T3.5 → ("26", "MAR")
+_ECON_TICKER_MONTH_RE = re.compile(
+    r"-(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)",
+    re.IGNORECASE,
+)
+_ECON_MONTH_ABBR: Dict[str, int] = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+# Monthly series that require release-date alignment: only trade when FRED
+# has data for the exact month the market is asking about.
+# CPILFESL (Core CPI) is included even though _INDICATOR_MAP routes it via
+# CPIAUCSL — this keeps the guard future-proof if the map is extended.
+_MONTHLY_CPI_SERIES: frozenset = frozenset({"CPIAUCSL", "CPILFESL"})
+
+
 class EconomicDataSource(DataSource):
     """
     Fetches economic indicator data from FRED public API.
@@ -211,6 +230,61 @@ class EconomicDataSource(DataSource):
                 )
                 return None
 
+            # ── Parts 1 & 2: staleness + release-date alignment for monthly CPI ───
+            # FREDEconomicSource uses two independent guards for CPIAUCSL/CPILFESL:
+            #   Part 1 — _obs_too_old_for_market: kill when (resolution_date − obs)
+            #             > 45 days, or when resolution_date cannot be determined
+            #             (conservative-fail).
+            #   Part 2 — month alignment: kill when obs month < market target month.
+            # The same logic is applied here, in the same order, with the same
+            # conservative-fail on exception (return None, never pass through).
+            if series_id in _MONTHLY_CPI_SERIES and latest_date is not None:
+                try:
+                    obs_dt = datetime.strptime(latest_date, "%Y-%m-%d")
+
+                    # Part 2 first — most precise guard; bypasses the 45-day heuristic
+                    # that can fail when the market resolves early in the target month.
+                    target_month = self._parse_market_month(market)
+                    if target_month is not None:
+                        if (obs_dt.year, obs_dt.month) < (target_month.year, target_month.month):
+                            logger.info(
+                                "EconSource: %s observation date %s does not cover %s"
+                                " — data not yet released, skipping",
+                                series_id, latest_date, target_month.strftime("%B %Y"),
+                            )
+                            return None
+
+                    # Part 1 — resolution-date staleness (secondary guard).
+                    # Mirrors FREDEconomicSource._obs_too_old_for_market exactly,
+                    # including the conservative-fail behaviour on exception.
+                    resolution_date = market.resolution_date
+                    if getattr(resolution_date, "tzinfo", None) is not None:
+                        resolution_date = resolution_date.replace(tzinfo=None)
+                    delta_days = (resolution_date - obs_dt).days
+                    if delta_days > 45:
+                        logger.warning(
+                            "EconSource: %s observation %s is %dd before market "
+                            "resolution %s (> 45-day limit) — stale, skipping %s",
+                            series_id, latest_date, delta_days,
+                            market.resolution_date.strftime("%Y-%m-%d"),
+                            market.market_id,
+                        )
+                        return None
+
+                except Exception:
+                    # Cannot parse obs_date or read resolution_date — conservatively
+                    # suppress the signal rather than allowing a potentially
+                    # wrong-month observation to pass through.  Matches the
+                    # conservative-fail path in
+                    # FREDEconomicSource._obs_too_old_for_market.
+                    logger.warning(
+                        "EconSource: %s could not apply staleness/alignment check"
+                        " for %s — treating monthly CPI observation as"
+                        " non-tradeable (safe default)",
+                        series_id, market.market_id,
+                    )
+                    return None
+
             # Determine if the latest release is "fresh" (within the market window)
             threshold = self._extract_threshold(market.question, indicator_key)
             ground_truth_prob = self._compute_prob(latest_value, threshold, market)
@@ -245,7 +319,7 @@ class EconomicDataSource(DataSource):
 
             if confidence is None:
                 fresh_h, max_h = _SERIES_STALENESS.get(series_id, (24, 168))
-                logger.debug(
+                logger.warning(
                     "EconSource: %s data from %s exceeds max staleness (%dh) — skipping %s",
                     series_id, latest_date, max_h, market.market_id,
                 )
@@ -417,6 +491,24 @@ class EconomicDataSource(DataSource):
         threshold = self._extract_threshold(market.question, indicator_key)
         return self._compute_prob(raw_value, threshold, market)
 
+    @staticmethod
+    def _parse_market_month(market: Market) -> Optional[datetime]:
+        """Return the first day of the month a Kalshi market is asking about.
+
+        Parses the YYMON segment from the market ID:
+          KXCPI-26FEB        → datetime(2026, 2, 1)
+          KXCPI-26MAR02-T3.5 → datetime(2026, 3, 1)
+        Returns None when no month can be parsed.
+        """
+        m = _ECON_TICKER_MONTH_RE.search(market.market_id)
+        if not m:
+            return None
+        year = 2000 + int(m.group(1))
+        month = _ECON_MONTH_ABBR.get(m.group(2).upper())
+        if month is None:
+            return None
+        return datetime(year, month, 1)
+
     def _references_historical_period(self, question: str) -> bool:
         """
         True if the question is about a specific fixed historical data point
@@ -446,19 +538,16 @@ class EconomicDataSource(DataSource):
         Per-series windows (from _SERIES_STALENESS) override the defaults:
           < fresh_hours → 0.95  (data released very recently)
           < max_hours   → 0.80  (within the relevant release cycle)
-          ≥ max_hours   → None  (market has already priced this in; skip)
+          ≥ max_hours   → None  (stale — signal killed unconditionally)
 
-        Exception: questions that reference a specific historical period
-        ("in Q3 2024", "for fiscal year 2022") are about a fixed past value
-        — staleness is irrelevant because the answer cannot change.
+        The previous _references_historical_period bypass has been removed.
+        Questions like "Will February 2026 CPI exceed 3.1%?" match the month
+        regex and bypassed the staleness gate, allowing January data (68 days
+        old, well above CPIAUCSL's 744-hour max) to leak through as prob=1.00.
+        Stale data must kill the signal regardless of question phrasing.
         """
         if latest_date is None:
             return 0.0
-
-        # Historical-period questions: the data point is immutable, so staleness
-        # doesn't affect signal quality.
-        if self._references_historical_period(market.question):
-            return 0.80
 
         try:
             release_dt = datetime.strptime(latest_date, "%Y-%m-%d").replace(
@@ -470,11 +559,13 @@ class EconomicDataSource(DataSource):
             # Use series-specific window if available, otherwise fall back to defaults
             fresh_hours, max_hours = _SERIES_STALENESS.get(series_id, (24, 168))
 
+            # Staleness check is unconditional — applied before any other gate so
+            # no question-text pattern can bypass it.
+            if hours_since >= max_hours:
+                return None
             if hours_since < fresh_hours:
                 return 0.95
-            if hours_since < max_hours:
-                return 0.80
-            return None
+            return 0.80
         except Exception:
             return None
 

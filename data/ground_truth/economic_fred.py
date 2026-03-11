@@ -195,6 +195,24 @@ _SUFFIX_ABOVE_RE = re.compile(
 )
 
 
+# ── Ticker month parser ────────────────────────────────────────────────────────
+# Matches the YYMON date segment in Kalshi market IDs.
+# Examples: KXCPI-26FEB → ("26", "FEB"); KXCPICOREYOY-26FEB → ("26", "FEB")
+_TICKER_MONTH_RE = re.compile(
+    r"-(\d{2})(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)",
+    re.IGNORECASE,
+)
+_MONTH_ABBR: Dict[str, int] = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+# Series requiring strict release-date alignment: if FRED's most recent
+# observation is for an earlier month than the market target, the data has not
+# been released yet and the signal must be suppressed.
+_MONTHLY_ALIGNED_SERIES: frozenset = frozenset({"CPIAUCSL", "CPILFESL"})
+
+
 def _parse_float(s: str) -> Optional[float]:
     try:
         return float(s.replace(",", ""))
@@ -319,6 +337,27 @@ class FREDEconomicSource(DataSource):
             if self._obs_too_old_for_market(series_id, obs_date, market):
                 return None
 
+            # ── Part 2: Release-date alignment for monthly CPI series ──────────
+            # The 45-day resolution_date heuristic in _obs_too_old_for_market can
+            # fail when a market resolves early in the target month (e.g. KXCPI-26FEB
+            # resolving Feb 12: delta = 42 days ≤ 45 → not flagged).  This check
+            # directly compares the observation month to the market's target month so
+            # January data is never used to price a February CPI market.
+            if series_id in _MONTHLY_ALIGNED_SERIES:
+                target_month = self._parse_market_month(market)
+                if target_month is not None:
+                    obs_ym = (obs_date.year, obs_date.month)
+                    tgt_ym = (target_month.year, target_month.month)
+                    if obs_ym < tgt_ym:
+                        logger.info(
+                            "FREDEconSource: %s observation date %s does not cover %s"
+                            " — data not yet released, skipping",
+                            series_id,
+                            obs_date.strftime("%Y-%m-%d"),
+                            target_month.strftime("%B %Y"),
+                        )
+                        return None
+
             ground_truth_prob = 1.0 if (value > threshold) == is_above else 0.0
             outcome_str = "YES" if ground_truth_prob == 1.0 else "NO"
 
@@ -359,6 +398,25 @@ class FREDEconomicSource(DataSource):
             return None
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_market_month(market: Market) -> Optional[datetime]:
+        """Return the first day of the month a Kalshi market is asking about.
+
+        Parses the YYMON segment from the market ID:
+          KXCPI-26FEB          → datetime(2026, 2, 1)
+          KXCPICOREYOY-26FEB   → datetime(2026, 2, 1)
+          KXCPI-26MAR02-T3.5   → datetime(2026, 3, 1)
+        Returns None when no month can be parsed.
+        """
+        m = _TICKER_MONTH_RE.search(market.market_id)
+        if not m:
+            return None
+        year = 2000 + int(m.group(1))
+        month = _MONTH_ABBR.get(m.group(2).upper())
+        if month is None:
+            return None
+        return datetime(year, month, 1)
 
     def _identify_series(self, market: Market) -> Optional[str]:
         """Return the best FRED series ID for this market."""
@@ -566,6 +624,11 @@ class FREDEconomicSource(DataSource):
         Non-monthly series (daily, weekly, quarterly) are not gated here —
         their existing staleness check in _fetch_series/_fetch_two_observations
         is sufficient.
+
+        Note: the 45-day heuristic can be insufficient for CPI markets that
+        resolve early in the target month (delta ≤ 45).  The month-alignment
+        check added in fetch() for _MONTHLY_ALIGNED_SERIES provides a tighter,
+        ticker-based guard for those series.
         """
         meta = FRED_SERIES.get(series_id, {})
         if meta.get("frequency") != "monthly":
@@ -577,16 +640,25 @@ class FREDEconomicSource(DataSource):
                 resolution_date = resolution_date.replace(tzinfo=None)
             delta_days = (resolution_date - obs_date).days
             if delta_days > 45:
-                logger.info(
-                    "FREDEconSource: %s observation %s too old for market "
-                    "resolving %s — skipping",
+                logger.warning(
+                    "FREDEconSource: %s observation %s is %dd before market "
+                    "resolution %s (> 45-day limit) — stale, skipping",
                     series_id,
                     obs_date.strftime("%Y-%m-%d"),
+                    delta_days,
                     market.resolution_date.strftime("%Y-%m-%d"),
                 )
                 return True
         except Exception:
-            pass
+            # Cannot determine resolution date — conservatively treat monthly
+            # series as stale rather than allowing a potentially wrong-month
+            # observation to pass through.
+            logger.warning(
+                "FREDEconSource: %s could not determine resolution date for %s"
+                " — treating monthly observation as stale (safe default)",
+                series_id, market.market_id,
+            )
+            return True
         return False
 
     @staticmethod
