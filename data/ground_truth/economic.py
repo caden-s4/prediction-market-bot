@@ -150,7 +150,9 @@ _ECON_MONTH_ABBR: Dict[str, int] = {
 
 # Monthly series that require release-date alignment: only trade when FRED
 # has data for the exact month the market is asking about.
-_MONTHLY_CPI_SERIES: frozenset = frozenset({"CPIAUCSL"})
+# CPILFESL (Core CPI) is included even though _INDICATOR_MAP routes it via
+# CPIAUCSL — this keeps the guard future-proof if the map is extended.
+_MONTHLY_CPI_SERIES: frozenset = frozenset({"CPIAUCSL", "CPILFESL"})
 
 
 class EconomicDataSource(DataSource):
@@ -228,16 +230,22 @@ class EconomicDataSource(DataSource):
                 )
                 return None
 
-            # ── Part 2: Release-date alignment for monthly CPI series ──────────
-            # KXCPI-26FEB asks about February 2026 CPI.  If FRED's most recent
-            # observation is for January 2026 (or earlier), the February data has
-            # not been published yet — return None rather than trading on the
-            # wrong month's reading.
+            # ── Parts 1 & 2: staleness + release-date alignment for monthly CPI ───
+            # FREDEconomicSource uses two independent guards for CPIAUCSL/CPILFESL:
+            #   Part 1 — _obs_too_old_for_market: kill when (resolution_date − obs)
+            #             > 45 days, or when resolution_date cannot be determined
+            #             (conservative-fail).
+            #   Part 2 — month alignment: kill when obs month < market target month.
+            # The same logic is applied here, in the same order, with the same
+            # conservative-fail on exception (return None, never pass through).
             if series_id in _MONTHLY_CPI_SERIES and latest_date is not None:
-                target_month = self._parse_market_month(market)
-                if target_month is not None:
-                    try:
-                        obs_dt = datetime.strptime(latest_date, "%Y-%m-%d")
+                try:
+                    obs_dt = datetime.strptime(latest_date, "%Y-%m-%d")
+
+                    # Part 2 first — most precise guard; bypasses the 45-day heuristic
+                    # that can fail when the market resolves early in the target month.
+                    target_month = self._parse_market_month(market)
+                    if target_month is not None:
                         if (obs_dt.year, obs_dt.month) < (target_month.year, target_month.month):
                             logger.info(
                                 "EconSource: %s observation date %s does not cover %s"
@@ -245,8 +253,37 @@ class EconomicDataSource(DataSource):
                                 series_id, latest_date, target_month.strftime("%B %Y"),
                             )
                             return None
-                    except ValueError:
-                        pass
+
+                    # Part 1 — resolution-date staleness (secondary guard).
+                    # Mirrors FREDEconomicSource._obs_too_old_for_market exactly,
+                    # including the conservative-fail behaviour on exception.
+                    resolution_date = market.resolution_date
+                    if getattr(resolution_date, "tzinfo", None) is not None:
+                        resolution_date = resolution_date.replace(tzinfo=None)
+                    delta_days = (resolution_date - obs_dt).days
+                    if delta_days > 45:
+                        logger.warning(
+                            "EconSource: %s observation %s is %dd before market "
+                            "resolution %s (> 45-day limit) — stale, skipping %s",
+                            series_id, latest_date, delta_days,
+                            market.resolution_date.strftime("%Y-%m-%d"),
+                            market.market_id,
+                        )
+                        return None
+
+                except Exception:
+                    # Cannot parse obs_date or read resolution_date — conservatively
+                    # suppress the signal rather than allowing a potentially
+                    # wrong-month observation to pass through.  Matches the
+                    # conservative-fail path in
+                    # FREDEconomicSource._obs_too_old_for_market.
+                    logger.warning(
+                        "EconSource: %s could not apply staleness/alignment check"
+                        " for %s — treating monthly CPI observation as"
+                        " non-tradeable (safe default)",
+                        series_id, market.market_id,
+                    )
+                    return None
 
             # Determine if the latest release is "fresh" (within the market window)
             threshold = self._extract_threshold(market.question, indicator_key)
@@ -282,7 +319,7 @@ class EconomicDataSource(DataSource):
 
             if confidence is None:
                 fresh_h, max_h = _SERIES_STALENESS.get(series_id, (24, 168))
-                logger.debug(
+                logger.warning(
                     "EconSource: %s data from %s exceeds max staleness (%dh) — skipping %s",
                     series_id, latest_date, max_h, market.market_id,
                 )
