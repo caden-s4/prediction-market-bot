@@ -218,7 +218,27 @@ class PriorityScorer:
     def _score_freshness(self, market: Market) -> float:
         """Return freshness score from market.raw['created_time'] or ['open_time']."""
         raw = market.raw
-        raw_value = raw.get("created_time") or raw.get("open_time")
+
+        # TEMPORARY DEBUG — remove after diagnosis
+        if not hasattr(self, '_freshness_debug_count'):
+            self._freshness_debug_count = 0
+        if self._freshness_debug_count < 3:
+            logger.info(
+                "[PRIORITY DEBUG] market=%s raw keys=%s",
+                market.market_id,
+                sorted(raw.keys()) if raw else 'None',
+            )
+            self._freshness_debug_count += 1
+
+        field_name = None
+        raw_value = None
+        if raw.get("created_time") is not None:
+            field_name = "created_time"
+            raw_value = raw["created_time"]
+        elif raw.get("open_time") is not None:
+            field_name = "open_time"
+            raw_value = raw["open_time"]
+
         if raw_value is None:
             return 0.0
         try:
@@ -230,10 +250,18 @@ class PriorityScorer:
                 created_dt = created_dt.replace(tzinfo=timezone.utc)
             age_h = (datetime.now(timezone.utc) - created_dt).total_seconds() / 3600.0
             if age_h < 2.0:
-                return 1.0
-            if age_h < 6.0:
-                return 0.5
-            return 0.0
+                score = 1.0
+            elif age_h < 6.0:
+                score = 0.5
+            else:
+                return 0.0
+            # TEMPORARY DEBUG — remove after diagnosis
+            logger.info(
+                "[PRIORITY DEBUG] freshness hit: market=%s matched_field=%s "
+                "raw_value=%r parsed_dt=%s age_hours=%.1f score=%.1f",
+                market.market_id, field_name, raw_value, created_dt, age_h, score,
+            )
+            return score
         except Exception:
             return 0.0
 
