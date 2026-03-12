@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from data.markets.base import BaseMarketClient, Market
+from resolution.priority import PriorityScorer
 from shared.exclusion_list import ExclusionList
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,7 @@ class ResolutionScanner:
         kalshi_window_hours: Optional[float] = None,
         poly_window_hours: Optional[float] = None,
         max_per_platform: int = 500,
+        priority_scorer: Optional[PriorityScorer] = None,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
@@ -79,6 +81,7 @@ class ResolutionScanner:
         self._kalshi_window = kalshi_window_hours if kalshi_window_hours is not None else window_hours
         self._poly_window = poly_window_hours if poly_window_hours is not None else window_hours
         self._max = max_per_platform
+        self._priority_scorer = priority_scorer
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -102,6 +105,14 @@ class ResolutionScanner:
             "ResolutionScanner: %d candidate markets (kalshi_window=%gh poly_window=%gh)",
             len(markets), self._kalshi_window, self._poly_window,
         )
+
+        # Priority scoring: attach priority_score to each market before tier ingest.
+        # score_batch() returns markets sorted by priority_score (highest first).
+        # Tier assignment remains purely time-based; priority only controls scan
+        # ORDER within each tier.
+        if self._priority_scorer is not None:
+            markets = self._priority_scorer.score_batch(markets)
+
         return markets
 
     def scan_cross_platform_pairs(
