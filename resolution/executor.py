@@ -30,6 +30,7 @@ from dataclasses import dataclass, field, replace as dc_replace
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
+from data.ground_truth.financial import FinancialDataSource
 from data.ground_truth.router import GroundTruthRouter, is_paper_only
 from data.markets.base import BaseMarketClient, Market, Order, Side
 from data.markets.polymarket_ws import PolymarketWSManager
@@ -39,6 +40,7 @@ from resolution.decay_monitor import (
     DecayAction, DecayMonitor, OpenResolutionPosition,
 )
 from resolution.gap_detector import GapDetector, GapSignal, MAX_MIN_GAP
+from resolution.priority import PriorityScorer
 from resolution.scanner import ResolutionScanner
 from resolution.tier_registry import TierRegistry
 from shared.bankroll import Bankroll
@@ -323,14 +325,26 @@ class ResolutionBot:
         self._state = state_store
         self._alert_manager: Optional[AlertManager] = alert_manager
 
+        self._ground_truth = GroundTruthRouter()
+
+        # Priority scorer: reuse the FinancialDataSource already registered in
+        # the router so the module-level price cache is shared and no extra API
+        # calls are made.  Falls back to None (bracket scoring disabled) if no
+        # FinancialDataSource is present in the router's source list.
+        _fin_src = next(
+            (s for s in self._ground_truth._sources if isinstance(s, FinancialDataSource)),
+            None,
+        )
+        _priority_scorer = PriorityScorer(_fin_src)
+
         self._scanner = ResolutionScanner(
             kalshi_client, poly_client, exclusions,
             window_hours=window_hours,
             kalshi_window_hours=kalshi_window_hours,
             poly_window_hours=poly_window_hours,
+            priority_scorer=_priority_scorer,
         )
         self._gap_detector = GapDetector(fee_cache)
-        self._ground_truth = GroundTruthRouter()
         self._confidence = ConfidenceScorer()
         self._decay = DecayMonitor(dynamic_exit_enabled=dynamic_exit_enabled)
 
@@ -491,13 +505,29 @@ class ResolutionBot:
         self._ws.sync_subscriptions(t1_ids)
 
         # ── Tier 1: refresh all active-watch markets (every cycle) ─────────
-        t1_entries = self._registry.get_tier(1)
+        # Sort by priority_score so the highest-priority markets are evaluated
+        # first within the cycle.  Scores are preserved through the refresh so
+        # the ordering persists until the next discovery re-scores the batch.
+        t1_entries = sorted(
+            self._registry.get_tier(1),
+            key=lambda e: getattr(e.market, "priority_score", 0.0),
+            reverse=True,
+        )
         if t1_entries:
+            # Snapshot priority scores before refresh (refresh returns new Market
+            # objects that don't carry the dynamic attribute).
+            t1_priority = {
+                e.market_id: getattr(e.market, "priority_score", 0.0)
+                for e in t1_entries
+            }
             # Pull any order-book updates from the WebSocket first (free, fast).
             ws_prices = self._ws.get_pending_updates()
             t1_raw = [e.market for e in t1_entries]
             t1_markets = self._scanner.refresh_markets(t1_raw)
             for m in t1_markets:
+                # Restore priority score so sort order persists across refreshes.
+                if not hasattr(m, "priority_score"):
+                    m.priority_score = t1_priority.get(m.market_id, 0.0)
                 # Apply WebSocket price override where available.
                 if m.market_id in ws_prices:
                     m.yes_price = ws_prices[m.market_id]
@@ -509,8 +539,14 @@ class ResolutionBot:
         # ── Tier 2: rotating batch (full set covered every TIER_2_INTERVAL) ─
         t2_batch_raw = self._next_tier_batch(2)
         if t2_batch_raw:
+            # Preserve priority scores through refresh (same reason as T1).
+            t2_priority = {
+                m.market_id: getattr(m, "priority_score", 0.0) for m in t2_batch_raw
+            }
             t2_markets = self._scanner.refresh_markets(t2_batch_raw)
             for m in t2_markets:
+                if not hasattr(m, "priority_score"):
+                    m.priority_score = t2_priority.get(m.market_id, 0.0)
                 self._registry.ingest(m)
             self._stagger()
         else:
@@ -519,8 +555,13 @@ class ResolutionBot:
         # ── Tier 3: rotating batch (refresh + promote; no GT eval) ──────────
         t3_batch_raw = self._next_tier_batch(3)
         if t3_batch_raw:
+            t3_priority = {
+                m.market_id: getattr(m, "priority_score", 0.0) for m in t3_batch_raw
+            }
             t3_markets = self._scanner.refresh_markets(t3_batch_raw)
             for m in t3_markets:
+                if not hasattr(m, "priority_score"):
+                    m.priority_score = t3_priority.get(m.market_id, 0.0)
                 self._registry.ingest(m)   # ingest recomputes tier → may promote
 
         # Active markets for this cycle = Tier 1 (all) + Tier 2 batch + Tier 3 batch.
@@ -799,7 +840,14 @@ class ResolutionBot:
         Uses a stable sort (by market_id) so the cursor advances through the
         same order every cycle even as markets are promoted/demoted.
         """
-        entries = self._registry.get_tier(tier)   # already sorted by market_id
+        # Sort by priority_score descending so the highest-priority markets are
+        # processed first in each rotation.  Falls back to 0.0 for markets whose
+        # priority_score was not yet set (e.g. on the first cycle before discovery).
+        entries = sorted(
+            self._registry.get_tier(tier),
+            key=lambda e: getattr(e.market, "priority_score", 0.0),
+            reverse=True,
+        )
         if not entries:
             return []
 
