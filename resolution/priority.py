@@ -1,28 +1,35 @@
 """
 resolution.priority – Priority scoring for discovered markets.
 
-Scores each Market on three criteria and attaches a priority_score attribute
+Scores each Market on four criteria and attaches a priority_score attribute
 (float 0–1) so the scan loop within each tier evaluates the most actionable
 markets first.
 
 Criteria
 --------
-1. Freshness (weight 0.30)
+1. Freshness (weight 0.20)
    Markets created < 2 h ago get a boost because pricing is least efficient
-   at creation.  Field read from market.raw["created_time"] or ["open_time"].
+   at creation.  Field read from market.created_time (dynamic attr set by
+   the Kalshi client) or market.raw["created_time"] / ["open_time"].
 
-2. Low volume (weight 0.35)
+2. Low volume (weight 0.25)
    Markets with low lifetime USD volume are more likely to have stale or
    inefficient pricing.
 
-3. Bracket proximity (weight 0.35)
+3. Bracket proximity (weight 0.30)
    On multi-outcome bracket markets (e.g. Nasdaq 100 range markets), strikes
    closest to the current underlying price have the most mispricing potential.
    Requires a known series→symbol mapping and non-stale price data.
 
+4. Staleness (weight 0.25)
+   Markets whose pricing has not been updated recently (per updated_time),
+   or that show a wide bid/ask spread and low 24h volume, are more likely to
+   carry mispricing.  Higher score = more stale = more opportunity.
+
 Combined score
 --------------
-    priority_score = freshness * 0.30 + low_volume * 0.35 + bracket * 0.35
+    priority_score = (freshness * 0.20) + (low_volume * 0.25)
+                   + (bracket * 0.30)   + (staleness * 0.25)
 
 Run after market discovery, before tier registry ingest.
 """
@@ -40,9 +47,10 @@ from data.markets.base import Market
 logger = logging.getLogger(__name__)
 
 # Score weights
-_W_FRESHNESS = 0.30
-_W_VOLUME    = 0.35
-_W_BRACKET   = 0.35
+_W_FRESHNESS  = 0.20
+_W_VOLUME     = 0.25
+_W_BRACKET    = 0.30
+_W_STALENESS  = 0.25
 
 # Map Kalshi series prefix → Yahoo Finance symbol used by FinancialDataSource
 _SERIES_TO_SYMBOL: Dict[str, str] = {
@@ -105,29 +113,51 @@ def _proximity_score(strike: float, current_price: float) -> float:
 
 
 def _parse_datetime(value: object) -> Optional[datetime]:
-    """Parse a datetime from a string, int (unix timestamp), or datetime."""
+    """Parse a datetime from a string, int/float (unix timestamp), or datetime.
+
+    Handles all formats returned by the Kalshi v2 API:
+      - datetime object (returned as-is)
+      - int or float epoch seconds → UTC datetime
+      - numeric string (e.g. "1741779000") → epoch → UTC datetime
+      - ISO 8601 with Z suffix: "2026-03-12T10:30:00Z"
+      - ISO 8601 with offset:   "2026-03-12T10:30:00+00:00"
+      - ISO 8601 without tz:    "2026-03-12T10:30:00"  (assumed UTC)
+      - Empty string or None    → None
+    """
+    if value is None:
+        return None
     if isinstance(value, datetime):
         return value
     if isinstance(value, (int, float)):
         return datetime.fromtimestamp(float(value), tz=timezone.utc)
     if isinstance(value, str):
-        # Normalise the Z suffix so fromisoformat works on Python 3.10
         text = value.strip()
+        if not text:
+            return None
+        # Numeric string → treat as epoch seconds
+        try:
+            return datetime.fromtimestamp(float(text), tz=timezone.utc)
+        except ValueError:
+            pass
+        # ISO 8601: replace Z suffix so fromisoformat works on Python < 3.11
         if text.endswith("Z"):
             text = text[:-1] + "+00:00"
         try:
-            return datetime.fromisoformat(text)
+            dt = datetime.fromisoformat(text)
+            # Attach UTC if no timezone was present
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
         except ValueError:
             pass
-        # Fallback: common API formats
+        # Last-resort: common strptime formats (naive → UTC)
         for fmt in (
             "%Y-%m-%dT%H:%M:%S",
             "%Y-%m-%dT%H:%M:%S.%f",
             "%Y-%m-%d %H:%M:%S",
         ):
             try:
-                dt = datetime.strptime(text, fmt)
-                return dt.replace(tzinfo=timezone.utc)
+                return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
     return None
@@ -162,6 +192,15 @@ class PriorityScorer:
         if not markets:
             return markets
 
+        # Log a raw-value sample once per batch so operators can verify the
+        # freshness parser is picking up the right field format.
+        _sample = markets[0]
+        logger.debug(
+            "[PRIORITY] freshness raw sample: created_time=%r open_time=%r",
+            _sample.raw.get("created_time") if _sample.raw else None,
+            _sample.raw.get("open_time") if _sample.raw else None,
+        )
+
         # Build price cache: one fetch per underlying per batch
         price_cache: Dict[str, Optional[Tuple[float, float]]] = {}
 
@@ -180,15 +219,17 @@ class PriorityScorer:
         bracket_scores: Dict[str, float] = {}
         self._score_all_brackets(bracket_groups, price_cache, bracket_scores)
 
-        # Compute combined scores and count summary stats
-        fresh_count     = 0
-        low_vol_count   = 0
+        # Compute combined scores and collect summary stats
+        fresh_count      = 0
+        low_vol_count    = 0
         near_money_count = 0
+        stale_count      = 0
 
         for m in markets:
             f = self._score_freshness(m)
             v = self._score_volume(m)
             b = bracket_scores.get(m.market_id, 0.0)
+            s = self._score_staleness(m)
 
             if f > 0:
                 fresh_count += 1
@@ -196,8 +237,15 @@ class PriorityScorer:
                 low_vol_count += 1
             if b > 0:
                 near_money_count += 1
+            if s > 0.3:
+                stale_count += 1
 
-            m.priority_score = f * _W_FRESHNESS + v * _W_VOLUME + b * _W_BRACKET
+            m.priority_score = (
+                f * _W_FRESHNESS
+                + v * _W_VOLUME
+                + b * _W_BRACKET
+                + s * _W_STALENESS
+            )
 
         markets_sorted = sorted(markets, key=lambda m: m.priority_score, reverse=True)
 
@@ -206,8 +254,9 @@ class PriorityScorer:
             for m in markets_sorted[:5]
         )
         logger.info(
-            "[PRIORITY] Scored %d markets: %d fresh, %d low-volume, %d near-money brackets",
-            len(markets), fresh_count, low_vol_count, near_money_count,
+            "[PRIORITY] Scored %d markets: %d fresh, %d low-volume, "
+            "%d near-money brackets, %d stale",
+            len(markets), fresh_count, low_vol_count, near_money_count, stale_count,
         )
         logger.info("[PRIORITY] Top 5: %s", top5 if top5 else "none")
 
@@ -216,52 +265,31 @@ class PriorityScorer:
     # ── Private helpers ───────────────────────────────────────────────────────
 
     def _score_freshness(self, market: Market) -> float:
-        """Return freshness score from market.raw['created_time'] or ['open_time']."""
-        raw = market.raw
+        """Score market freshness from created_time / open_time.
 
-        # TEMPORARY DEBUG — remove after diagnosis
-        if not hasattr(self, '_freshness_debug_count'):
-            self._freshness_debug_count = 0
-        if self._freshness_debug_count < 3:
-            logger.info(
-                "[PRIORITY DEBUG] market=%s raw keys=%s",
-                market.market_id,
-                sorted(raw.keys()) if raw else 'None',
-            )
-            self._freshness_debug_count += 1
-
-        field_name = None
-        raw_value = None
-        if raw.get("created_time") is not None:
-            field_name = "created_time"
-            raw_value = raw["created_time"]
-        elif raw.get("open_time") is not None:
-            field_name = "open_time"
-            raw_value = raw["open_time"]
-
+        Checks the dynamic attribute set by the Kalshi client first, then falls
+        back to market.raw so the scorer works even without the attribute.
+        """
+        raw_value = (
+            getattr(market, "created_time", None)
+            or getattr(market, "open_time", None)
+            or (market.raw.get("created_time") if market.raw else None)
+            or (market.raw.get("open_time") if market.raw else None)
+        )
         if raw_value is None:
             return 0.0
         try:
             created_dt = _parse_datetime(raw_value)
             if created_dt is None:
                 return 0.0
-            # Ensure timezone-aware
             if created_dt.tzinfo is None:
                 created_dt = created_dt.replace(tzinfo=timezone.utc)
             age_h = (datetime.now(timezone.utc) - created_dt).total_seconds() / 3600.0
             if age_h < 2.0:
-                score = 1.0
-            elif age_h < 6.0:
-                score = 0.5
-            else:
-                return 0.0
-            # TEMPORARY DEBUG — remove after diagnosis
-            logger.info(
-                "[PRIORITY DEBUG] freshness hit: market=%s matched_field=%s "
-                "raw_value=%r parsed_dt=%s age_hours=%.1f score=%.1f",
-                market.market_id, field_name, raw_value, created_dt, age_h, score,
-            )
-            return score
+                return 1.0
+            if age_h < 6.0:
+                return 0.5
+            return 0.0
         except Exception:
             return 0.0
 
@@ -275,6 +303,70 @@ class PriorityScorer:
         if v < 10_000:
             return 0.3
         return 0.0
+
+    def _score_staleness(self, market: Market) -> float:
+        """Score pricing staleness.  Higher = more stale = more mispricing potential.
+
+        Combines three signals:
+          time_score    (0.50 weight) — how long since updated_time
+          spread_score  (0.30 weight) — yes_ask − yes_bid width
+          vol_24h_score (0.20 weight) — low 24h volume
+
+        Returns 0.0 if updated_time is missing AND spread data is unavailable.
+        """
+        # ── Time since last price update ──────────────────────────────────────
+        updated_raw = (
+            getattr(market, "updated_time", None)
+            or (market.raw.get("updated_time") if market.raw else None)
+        )
+        time_score = 0.0
+        if updated_raw is not None:
+            try:
+                updated_dt = _parse_datetime(updated_raw)
+                if updated_dt is not None:
+                    if updated_dt.tzinfo is None:
+                        updated_dt = updated_dt.replace(tzinfo=timezone.utc)
+                    stale_minutes = (
+                        datetime.now(timezone.utc) - updated_dt
+                    ).total_seconds() / 60.0
+                    if stale_minutes > 120:
+                        time_score = 1.0
+                    elif stale_minutes > 60:
+                        time_score = 0.8
+                    elif stale_minutes > 30:
+                        time_score = 0.5
+                    elif stale_minutes > 10:
+                        time_score = 0.2
+            except Exception:
+                pass
+
+        # ── Bid/ask spread ────────────────────────────────────────────────────
+        ask = getattr(market, "yes_ask", None)
+        bid = getattr(market, "yes_bid", None)
+        spread_score = 0.0
+        if ask is not None and bid is not None and ask > 0 and bid > 0:
+            spread = ask - bid
+            if spread > 0.15:
+                spread_score = 1.0
+            elif spread > 0.08:
+                spread_score = 0.6
+            elif spread > 0.03:
+                spread_score = 0.3
+
+        # ── 24h volume ───────────────────────────────────────────────────────
+        vol_24h = getattr(market, "volume_24h", None)
+        vol_24h_score = 0.0
+        if vol_24h is not None:
+            if vol_24h < 100:
+                vol_24h_score = 1.0
+            elif vol_24h < 500:
+                vol_24h_score = 0.5
+
+        # Skip entirely if the two primary signals are both absent
+        if time_score == 0.0 and spread_score == 0.0:
+            return 0.0
+
+        return time_score * 0.50 + spread_score * 0.30 + vol_24h_score * 0.20
 
     def _score_bracket_proximity(self, market: Market, price_cache: dict) -> float:
         """Score bracket proximity for a single market using the shared price cache."""
