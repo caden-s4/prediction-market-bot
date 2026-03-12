@@ -196,6 +196,56 @@ _DETECT_KEYWORDS = tuple(_INSTRUMENT_MAP.keys()) + (
     "close above", "close below", "close at", "settle above", "settle below",
 )
 
+# ── Exclusion gate 1: question-text keywords ──────────────────────────────────
+# If any of these phrases appear in the market question (case-insensitive), the
+# market is NOT about a financial instrument — reject before any ticker matching.
+#
+# Root-cause example: "Will Donald Trump's approval rating be above 42.3%?"
+# The market_id KXVOTEHUBTRUMPUPDOWN contains the substring "down" which
+# includes "dow", triggering the "dow" → YM=F entry in _INSTRUMENT_MAP and
+# producing a nonsensical 46,857 vs 42.3 comparison with prob=1.00.
+FINANCIAL_EXCLUSION_KEYWORDS: tuple = (
+    "approval rating",
+    "favorability",
+    "poll",
+    "polling",
+    "disapproval",
+    "job approval",
+    "vote",
+    "election",
+    "ballot",
+    "nominee",
+    "primary",
+    "caucus",
+)
+
+# ── Exclusion gate 2: known non-financial Kalshi series prefixes ──────────────
+# Series whose market_ids may contain financial-sounding substrings but are
+# definitively about politics/polling, not financial instruments.
+FINANCIAL_EXCLUDED_SERIES: frozenset = frozenset({
+    "KXVOTEHUB",
+    "KXPRESMENTION",
+    "KXMENTION",
+    "KXAPPROVAL",
+})
+
+# Regex that identifies the date segment in a Kalshi market_id
+# (e.g. "-26MAR12" in "KXVOTEHUBTRUMPUPDOWN-26MAR12").
+# Everything before the first match is the series prefix.
+_SERIES_PREFIX_RE = re.compile(r"-\d{2}[A-Z]{3}\d{2}")
+
+
+def _extract_series_prefix(market_id: str) -> str:
+    """Return the series root of a Kalshi market ID (before the date segment).
+
+    Example: "KXVOTEHUBTRUMPUPDOWN-26MAR12-T42.3" → "KXVOTEHUBTRUMPUPDOWN"
+    """
+    m = _SERIES_PREFIX_RE.search(market_id)
+    if m:
+        return market_id[: m.start()]
+    return market_id.split("-")[0]
+
+
 # Module-level price cache: symbol → (fetched_at_monotonic, price, source_key)
 # Caches both successes AND failures to prevent the same broken symbol from
 # being retried on every market that references it within the same cycle.
@@ -330,6 +380,16 @@ class FinancialDataSource(DataSource):
         )
 
     def can_handle(self, market: Market) -> bool:
+        # ── Exclusion gate 1: question-text keywords ──────────────────────────
+        # Reject non-financial markets before any ticker matching runs.
+        question_lower = market.question.lower()
+        if any(kw in question_lower for kw in FINANCIAL_EXCLUSION_KEYWORDS):
+            return False
+
+        # ── Exclusion gate 2: known non-financial Kalshi series ───────────────
+        if _extract_series_prefix(market.market_id) in FINANCIAL_EXCLUDED_SERIES:
+            return False
+
         # Include market_id so Kalshi tickers like KXUSDJPY, KXEURUSD, KXNASDAQ100
         # are caught even when the question text uses different phrasing.
         text = (
@@ -342,6 +402,26 @@ class FinancialDataSource(DataSource):
 
     def fetch(self, market: Market) -> Optional[GroundTruthResult]:
         try:
+            # ── Exclusion gate 1: question-text keywords ──────────────────────
+            question_lower = market.question.lower()
+            if any(kw in question_lower for kw in FINANCIAL_EXCLUSION_KEYWORDS):
+                logger.warning(
+                    "FinancialSource: rejected %s — exclusion keyword match "
+                    "(question snippet: '%.80s')",
+                    market.market_id, market.question,
+                )
+                return None
+
+            # ── Exclusion gate 2: known non-financial Kalshi series ───────────
+            series = _extract_series_prefix(market.market_id)
+            if series in FINANCIAL_EXCLUDED_SERIES:
+                logger.warning(
+                    "FinancialSource: rejected %s — excluded series prefix '%s' "
+                    "(question snippet: '%.80s')",
+                    market.market_id, series, market.question,
+                )
+                return None
+
             symbol, instrument_name = self._detect_instrument(market)
             if not symbol:
                 logger.debug(
@@ -372,6 +452,26 @@ class FinancialDataSource(DataSource):
             if threshold is None:
                 logger.debug(
                     "FinancialSource: no threshold in question for %s", market.market_id
+                )
+                return None
+
+            # ── Exclusion gate 3: magnitude sanity check ──────────────────────
+            # If the fetched price and the parsed threshold are more than 100×
+            # apart, we almost certainly routed to the wrong instrument
+            # (e.g. futures at 46,857 vs an approval-rating threshold of 42.3).
+            # No legitimate financial comparison should ever span two orders of
+            # magnitude — the threshold would be 100× above or below the price.
+            _magnitude_ratio = (
+                max(current_price, threshold)
+                / max(min(current_price, threshold), 0.001)
+            )
+            if _magnitude_ratio > 100:
+                logger.warning(
+                    "FinancialSource: rejected %s — magnitude mismatch "
+                    "(price=%.4f threshold=%.4f ratio=%.0fx); likely misroute. "
+                    "(question snippet: '%.80s')",
+                    market.market_id, current_price, threshold, _magnitude_ratio,
+                    market.question,
                 )
                 return None
 
