@@ -125,6 +125,16 @@ _CITY_COORDS: Dict[str, Dict[str, float]] = {
 }
 
 
+def _safe_float(val) -> Optional[float]:
+    """Convert val to float, returning None on failure or if val is None."""
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return None
+
+
 def _extract_location(text: str) -> Optional[Dict[str, Any]]:
     lower = text.lower()
     for city, coords in _CITY_COORDS.items():
@@ -512,7 +522,7 @@ class KalshiClient(BaseMarketClient):
             if is_weather:
                 tags.append("weather")
 
-            return Market(
+            market = Market(
                 market_id=ticker,
                 platform=self.PLATFORM,
                 question=question,
@@ -526,6 +536,22 @@ class KalshiClient(BaseMarketClient):
                 location=_extract_location(question),
                 raw=item,
             )
+
+            # Attach additional Kalshi-specific fields as dynamic attributes.
+            # All downstream code must use getattr(market, 'field', None) since
+            # these are absent on Polymarket markets and may change with API updates.
+            market.last_price    = _safe_float(item.get("last_price_dollars"))
+            market.volume_24h    = _safe_float(item.get("volume_24h_fp"))
+            market.liquidity     = _safe_float(item.get("liquidity_dollars"))
+            market.yes_ask       = _safe_float(item.get("yes_ask_dollars"))
+            market.yes_bid       = _safe_float(item.get("yes_bid_dollars"))
+            market.yes_ask_size  = _safe_float(item.get("yes_ask_size_fp"))
+            market.yes_bid_size  = _safe_float(item.get("yes_bid_size_fp"))
+            market.updated_time  = item.get("updated_time")   # raw string; parse downstream
+            market.created_time  = item.get("created_time")   # raw string; parse downstream
+            market.open_time     = item.get("open_time")       # raw string; parse downstream
+
+            return market
         except Exception as exc:
             logger.warning("Kalshi _parse_market error: %s | item=%s", exc, item)
             return None
