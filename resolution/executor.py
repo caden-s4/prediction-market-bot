@@ -48,6 +48,7 @@ from resolution.tier_registry import TierRegistry
 from shared.bankroll import Bankroll
 from shared.exclusion_list import ExclusionList
 from shared.fee_cache import FeeCache
+from shared.paper_log import PaperTradeLog
 from utils.storage import StateStore
 
 logger = logging.getLogger(__name__)
@@ -291,6 +292,47 @@ def _bracket_prefix(market_id: str) -> Optional[str]:
     return None
 
 
+def _print_paper_summary(summary: dict) -> None:
+    """Print a ghost-trade daily summary block to stdout."""
+    sep = "-" * 52
+    date_str  = summary.get("date_str", "today")
+    entries   = summary.get("total_entries", 0)
+    exits     = summary.get("exits", 0)
+    open_pos  = summary.get("open_positions", 0)
+    wins      = summary.get("wins", 0)
+    losses    = summary.get("losses", 0)
+    win_rate  = summary.get("win_rate", 0.0)
+    total_pnl = summary.get("total_pnl", 0.0)
+    avg_pnl   = summary.get("avg_pnl_per_trade", 0.0)
+    avg_gap   = summary.get("avg_gap_at_entry", 0.0)
+    avg_hold  = summary.get("avg_hold_minutes", 0.0)
+    best      = summary.get("best_trade")
+    worst     = summary.get("worst_trade")
+    by_src    = summary.get("by_source", {})
+
+    print(f"\n{sep}")
+    print(f"  GHOST TRADE DAILY SUMMARY  [{date_str}]")
+    print(sep)
+    print(f"  Entries: {entries}   Exits: {exits}   Open: {open_pos}")
+    if exits > 0:
+        print(f"  Wins: {wins}  Losses: {losses}  Win rate: {win_rate:.1%}")
+        print(f"  Total P&L:  ${total_pnl:+.2f}   Avg/trade: ${avg_pnl:+.2f}")
+        print(f"  Avg gap at entry: {avg_gap:.1%}   Avg hold: {avg_hold:.0f}min")
+        if best:
+            print(f"  Best:  {best['market_id']}  ${best['pnl']:+.2f}  ({best['exit_reason']})")
+        if worst:
+            print(f"  Worst: {worst['market_id']}  ${worst['pnl']:+.2f}  ({worst['exit_reason']})")
+        if by_src:
+            print(f"  By source:")
+            for src, stats in sorted(by_src.items()):
+                n   = stats["trades"]
+                pnl = stats["pnl"]
+                w   = stats["wins"]
+                print(f"    {src:<35} {n:>3} trades  ${pnl:>+7.2f}  {w}/{n} wins")
+    print(sep)
+    print()
+
+
 class ResolutionBot:
     """
     Resolution Drift Arbitrage bot.
@@ -334,6 +376,11 @@ class ResolutionBot:
         self._state = state_store
         self._alert_manager: Optional[AlertManager] = alert_manager
         self._calendar: Optional[FREDReleaseCalendar] = calendar
+
+        # Append-only ghost-trade journal (dry-run only).
+        self._paper_log: Optional[PaperTradeLog] = (
+            PaperTradeLog() if dry_run else None
+        )
 
         self._ground_truth = GroundTruthRouter()
 
@@ -811,6 +858,13 @@ class ResolutionBot:
                 "ResolutionBot: cycle took %.0fms — exceeded Tier-1 interval (%ds).",
                 elapsed, TIER_1_INTERVAL,
             )
+
+        # ── Ghost-trade daily summary ────────────────────────────────────────
+        if self._dry_run and self._paper_log is not None:
+            _day = self._paper_log.get_daily_summary()
+            if _day["total_entries"] > 0:
+                _print_paper_summary(_day)
+
         return summary
 
     # ── Tiered scan helpers ───────────────────────────────────────────────────
@@ -1721,6 +1775,23 @@ class ResolutionBot:
             distance_pct=float(_gt_raw_entry.get("margin_pct", 0.0)),
             order_id=order_id,
         )
+        if self._paper_log is not None:
+            _tier = getattr(self._registry._entries.get(mid), "tier", 0)
+            _src_name = gt.source_name if gt else "cross-platform"
+            self._paper_log.log_entry(
+                market_id=mid,
+                platform=market.platform,
+                action=signal.action,
+                entry_price=signal.target_price,
+                size_usd=size_usd,
+                gt_prob=gt_prob,
+                gap=signal.effective_gap,
+                confidence=score.source_confidence,
+                source=_src_name,
+                tier=_tier,
+                question=market.question,
+                entry_time=self._positions[mid].entry_time,
+            )
         self._save_positions()
         _entry = signal.target_price
         if signal.action == "buy_yes":
@@ -2006,7 +2077,8 @@ class ResolutionBot:
                 rec.entry_price, current_price, move, FINANCIAL_HARD_STOP_THRESHOLD,
                 nc, pnl,
             )
-            self._exit_position(mid, pnl, current_price=current_price)
+            self._exit_position(mid, pnl, current_price=current_price,
+                                exit_reason="hard_stop")
             exits += 1
 
         if not self._positions:
@@ -2042,11 +2114,17 @@ class ResolutionBot:
                 decision.reason,
             )
             if decision.action != DecayAction.HOLD:
+                _decay_reason = {
+                    DecayAction.EARLY_EXIT:    "early_exit",
+                    DecayAction.STOP_LOSS:     "stop_loss",
+                    DecayAction.APPROACH_EXIT: "resolution",
+                }.get(decision.action, "unknown")
                 self._exit_position(
                     mid, decision.current_gain_usd,
                     current_price=decision.position.current_price,
                     capture=decision.capture_ratio,
                     dynamic_exit_threshold=decision.dynamic_exit_threshold,
+                    exit_reason=_decay_reason,
                 )
                 exits += 1
         return exits
@@ -2058,6 +2136,7 @@ class ResolutionBot:
         current_price: Optional[float] = None,
         capture: Optional[float] = None,
         dynamic_exit_threshold: Optional[float] = None,
+        exit_reason: str = "unknown",
     ) -> None:
         rec = self._positions.pop(market_id, None)
         if not rec:
@@ -2109,6 +2188,19 @@ class ResolutionBot:
             dynamic_exit_threshold=dynamic_exit_threshold,
         ))
 
+        if self._paper_log is not None:
+            _hold_min = (time.time() - rec.entry_time) / 60.0
+            _exit_p   = exit_price or rec.entry_price
+            _pnl_pct  = realized_pnl_usd / rec.size_usd if rec.size_usd > 0 else 0.0
+            self._paper_log.log_exit(
+                market_id=market_id,
+                exit_price=_exit_p,
+                pnl=realized_pnl_usd,
+                pnl_pct=_pnl_pct,
+                exit_reason=exit_reason,
+                hold_duration_minutes=_hold_min,
+            )
+
         self._save_positions()
         if not self._dry_run:
             client = self._poly if rec.platform == "polymarket" else self._kalshi
@@ -2148,6 +2240,10 @@ class ResolutionBot:
     def get_resolved_positions(self) -> List[ResolvedPosition]:
         """Return all trades resolved this session (exits from decay monitor)."""
         return list(self._resolved_positions)
+
+    def get_paper_log(self) -> Optional[PaperTradeLog]:
+        """Return the PaperTradeLog instance (dry-run only; None in live mode)."""
+        return self._paper_log
 
     def get_last_signals(self) -> list:
         """Return signal details from the most recent scan cycle."""
@@ -2246,15 +2342,17 @@ class ResolutionBot:
 
     # ── Position persistence ───────────────────────────────────────────────────
 
-    def _save_positions(self) -> None:
-        """Persist all open positions to the state store (called on every open/close).
+    _GHOST_POSITIONS_FILE = "ghost_positions.json"
 
-        In ghost-trade (dry_run) mode, positions exist only for the current
-        session — they are intentionally NOT written to disk so that each
-        restart begins with a clean slate.
+    def _save_positions(self) -> None:
+        """Persist all open positions to disk.
+
+        Live mode  → state store ("open_positions" key).
+        Ghost mode → ghost_positions.json in the working directory.
         """
-        if self._dry_run or not self._state:
-            return
+        import json as _json
+        from pathlib import Path as _Path
+
         data: dict = {}
         for mid, rec in self._positions.items():
             rd = rec.market.resolution_date
@@ -2275,17 +2373,54 @@ class ResolutionBot:
                 "category": rec.market.category,
                 "tags": rec.market.tags,
             }
+
+        if self._dry_run:
+            payload = {
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "positions": data,
+            }
+            try:
+                _Path(self._GHOST_POSITIONS_FILE).write_text(
+                    _json.dumps(payload, indent=2), encoding="utf-8"
+                )
+            except Exception as exc:
+                logger.warning("ResolutionBot: failed to save ghost positions: %s", exc)
+            return
+
+        if not self._state:
+            return
         self._state.set("open_positions", data)
 
     def _load_positions(self) -> None:
-        """Reload open positions from the state store on startup.
+        """Reload open positions from disk on startup.
 
-        In ghost-trade (dry_run) mode, positions are session-scoped — we do
-        NOT reload from disk so each run starts fresh with a clean ledger.
+        Ghost mode → load from ghost_positions.json (separate from live).
+        Live mode  → load from state store ("open_positions" key).
         """
-        if self._dry_run or not self._state:
+        import json as _json
+        from pathlib import Path as _Path
+
+        if self._dry_run:
+            gf = _Path(self._GHOST_POSITIONS_FILE)
+            if not gf.exists():
+                return
+            try:
+                payload = _json.loads(gf.read_text(encoding="utf-8"))
+                data = payload.get("positions", {})
+                saved_at = payload.get("saved_at", "unknown")
+                logger.info(
+                    "ResolutionBot: loading ghost positions from %s (saved_at=%s)",
+                    self._GHOST_POSITIONS_FILE, saved_at,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ResolutionBot: failed to load ghost positions: %s", exc
+                )
+                return
+        elif not self._state:
             return
-        data: dict = self._state.get("open_positions", {})
+        else:
+            data: dict = self._state.get("open_positions", {})
         if not data:
             return
 

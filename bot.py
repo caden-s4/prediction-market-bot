@@ -249,6 +249,10 @@ class BotCoordinator:
         """Return all trades resolved this session (exits from the decay monitor)."""
         return self._resolution.get_resolved_positions()
 
+    def get_paper_log(self):
+        """Return the PaperTradeLog instance (dry-run only; None in live mode)."""
+        return self._resolution.get_paper_log()
+
     def get_bankroll(self) -> float:
         """Return the current total bankroll (virtual or live)."""
         return self._bankroll.total_usd
