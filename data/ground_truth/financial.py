@@ -548,21 +548,38 @@ class FinancialDataSource(DataSource):
             near_rollover = self._near_futures_rollover(symbol)
             if near_rollover:
                 if symbol == "CL=F":
-                    # Crude oil futures gaps on rollover are too wide and
-                    # unpredictable to trade safely.  Block entirely.
+                    # KXWTIW- markets resolve against the official daily settlement
+                    # price (a single-day snapshot), not the continuous contract.
+                    # Rollover gaps don't affect settlement prices, so these are safe
+                    # to trade.  Apply a small confidence haircut for the wider
+                    # spreads and unusual price action typical of rollover week.
+                    # KXWTI- (daily bracket) markets ARE affected — block them.
+                    is_weekly_settlement = market.market_id.startswith("KXWTIW")
+                    if is_weekly_settlement:
+                        logger.info(
+                            "FinancialSource: CL=F in rollover window but %s is weekly "
+                            "settlement — allowing (settlement price not affected by "
+                            "continuous contract rollover)",
+                            market.market_id,
+                        )
+                        confidence *= 0.90  # 10% haircut for rollover-week uncertainty
+                    else:
+                        # Crude oil continuous-contract gaps on rollover are too wide
+                        # and unpredictable to trade safely.  Block entirely.
+                        logger.warning(
+                            "FinancialSource: CL=F skipped — active rollover window, "
+                            "too much gap risk",
+                        )
+                        return None
+                else:
+                    # Other futures (NQ=F, ES=F, …) rollover risk is lower — still
+                    # trade but executor will reduce position size to 25%.
                     logger.warning(
-                        "FinancialSource: CL=F skipped — active rollover window, "
-                        "too much gap risk",
+                        "FinancialSource: %s (%s) is within the quarterly rollover window "
+                        "— continuous-contract price may gap at contract changeover; "
+                        "flagged in raw_data",
+                        symbol, instrument_name,
                     )
-                    return None
-                # Other futures (NQ=F, ES=F, …) rollover risk is lower — still
-                # trade but executor will reduce position size to 25%.
-                logger.warning(
-                    "FinancialSource: %s (%s) is within the quarterly rollover window "
-                    "— continuous-contract price may gap at contract changeover; "
-                    "flagged in raw_data",
-                    symbol, instrument_name,
-                )
 
             # Build source metadata based on which API actually returned the price.
             if price_source == "twelve_data":
