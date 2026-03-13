@@ -108,6 +108,12 @@ MAX_SIGNALS_PER_SOURCE_ACTION = 2
 # At 5 cycles × ~0.1s × 500 markets = 250s of wasted fetch time eliminated.
 _NO_SOURCE_STREAK_THRESHOLD = 5
 
+# How many consecutive cycles a market must fail can_any_source_handle() before
+# it is permanently skipped (bypasses the router entirely, not just fetch()).
+# 3 consecutive "no source exists" signals is a hard miss — no source will ever
+# handle this market until new GT sources are added.
+FAST_SKIP_PERM_THRESHOLD = 3
+
 # If the live order-book mid-price deviates more than this from the scanner price,
 # the scanner data is stale. Skip the trade rather than entering at a price that
 # no longer exists in the real order book.
@@ -407,6 +413,17 @@ class ResolutionBot:
         # Once the count hits _NO_SOURCE_STREAK_THRESHOLD the market is promoted
         # to permanent-skip (treated identically to no_source_fast_skip).
         self._no_source_streak: Dict[str, int] = {}
+        # Consecutive fast-skip counter: incremented each cycle a market fails
+        # can_any_source_handle().  After FAST_SKIP_PERM_THRESHOLD consecutive
+        # failures the market graduates to _no_source_perm_skipped and is never
+        # passed to the router again — saving the can_any_source_handle() call.
+        self._no_source_fast_skip_streak: Dict[str, int] = {}
+        # Markets whose fast-skip streak has crossed the threshold.  Checked
+        # before any router call; these markets skip the GT loop entirely.
+        self._no_source_perm_skipped: set = set()
+        # Previous cycle's perm-skip count — used to detect when the population
+        # changes so we can log a single informational line instead of per-market spam.
+        self._prev_perm_skip_count: int = 0
         # Timestamp of when this instance was created — used by the startup
         # stabilization guard to delay new trade entry until the first full
         # scan cycle has completed and in-memory state is populated.
@@ -538,6 +555,14 @@ class ResolutionBot:
         promoted = self._registry.promote_due()
         if promoted:
             logger.info("TierRegistry: %d market(s) promoted to a higher tier", promoted)
+
+        # Prune no-source skip dicts against current registry to prevent
+        # unbounded growth from resolved/evicted markets accumulating over long sessions.
+        live_ids = self._registry.known_ids()
+        for stale_id in list(self._no_source_fast_skip_streak):
+            if stale_id not in live_ids:
+                del self._no_source_fast_skip_streak[stale_id]
+        self._no_source_perm_skipped &= live_ids
 
         # Sync Polymarket WebSocket subscriptions with current Tier 1 set.
         t1_ids = {e.market_id for e in self._registry.get_tier(1)}
@@ -941,8 +966,8 @@ class ResolutionBot:
         # Coverage diagnostic counters — reset to 0 on every call; these are
         # per-cycle (per-batch) counts, never cumulative across cycles.
         n_novelty: int = 0              # novelty prop-bets filtered at ingest; always 0 here
-        n_no_source_fast_skip: int = 0  # skipped instantly — no source claims this market
-        n_no_source_perm_skip: int = 0  # streak >= threshold — promoted to permanent skip
+        n_no_source_fast_skip: int = 0  # failed can_any_source_handle(), not yet permanent
+        n_no_source_perm_skip: int = 0  # in _no_source_perm_skipped — no router call at all
         n_no_source: int = 0            # source claimed it but fetch() returned None (slow)
         n_no_prob: int = 0              # source found but couldn't extract a probability
         n_covered: int = 0       # source returned a usable probability
@@ -1011,6 +1036,14 @@ class ResolutionBot:
                     i, total, len(signals),
                 )
 
+            # ── Permanent fast-skip check ─────────────────────────────────────
+            # Bypasses the router entirely — no can_any_source_handle() call.
+            # Markets graduate here after FAST_SKIP_PERM_THRESHOLD consecutive
+            # fast-skip cycles.  Keyed by market_id so it survives discovery.
+            if market.market_id in self._no_source_perm_skipped:
+                n_no_source_perm_skip += 1
+                continue
+
             prefix = _bracket_prefix(market.market_id)
 
             # ── Uniform-50 illiquid series skip ───────────────────────────────
@@ -1056,7 +1089,18 @@ class ResolutionBot:
                     )
                     if prefix is not None:
                         _bracket_gt[prefix] = None
+                    # Track consecutive fast-skip cycles; graduate to permanent
+                    # skip after FAST_SKIP_PERM_THRESHOLD consecutive misses.
+                    streak = self._no_source_fast_skip_streak.get(market.market_id, 0) + 1
+                    self._no_source_fast_skip_streak[market.market_id] = streak
+                    if streak >= FAST_SKIP_PERM_THRESHOLD:
+                        self._no_source_perm_skipped.add(market.market_id)
                     continue
+
+                # A source now claims this market — clear any fast-skip state so
+                # the market is no longer bypassing the router.
+                self._no_source_fast_skip_streak.pop(market.market_id, None)
+                self._no_source_perm_skipped.discard(market.market_id)
 
                 # Permanent-skip: market has a source that claims it but fetch()
                 # has returned None for _NO_SOURCE_STREAK_THRESHOLD consecutive
@@ -1208,6 +1252,17 @@ class ResolutionBot:
             n_no_source, n_no_prob,
             n_covered, sources_str, n_gap_too_small, len(signals),
         )
+
+        # Log a single line when the permanent-skip population changes so
+        # operators can see the graduation plateau without per-market spam.
+        perm_total = len(self._no_source_perm_skipped)
+        if perm_total != self._prev_perm_skip_count:
+            logger.info(
+                "ResolutionBot: permanent no-source skip set updated: %d markets "
+                "(was %d) — these markets bypass the router entirely each cycle",
+                perm_total, self._prev_perm_skip_count,
+            )
+            self._prev_perm_skip_count = perm_total
 
         # Aggregate per-source timing log (only real HTTP fetches, not cache hits).
         # Helps operators quickly identify which source is responsible for slow cycles.
@@ -2008,6 +2063,10 @@ class ResolutionBot:
         if not rec:
             return
         self._bankroll.release(market_id, realized_pnl_usd=realized_pnl_usd)
+        # Clean up no-source tracking for this market.
+        self._no_source_streak.pop(market_id, None)
+        self._no_source_fast_skip_streak.pop(market_id, None)
+        self._no_source_perm_skipped.discard(market_id)
 
         # Record in resolved history (session-only; drives 'history' command).
         # Kalshi contract economics: cost per contract = entry_price (YES) or 1-entry_price (NO).
