@@ -141,6 +141,10 @@ CONFIDENCE_GATE_GHOST_CROSS_PLATFORM = 0.50
 # a cap a single bad FRED observation can commit the entire bankroll across all
 # strike levels and expiry dates.  Cap at 15% of bankroll across the root series.
 MAX_SERIES_EXPOSURE_FRACTION = 0.15
+# Ghost mode uses a looser cap so paper-trade validation can accumulate enough
+# positions per series to be statistically meaningful.  The cap still prevents
+# 100% concentration in one series; 50% is the limit.
+MAX_SERIES_EXPOSURE_FRACTION_GHOST = 0.50
 
 
 def _minimum_gap_for_entry(hours_remaining: float) -> float:
@@ -296,10 +300,11 @@ def _print_paper_summary(summary: dict) -> None:
     """Print a ghost-trade daily summary block to stdout."""
     sep = "-" * 52
     date_str  = summary.get("date_str", "today")
-    entries   = summary.get("total_entries", 0)
-    exits     = summary.get("exits", 0)
-    open_pos  = summary.get("open_positions", 0)
-    wins      = summary.get("wins", 0)
+    entries     = summary.get("total_entries", 0)
+    exits       = summary.get("exits", 0)
+    open_pos    = summary.get("open_positions", 0)
+    cap_blocked = summary.get("cap_blocked", 0)
+    wins        = summary.get("wins", 0)
     losses    = summary.get("losses", 0)
     win_rate  = summary.get("win_rate", 0.0)
     total_pnl = summary.get("total_pnl", 0.0)
@@ -313,7 +318,8 @@ def _print_paper_summary(summary: dict) -> None:
     print(f"\n{sep}")
     print(f"  GHOST TRADE DAILY SUMMARY  [{date_str}]")
     print(sep)
-    print(f"  Entries: {entries}   Exits: {exits}   Open: {open_pos}")
+    cap_str = f"   Cap-blocked: {cap_blocked}" if cap_blocked else ""
+    print(f"  Entries: {entries}   Exits: {exits}   Open: {open_pos}{cap_str}")
     if exits > 0:
         print(f"  Wins: {wins}  Losses: {losses}  Win rate: {win_rate:.1%}")
         print(f"  Total P&L:  ${total_pnl:+.2f}   Avg/trade: ${avg_pnl:+.2f}")
@@ -1681,22 +1687,40 @@ class ResolutionBot:
         # ── Per-series exposure cap ────────────────────────────────────────────
         # All markets sharing a root ticker (e.g. KXPAYROLLS) are driven by the
         # same underlying data point and are 100% correlated.  Cap total active
-        # exposure per root-series at MAX_SERIES_EXPOSURE_FRACTION (15%).
+        # exposure per root-series at MAX_SERIES_EXPOSURE_FRACTION (15% live,
+        # 50% ghost so validation can accumulate enough positions per series).
         series_root = _series_root(mid)
         if series_root is not None:
             series_exposure = sum(
                 r.size_usd for r_id, r in self._positions.items()
                 if _series_root(r_id) == series_root
             )
-            max_series    = self._bankroll.total_usd * MAX_SERIES_EXPOSURE_FRACTION
+            _cap_fraction = (
+                MAX_SERIES_EXPOSURE_FRACTION_GHOST
+                if self._dry_run
+                else MAX_SERIES_EXPOSURE_FRACTION
+            )
+            max_series    = self._bankroll.total_usd * _cap_fraction
             existing_pct  = series_exposure / self._bankroll.total_usd * 100
             if series_exposure + size_usd > max_series:
                 logger.info(
                     "ResolutionBot: SKIP %s — series exposure cap reached "
                     "(%.0f%% already in %s, max %d%%)",
                     mid, existing_pct, series_root,
-                    round(MAX_SERIES_EXPOSURE_FRACTION * 100),
+                    round(_cap_fraction * 100),
                 )
+                if self._dry_run and self._paper_log is not None:
+                    self._paper_log.log_cap_blocked(
+                        market_id=mid,
+                        action=signal.action,
+                        entry_price=signal.target_price,
+                        size_usd=size_usd,
+                        gt_prob=gt_prob_for_gap,
+                        gap=signal.effective_gap,
+                        series_root=series_root,
+                        series_exposure=series_exposure,
+                        max_series_exposure=max_series,
+                    )
                 return None
         # ──────────────────────────────────────────────────────────────────────
 
@@ -2237,6 +2261,37 @@ class ResolutionBot:
         logger.info("ResolutionBot: cleared %d position(s) from state", count)
         return count
 
+    def ghost_clear_positions(self) -> int:
+        """
+        Remove all ghost positions from memory and delete ghost_positions.json.
+
+        Only removes positions whose order_id starts with "ghost_" or "dry_"
+        (i.e. positions that were never real orders).  Live positions are untouched.
+        Returns the number of ghost positions cleared.
+        """
+        import os as _os
+        ghost_ids = [
+            mid for mid, rec in self._positions.items()
+            if rec.order_id is not None and (
+                rec.order_id.startswith("ghost_") or rec.order_id.startswith("dry_")
+            )
+        ]
+        for mid in ghost_ids:
+            self._bankroll.release(mid, realized_pnl_usd=0.0)
+            del self._positions[mid]
+        # Delete the on-disk ghost file so it can't reload on next startup.
+        gf = self._GHOST_POSITIONS_FILE
+        if _os.path.exists(gf):
+            try:
+                _os.remove(gf)
+                logger.info("ResolutionBot: deleted %s", gf)
+            except OSError as exc:
+                logger.warning("ResolutionBot: failed to delete %s: %s", gf, exc)
+        if ghost_ids:
+            self._save_positions()
+        logger.info("ResolutionBot: ghost-clear removed %d ghost position(s)", len(ghost_ids))
+        return len(ghost_ids)
+
     def get_resolved_positions(self) -> List[ResolvedPosition]:
         """Return all trades resolved this session (exits from decay monitor)."""
         return list(self._resolved_positions)
@@ -2426,6 +2481,7 @@ class ResolutionBot:
 
         loaded = 0
         skipped = 0
+        expired_count = 0
         for mid, saved in data.items():
             try:
                 # Drop positions that were placed in a dry-run session when we are
@@ -2463,7 +2519,10 @@ class ResolutionBot:
                         "ResolutionBot: skipping expired position %s "
                         "(market already resolved)", mid,
                     )
-                    skipped += 1
+                    if self._dry_run:
+                        expired_count += 1
+                    else:
+                        skipped += 1
                     continue
 
                 # Re-reserve capital so the bankroll accounting stays correct.
@@ -2496,6 +2555,12 @@ class ResolutionBot:
                 )
                 skipped += 1
 
+        if expired_count:
+            logger.info(
+                "ResolutionBot: expired %d stale ghost position(s) on load "
+                "(resolution date already passed)", expired_count,
+            )
+            skipped += expired_count
         if loaded or skipped:
             logger.info(
                 "ResolutionBot: restored %d open position(s) from disk "
