@@ -49,18 +49,21 @@ _WEATHER_SERIES_TICKERS = [
 # and can be buried deep in the paginated general fetch.  Querying these series
 # directly ensures they surface before they expire.
 _SPORTS_SERIES_TICKERS = [
-    "KXNFL",    # NFL game results
-    "KXNBA",    # NBA game results
-    "KXMLB",    # MLB game results
-    "KXNHL",    # NHL game results
-    "KXNCAAF",  # College football
-    "KXNCAAB",  # College basketball (March Madness)
-    "KXMLS",    # MLS soccer
-    "KXSOC",    # International soccer
-    "KXUFC",    # UFC / MMA
-    "KXGOLF",   # PGA / major golf events
-    "KXTENNIS", # Grand slam tennis
-    "KXNASCAR", # NASCAR race results
+    "KXNFL",       # NFL season/prop markets
+    "KXNBA",       # NBA season/prop markets
+    "KXMLB",       # MLB season/prop markets
+    "KXNHL",       # NHL season/prop markets
+    "KXNCAAF",     # College football
+    "KXNCAAB",     # College basketball season/prop markets
+    "KXMLS",       # MLS soccer
+    "KXSOC",       # International soccer
+    "KXUFC",       # UFC / MMA
+    "KXGOLF",      # PGA / major golf events
+    "KXTENNIS",    # Grand slam tennis
+    "KXNASCAR",    # NASCAR race results
+    # Game-result (moneyline) series — different series prefix from the prop/season markets
+    "KXNBAGAME",     # NBA individual game results (e.g. KXNBAGAME-26MAR13MEMDET-DET)
+    "KXNCAAMBGAME",  # NCAA Men's Basketball game results
 ]
 
 _CITY_COORDS: Dict[str, Dict[str, float]] = {
@@ -467,6 +470,14 @@ class KalshiClient(BaseMarketClient):
         logger.info(
             "Kalshi sports scan: %d markets across %d series",
             len(results), len(_SPORTS_SERIES_TICKERS),
+        )
+        _game_prefixes = ("KXNBAGAME", "KXNCAAMBGAME")
+        game_markets = [m for m in results if any(m.market_id.startswith(p) for p in _game_prefixes)]
+        nba_count = sum(1 for m in game_markets if m.market_id.startswith("KXNBAGAME"))
+        ncaab_count = sum(1 for m in game_markets if m.market_id.startswith("KXNCAAMBGAME"))
+        logger.info(
+            "Kalshi sports scan: %d game-result markets found (NBA=%d, NCAAB=%d)",
+            len(game_markets), nba_count, ncaab_count,
         )
         return results
 
