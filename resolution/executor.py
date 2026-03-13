@@ -1618,7 +1618,9 @@ class ResolutionBot:
         # reality.  If the scanner price is stale, recalculate the gap:
         #   - Gap disappears  → was a stale-data artifact, skip
         #   - Gap still real  → update signal to live price and proceed
-        live_price = ob_live.mid_price
+        # Skip entirely in force-test mode when ob_live is None (no live price
+        # available; ghost trades don't place real orders so drift doesn't matter).
+        live_price = ob_live.mid_price if ob_live is not None else signal.target_price
         drift = abs(live_price - signal.target_price)
         if drift > STALE_PRICE_THRESHOLD:
             gt_prob = (
