@@ -44,8 +44,9 @@ class BotCoordinator:
     config : loaded AppConfig
     """
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(self, config: AppConfig, force_test: bool = False) -> None:
         self._cfg = config
+        self._force_test = force_test
         bc = config.bot
 
         # ── Platform clients ──────────────────────────────────────────────
@@ -191,6 +192,7 @@ class BotCoordinator:
             state_store=self._state,
             dynamic_exit_enabled=bc.dynamic_exit_enabled,
             calendar=self._calendar,
+            force_test=force_test,
         )
 
         self._cycle_count: int = 0

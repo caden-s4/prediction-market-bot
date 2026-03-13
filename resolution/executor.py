@@ -371,6 +371,7 @@ class ResolutionBot:
         alert_manager: Optional[AlertManager] = None,
         dynamic_exit_enabled: bool = True,
         calendar: Optional[FREDReleaseCalendar] = None,
+        force_test: bool = False,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
@@ -378,6 +379,7 @@ class ResolutionBot:
         self._bankroll = bankroll
         self._exclusions = exclusions
         self._dry_run = dry_run
+        self._force_test = force_test
         self._scan_interval = scan_interval
         self._state = state_store
         self._alert_manager: Optional[AlertManager] = alert_manager
@@ -414,7 +416,7 @@ class ResolutionBot:
             poly_window_hours=poly_window_hours,
             priority_scorer=_priority_scorer,
         )
-        self._gap_detector = GapDetector(fee_cache)
+        self._gap_detector = GapDetector(fee_cache, force_test=force_test)
         self._confidence = ConfidenceScorer()
         self._decay = DecayMonitor(dynamic_exit_enabled=dynamic_exit_enabled)
 
@@ -1080,13 +1082,20 @@ class ResolutionBot:
         for pfx, prices in _prefix_prices.items():
             near_50 = sum(1 for p in prices if abs(p - 0.50) <= 0.02)
             if near_50 > 3:
-                _illiquid_prefixes.add(pfx)
-                logger.info(
-                    "ResolutionBot: series %s flagged illiquid — "
-                    "%d/%d brackets priced within 2¢ of 0.50 "
-                    "(uniform_50_pricing; skipping whole series)",
-                    pfx, near_50, len(prices),
-                )
+                if self._force_test:
+                    logger.info(
+                        "ResolutionBot: [FORCE-TEST] bypassing series illiquidity filter for %s "
+                        "(%d/%d brackets within 2¢ of 0.50)",
+                        pfx, near_50, len(prices),
+                    )
+                else:
+                    _illiquid_prefixes.add(pfx)
+                    logger.info(
+                        "ResolutionBot: series %s flagged illiquid — "
+                        "%d/%d brackets priced within 2¢ of 0.50 "
+                        "(uniform_50_pricing; skipping whole series)",
+                        pfx, near_50, len(prices),
+                    )
         # ─────────────────────────────────────────────────────────────────────
 
         for i, market in enumerate(candidates, 1):
@@ -1225,14 +1234,22 @@ class ResolutionBot:
                 and gt.ground_truth_prob is not None
                 and (gt.ground_truth_prob <= 0.10 or gt.ground_truth_prob >= 0.90)
             ):
-                logger.info(
-                    "ResolutionBot: skipping %s — illiquid single market "
-                    "(yes_price=%.3f ≈ 0.50 but gt_prob=%.3f is extreme; "
-                    "uniform_50_pricing)",
-                    market.market_id, market.yes_price, gt.ground_truth_prob,
-                )
-                n_no_source += 1
-                continue
+                if self._force_test:
+                    logger.info(
+                        "ResolutionBot: [FORCE-TEST] bypassing illiquidity filter for %s "
+                        "(yes_price=%.3f gt_prob=%.3f)",
+                        market.market_id, market.yes_price, gt.ground_truth_prob,
+                    )
+                    # Fall through to gap detection
+                else:
+                    logger.info(
+                        "ResolutionBot: skipping %s — illiquid single market "
+                        "(yes_price=%.3f ≈ 0.50 but gt_prob=%.3f is extreme; "
+                        "uniform_50_pricing)",
+                        market.market_id, market.yes_price, gt.ground_truth_prob,
+                    )
+                    n_no_source += 1
+                    continue
             # ─────────────────────────────────────────────────────────────────
 
             n_covered += 1
