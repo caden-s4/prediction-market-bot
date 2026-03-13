@@ -38,6 +38,21 @@ _FUZZY_THRESHOLD = 0.72
 _match_cache: Dict[str, Optional[Tuple[str, str, str, str]]] = {}
 _skip_set: set = set()
 
+# ── Game-result market ID parsing ──────────────────────────────────────────────
+# Kalshi game-result markets embed both team abbreviations in the market ID:
+#   KXNBAGAME-26MAR13MEMDET-DET
+#     date code : 26MAR13
+#     team concat: MEMDET  (two 3-letter abbreviations concatenated)
+#     yes suffix : DET     (the team whose win resolves YES)
+# The regex captures (series, team_concat, yes_code).
+_GAME_MARKET_RE = re.compile(
+    r"^(KXNBAGAME|KXNCAAMBGAME)-\d{2}[A-Z]{3}\d{2}([A-Z]{4,8})-([A-Z]{2,4})$"
+)
+_GAME_SERIES_SPORT: Dict[str, str] = {
+    "KXNBAGAME": "nba",
+    "KXNCAAMBGAME": "ncaab",
+}
+
 
 # ── Team alias dictionaries ────────────────────────────────────────────────────
 
@@ -571,6 +586,51 @@ def match_market(market_id: str, title: str, sport_hint: Optional[str] = None) -
             "direction": direction,
             "sport": sport or sport_hint or "nba",
         }
+
+    # ── Fast path: parse team abbreviations directly from the market ID ──────
+    # For KXNBAGAME / KXNCAAMBGAME markets the ID encodes both teams and the
+    # YES outcome, which is more reliable than regex-ing the question text.
+    # Falls back to title extraction if abbreviations don't resolve.
+    id_m = _GAME_MARKET_RE.match(market_id)
+    if id_m:
+        series, team_concat, yes_code = id_m.group(1), id_m.group(2), id_m.group(3)
+        sport_from_id = _GAME_SERIES_SPORT[series]
+        # Split the concatenated team codes; try splits until one half matches
+        # the yes_code (handles both 3+3 and edge-case lengths).
+        parsed_codes: Optional[Tuple[str, str]] = None
+        for split in range(2, len(team_concat) - 1):
+            a, b = team_concat[:split], team_concat[split:]
+            if yes_code.lower() in (a.lower(), b.lower()):
+                parsed_codes = (a, b)
+                break
+        if parsed_codes is None and len(team_concat) >= 6:
+            parsed_codes = (team_concat[:3], team_concat[3:])  # best-effort 3+3
+        if parsed_codes:
+            code_a, code_b = parsed_codes
+            res_a = _alias_lookup(code_a.lower(), sport_from_id)
+            res_b = _alias_lookup(code_b.lower(), sport_from_id)
+            if res_a and res_b:
+                yes_team = res_a if yes_code.lower() == code_a.lower() else res_b
+                other_team = res_b if yes_team == res_a else res_a
+                result_tuple = (yes_team, other_team, yes_team, "win")
+                _match_cache[market_id] = result_tuple
+                logger.debug(
+                    "MarketMatcher: game-id match %s → yes=%s other=%s sport=%s",
+                    market_id, yes_team, other_team, sport_from_id,
+                )
+                return {
+                    "home_team": yes_team,
+                    "away_team": other_team,
+                    "market_team": yes_team,
+                    "direction": "win",
+                    "sport": sport_from_id,
+                }
+            logger.debug(
+                "MarketMatcher: game-id parse %s — abbreviations unresolved "
+                "(%s=%r, %s=%r), falling back to title matching",
+                market_id, code_a, res_a, code_b, res_b,
+            )
+        sport_hint = sport_hint or sport_from_id  # carry sport into title fallback
 
     raw_left, raw_right = _extract_teams_from_title(title)
 
