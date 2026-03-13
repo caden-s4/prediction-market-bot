@@ -1421,10 +1421,16 @@ class ResolutionBot:
         if self._exclusions.is_excluded(market.platform, mid):
             return None
         if _is_in_orderbook_cooldown(mid):
-            logger.debug(
-                "ResolutionBot: %s in order-book cooldown — skipping this cycle", mid
-            )
-            return None
+            if self._force_test:
+                logger.info(
+                    "ResolutionBot: [FORCE-TEST] bypassing order-book cooldown for %s "
+                    "(ghost trade doesn't need fill)", mid
+                )
+            else:
+                logger.debug(
+                    "ResolutionBot: %s in order-book cooldown — skipping this cycle", mid
+                )
+                return None
 
         # Use the ground truth result carried on the signal (info signals) or
         # re-fetch it (cross-platform signals that didn't go through the router).
@@ -1437,21 +1443,31 @@ class ResolutionBot:
         # (e.g. 49/50 by default) while the real order book is at 0.99 or 0.01.
         ob_live = self._get_live_book(market)
         if ob_live is None:
-            # Empty order book — scanner price is unverifiable. Placing an order
-            # based on stale bulk-API data (e.g. Kalshi's default yes_bid=99)
-            # creates unfillable limit orders. Skip entirely and suppress for 30 min.
-            logger.info(
-                "ResolutionBot: SKIP %s – order book empty, cannot verify scanner "
-                "price %.3f (would create unfillable limit order)",
-                mid, signal.target_price,
-            )
-            _set_orderbook_cooldown(mid, minutes=30)
-            self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
-            return None
+            if self._force_test:
+                logger.info(
+                    "ResolutionBot: [FORCE-TEST] bypassing order book check for %s "
+                    "(book empty but ghost trade doesn't need fill)", mid
+                )
+                # ob_live stays None; depth_ratio stays None (scorer skips penalty);
+                # limit_price will fall back to signal.target_price below.
+            else:
+                # Empty order book — scanner price is unverifiable. Placing an order
+                # based on stale bulk-API data (e.g. Kalshi's default yes_bid=99)
+                # creates unfillable limit orders. Skip entirely and suppress for 30 min.
+                logger.info(
+                    "ResolutionBot: SKIP %s – order book empty, cannot verify scanner "
+                    "price %.3f (would create unfillable limit order)",
+                    mid, signal.target_price,
+                )
+                _set_orderbook_cooldown(mid, minutes=30)
+                self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
+                return None
 
         # For cross-platform signals, populate depth_ratio now so the confidence
         # scorer can apply the liquidity penalty before deciding to pass/skip.
-        if signal.signal_type == "cross_platform":
+        # Skip if ob_live is None (force-test empty-book bypass); depth_ratio
+        # stays None and the scorer skips the liquidity penalty by design.
+        if signal.signal_type == "cross_platform" and ob_live is not None:
             signal.depth_ratio = self._compute_depth_ratio(signal, ob_live)
 
         # Confidence gate
@@ -1752,32 +1768,48 @@ class ResolutionBot:
         # Fix: bid at the live ask (BUY_YES) or live bid (BUY_NO) so the
         # order crosses the spread and executes as a taker immediately.
         if signal.action == "buy_yes":
-            limit_price = ob_live.best_yes_ask
+            limit_price = ob_live.best_yes_ask if ob_live is not None else None
             if limit_price is None:
-                logger.info(
-                    "ResolutionBot: SKIP %s – no YES ask in order book "
-                    "(no sellers to fill against)", mid
-                )
-                _set_orderbook_cooldown(mid, minutes=30)
-                self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
-                return None
+                if self._force_test:
+                    logger.info(
+                        "ResolutionBot: [FORCE-TEST] bypassing YES ask check for %s "
+                        "(book empty, using signal.target_price for ghost trade)", mid
+                    )
+                    limit_price = signal.target_price
+                else:
+                    logger.info(
+                        "ResolutionBot: SKIP %s – no YES ask in order book "
+                        "(no sellers to fill against)", mid
+                    )
+                    _set_orderbook_cooldown(mid, minutes=30)
+                    self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
+                    return None
         else:
             # BUY_NO: order.price is the YES price field for Kalshi.
             # Using best_yes_bid places our NO bid at (1 - best_yes_bid),
             # which exactly matches the current NO ask → taker fill.
-            limit_price = ob_live.best_yes_bid
+            limit_price = ob_live.best_yes_bid if ob_live is not None else None
             if limit_price is None:
-                logger.info(
-                    "ResolutionBot: SKIP %s – no YES bid in order book "
-                    "(no NO sellers to fill against)", mid
-                )
-                _set_orderbook_cooldown(mid, minutes=30)
-                self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
-                return None
+                if self._force_test:
+                    logger.info(
+                        "ResolutionBot: [FORCE-TEST] bypassing YES bid check for %s "
+                        "(book empty, using signal.target_price for ghost trade)", mid
+                    )
+                    limit_price = signal.target_price
+                else:
+                    logger.info(
+                        "ResolutionBot: SKIP %s – no YES bid in order book "
+                        "(no NO sellers to fill against)", mid
+                    )
+                    _set_orderbook_cooldown(mid, minutes=30)
+                    self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
+                    return None
         logger.info(
             "ResolutionBot: limit_price=%.4f (action=%s ask=%.4f bid=%.4f) for %s",
             limit_price, signal.action,
-            ob_live.best_yes_ask or 0.0, ob_live.best_yes_bid or 0.0, mid,
+            (ob_live.best_yes_ask or 0.0) if ob_live is not None else 0.0,
+            (ob_live.best_yes_bid or 0.0) if ob_live is not None else 0.0,
+            mid,
         )
 
         # Reserve capital
