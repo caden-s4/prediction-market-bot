@@ -655,6 +655,33 @@ def _run_replay_mode(log_path: str) -> None:
     print(sep)
 
 
+def _print_paper(coordinator: "BotCoordinator", days: int = 1) -> None:
+    """Print paper-trade log summary for the last N days."""
+    from datetime import datetime, timedelta, timezone
+    from resolution.executor import _print_paper_summary
+
+    paper_log = coordinator.get_paper_log()
+    if paper_log is None:
+        print("  Paper log is only available in dry-run mode.")
+        return
+
+    now = datetime.now(timezone.utc)
+    printed = 0
+    for d in range(days - 1, -1, -1):
+        target_day = now - timedelta(days=d)
+        summary = paper_log.get_daily_summary(date=target_day)
+        if summary["total_entries"] > 0 or summary["exits"] > 0:
+            _print_paper_summary(summary)
+            printed += 1
+
+    if printed == 0:
+        sep = "-" * 52
+        print(f"\n{sep}")
+        print(f"  GHOST TRADE LOG — no trades in the last {days} day(s).")
+        print(sep)
+        print()
+
+
 def _print_help() -> None:
     sep = "=" * _SEP_W
     print(f"\n{sep}")
@@ -664,6 +691,7 @@ def _print_help() -> None:
     print("  sig / signals     Show gap signals from the last scan cycle")
     print("  pairs [N]         Near-miss cross-platform pairs ranked by overlap")
     print("  history / hist    Show all trades resolved this session with P&L")
+    print("  paper [N]         Ghost-trade daily summary (default today; N=days back)")
     print("  s  /  scan        Run a scan cycle right now")
     print("  bank <amount>     Set virtual bankroll for this session (dry-run only)")
     print("  clear             Wipe all tracked positions (no exit orders placed)")
@@ -720,6 +748,10 @@ def _start_command_listener(
                             print(f"  Error: {e}")
                 elif cmd in ("history", "hist"):
                     _print_history(coordinator)
+                elif cmd.startswith("paper"):
+                    parts = cmd.split()
+                    days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
+                    _print_paper(coordinator, days=days)
                 elif cmd in ("h", "help", "?"):
                     _print_help()
                 elif cmd:
@@ -733,7 +765,7 @@ def _start_command_listener(
 
     t = threading.Thread(target=_listen, daemon=True, name="cmd-listener")
     t.start()
-    print("  Type 'p' positions · 's' scan now · 'pairs' near-miss · 'history' resolved trades · 'bank <amount>' virtual bankroll · 'help'\n")
+    print("  Type 'p' positions · 's' scan now · 'pairs' near-miss · 'history' resolved trades · 'paper [N]' ghost-trade log · 'bank <amount>' virtual bankroll · 'help'\n")
 
 
 def parse_args() -> argparse.Namespace:
