@@ -695,6 +695,7 @@ def _print_help() -> None:
     print("  s  /  scan        Run a scan cycle right now")
     print("  bank <amount>     Set virtual bankroll for this session (dry-run only)")
     print("  clear             Wipe all tracked positions (no exit orders placed)")
+    print("  ghost-clear       Remove ghost positions and delete ghost_positions.json")
     print("  h  /  help        Show this help")
     print("  Ctrl-C            Stop the bot")
     print(sep)
@@ -729,6 +730,9 @@ def _start_command_listener(
                 elif cmd == "clear":
                     n = coordinator.clear_positions()
                     print(f"  Cleared {n} position(s) from state.")
+                elif cmd == "ghost-clear":
+                    n = coordinator.ghost_clear_positions()
+                    print(f"  Cleared {n} ghost position(s) and deleted ghost_positions.json.")
                 elif cmd.startswith("bank"):
                     parts = cmd.split()
                     if not cfg.bot.dry_run:
@@ -765,7 +769,7 @@ def _start_command_listener(
 
     t = threading.Thread(target=_listen, daemon=True, name="cmd-listener")
     t.start()
-    print("  Type 'p' positions · 's' scan now · 'pairs' near-miss · 'history' resolved trades · 'paper [N]' ghost-trade log · 'bank <amount>' virtual bankroll · 'help'\n")
+    print("  Type 'p' positions · 's' scan now · 'pairs' near-miss · 'history' resolved trades · 'paper [N]' ghost-trade log · 'bank <amount>' virtual bankroll · 'ghost-clear' reset ghost positions · 'help'\n")
 
 
 def parse_args() -> argparse.Namespace:

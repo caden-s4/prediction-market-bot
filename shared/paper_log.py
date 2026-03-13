@@ -75,6 +75,40 @@ class PaperTradeLog:
         }
         self._append(record)
 
+    def log_cap_blocked(
+        self,
+        market_id: str,
+        action: str,
+        entry_price: float,
+        size_usd: float,
+        gt_prob: float,
+        gap: float,
+        series_root: str,
+        series_exposure: float,
+        max_series_exposure: float,
+    ) -> None:
+        """Append a cap_blocked event — a trade that passed all checks but was
+        stopped by the per-series exposure cap.  Logged so the data is available
+        for post-session analysis without needing a live position entry."""
+        record = {
+            "event": "cap_blocked",
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "market_id": market_id,
+            "action": action,
+            "entry_price": round(entry_price, 5),
+            "size_usd": round(size_usd, 2),
+            "gt_prob": round(gt_prob, 5),
+            "gap": round(gap, 5),
+            "series_root": series_root,
+            "current_series_exposure": round(series_exposure, 2),
+            "max_series_exposure": round(max_series_exposure, 2),
+            "reason": (
+                f"series exposure cap: ${series_exposure:.2f} + "
+                f"${size_usd:.2f} > ${max_series_exposure:.2f}"
+            ),
+        }
+        self._append(record)
+
     def log_exit(
         self,
         market_id: str,
@@ -171,9 +205,10 @@ class PaperTradeLog:
 
         all_records = self.get_trades()
 
-        # Separate entries and exits for this day.
-        entries: List[dict] = []
-        exits:   List[dict] = []
+        # Separate entries, exits, and cap-blocked events for this day.
+        entries:     List[dict] = []
+        exits:       List[dict] = []
+        cap_blocked: List[dict] = []
         for rec in all_records:
             try:
                 ts = datetime.fromisoformat(rec["ts"])
@@ -186,6 +221,8 @@ class PaperTradeLog:
                     entries.append(rec)
                 elif rec.get("event") == "exit":
                     exits.append(rec)
+                elif rec.get("event") == "cap_blocked":
+                    cap_blocked.append(rec)
 
         # Match exits to entries by market_id (most recent entry per market).
         # Build an index: market_id → latest entry record.
@@ -252,6 +289,7 @@ class PaperTradeLog:
             "total_entries":      len(entries),
             "exits":              n_exits,
             "open_positions":     open_today,
+            "cap_blocked":        len(cap_blocked),
             "wins":               wins,
             "losses":             losses,
             "win_rate":           round(win_rate, 3),

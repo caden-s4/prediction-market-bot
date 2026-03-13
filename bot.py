@@ -245,6 +245,10 @@ class BotCoordinator:
         """Wipe all tracked positions from memory and state (no exit orders placed)."""
         return self._resolution.clear_positions()
 
+    def ghost_clear_positions(self) -> int:
+        """Remove ghost positions from memory and delete ghost_positions.json."""
+        return self._resolution.ghost_clear_positions()
+
     def get_resolved_positions(self) -> list:
         """Return all trades resolved this session (exits from the decay monitor)."""
         return self._resolution.get_resolved_positions()
