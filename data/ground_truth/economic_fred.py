@@ -399,6 +399,10 @@ class FREDEconomicSource(DataSource):
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
+    def get_series_for_market(self, market: Market) -> Optional[str]:
+        """Return the FRED series ID this market's ground truth depends on, or None."""
+        return self._identify_series(market)
+
     @staticmethod
     def _parse_market_month(market: Market) -> Optional[datetime]:
         """Return the first day of the month a Kalshi market is asking about.
