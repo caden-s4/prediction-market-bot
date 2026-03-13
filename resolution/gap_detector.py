@@ -102,6 +102,13 @@ class GapDetector:
     Detects cross-platform and information-based mispricings.
     """
 
+    # If detect_information_signal() hasn't been called for this many seconds,
+    # treat the next call as the start of a new batch and flush the previous
+    # cycle's accumulated stats.  Must be shorter than TIER_1_INTERVAL (15s)
+    # but longer than the per-market stagger (~0.25s) so intra-batch gaps
+    # don't accidentally flush mid-cycle.
+    _BATCH_GAP_S: float = 3.0
+
     def __init__(
         self,
         fee_cache: FeeCache,
@@ -122,6 +129,14 @@ class GapDetector:
         self._fuzzy_signal_cache_ttl: float = _FUZZY_SIGNAL_CACHE_TTL
         self._fuzzy_signals_cache: List[GapSignal] = []
         self._fuzzy_signals_cached_at: float = 0.0  # time.monotonic() stamp
+
+        # ── Per-cycle signal stats (accumulated across detect_information_signal calls)
+        # Flushed to a summary log at the start of the next batch, detected by
+        # a gap of > _BATCH_GAP_S seconds since the last call.
+        self._cycle_actionable: int = 0
+        self._cycle_blocked: int = 0
+        self._cycle_near_miss: int = 0   # blocked but within 20% of threshold
+        self._last_info_signal_at: float = 0.0  # monotonic timestamp of last call
 
     # ── Cross-platform detection ──────────────────────────────────────────────
 
@@ -159,6 +174,26 @@ class GapDetector:
         For a single market, compare its current price to the ground truth
         probability. Flag if the gap (after fees) exceeds the threshold.
         """
+        # ── Batch boundary: flush previous cycle's summary ────────────────────
+        # detect_information_signal() is called per-market in a tight loop.
+        # A gap of > _BATCH_GAP_S since the last call means we're at the start
+        # of a new scan batch — emit the previous cycle's accumulated stats now.
+        now_mono = time.monotonic()
+        if (
+            self._last_info_signal_at > 0
+            and now_mono - self._last_info_signal_at > self._BATCH_GAP_S
+            and (self._cycle_actionable + self._cycle_blocked) > 0
+        ):
+            logger.info(
+                "[SIGNAL] Cycle summary: %d actionable, %d blocked "
+                "(%d near-miss within 20%% of threshold)",
+                self._cycle_actionable, self._cycle_blocked, self._cycle_near_miss,
+            )
+            self._cycle_actionable = 0
+            self._cycle_blocked = 0
+            self._cycle_near_miss = 0
+        self._last_info_signal_at = now_mono
+
         if not self._enough_time(market):
             return None
 
@@ -167,12 +202,20 @@ class GapDetector:
         effective_gap = raw_gap - fee
 
         min_gap = self._time_adjusted_min_gap(market.hours_to_resolution)
+        side = "YES" if ground_truth_prob > market.yes_price else "NO"
+
         if effective_gap < min_gap:
-            logger.debug(
-                "GapDetector: info signal below threshold for %s "
-                "(eff_gap=%.3f < min_gap=%.3f at %.2fh remaining)",
-                market.market_id, effective_gap, min_gap, market.hours_to_resolution,
+            shortfall = min_gap - effective_gap
+            near_miss = shortfall < min_gap * 0.20
+            logger.info(
+                "[SIGNAL] BLOCKED %s | gt_prob=%.3f mkt_price=%.3f "
+                "gap=%.3f (%.1f%%) min_gap=%.3f shortfall=%.3f | side=%s",
+                market.market_id, ground_truth_prob, market.yes_price,
+                effective_gap, effective_gap * 100, min_gap, shortfall, side,
             )
+            self._cycle_blocked += 1
+            if near_miss:
+                self._cycle_near_miss += 1
             return None
 
         _uncapped_gap = self._base_gap + market.hours_to_resolution * TIME_GAP_PREMIUM
@@ -184,7 +227,14 @@ class GapDetector:
             f"min_gap={min_gap:.3f} "
             f"({self._base_gap:.2f}+{market.hours_to_resolution:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f}{_cap_note})"
         )
+        logger.info(
+            "[SIGNAL] ACTIONABLE %s | gt_prob=%.3f mkt_price=%.3f "
+            "gap=%.3f (%.1f%%) min_gap=%.3f | side=%s",
+            market.market_id, ground_truth_prob, market.yes_price,
+            effective_gap, effective_gap * 100, min_gap, side,
+        )
         logger.info("GapDetector: %s – %s", market.market_id, reasoning)
+        self._cycle_actionable += 1
 
         return GapSignal(
             signal_type="information",
@@ -349,10 +399,13 @@ class GapDetector:
 
             min_gap = self._time_adjusted_min_gap(km.hours_to_resolution)
             if effective_gap < min_gap:
-                logger.debug(
-                    "GapDetector[cross]: %s eff_gap=%.3f < min_gap=%.3f "
-                    "(%.2fh remaining) — below time-adjusted threshold",
-                    km.market_id, effective_gap, min_gap, km.hours_to_resolution,
+                shortfall = min_gap - effective_gap
+                side = "YES" if pm_prob > km.yes_price else "NO"
+                logger.info(
+                    "[SIGNAL] BLOCKED %s | gt_prob=%.3f mkt_price=%.3f "
+                    "gap=%.3f (%.1f%%) min_gap=%.3f shortfall=%.3f | side=%s | cross_platform",
+                    km.market_id, pm_prob, km.yes_price,
+                    effective_gap, effective_gap * 100, min_gap, shortfall, side,
                 )
                 continue
 
@@ -380,6 +433,13 @@ class GapDetector:
                 f"polymarket={pm_prob:.3f} raw_gap={raw_gap:.3f} "
                 f"fee={fee:.3f} effective_gap={effective_gap:.3f} "
                 f"min_gap={min_gap:.3f} confidence={confidence:.2f}"
+            )
+            logger.info(
+                "[SIGNAL] ACTIONABLE %s | gt_prob=%.3f mkt_price=%.3f "
+                "gap=%.3f (%.1f%%) min_gap=%.3f | side=%s | cross_platform",
+                km.market_id, pm_prob, km.yes_price,
+                effective_gap, effective_gap * 100, min_gap,
+                "YES" if pm_prob > km.yes_price else "NO",
             )
             logger.info(
                 "GapDetector[cross]: FLAGGED %s — %s", km.market_id, reasoning
