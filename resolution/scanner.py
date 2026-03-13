@@ -222,6 +222,13 @@ class ResolutionScanner:
                             reason = self._reject_reason(m, window_hours)
                             if reason:
                                 rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
+                                if reason == "hours" and m.market_id.startswith(("KXNBAGAME", "KXNCAAMBGAME")):
+                                    logger.info(
+                                        "[DEBUG] Sports market rejected: %s hours_left=%.1f "
+                                        "resolution_date=%s window=%.1f",
+                                        m.market_id, m.hours_to_resolution,
+                                        m.resolution_date, window_hours,
+                                    )
                             else:
                                 seen.add(m.market_id)
                                 results.append(m)
