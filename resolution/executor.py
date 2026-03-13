@@ -30,8 +30,10 @@ from dataclasses import dataclass, field, replace as dc_replace
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
+from data.ground_truth.economic_fred import FREDEconomicSource
 from data.ground_truth.financial import FinancialDataSource
 from data.ground_truth.router import GroundTruthRouter, is_paper_only
+from data.release_calendar import FREDReleaseCalendar
 from data.markets.base import BaseMarketClient, Market, Order, Side
 from data.markets.polymarket_ws import PolymarketWSManager
 from monitoring.alerts import AlertManager
@@ -314,6 +316,7 @@ class ResolutionBot:
         state_store: Optional[StateStore] = None,
         alert_manager: Optional[AlertManager] = None,
         dynamic_exit_enabled: bool = True,
+        calendar: Optional[FREDReleaseCalendar] = None,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
@@ -324,8 +327,16 @@ class ResolutionBot:
         self._scan_interval = scan_interval
         self._state = state_store
         self._alert_manager: Optional[AlertManager] = alert_manager
+        self._calendar: Optional[FREDReleaseCalendar] = calendar
 
         self._ground_truth = GroundTruthRouter()
+
+        # Grab the FREDEconomicSource from the router for release-window lookups.
+        # Falls back to None when FRED_API_KEY is absent (source not registered).
+        self._fred_src: Optional[FREDEconomicSource] = next(
+            (s for s in self._ground_truth._sources if isinstance(s, FREDEconomicSource)),
+            None,
+        )
 
         # Priority scorer: reuse the FinancialDataSource already registered in
         # the router so the module-level price cache is shared and no extra API
@@ -487,6 +498,34 @@ class ResolutionBot:
             elapsed = (time.monotonic() - cycle_start) * 1000
             summary["cycle_ms"] = round(elapsed)
             return summary
+
+        # ── Calendar: once-daily schedule refresh ──────────────────────────
+        if self._calendar is not None:
+            self._calendar.refresh_schedule()
+
+        # ── Calendar: imminent release check (within next 6 minutes) ───────
+        # If a FRED data release is about to happen, force a full discovery
+        # rescan so fresh market listings are visible, then promote all affected
+        # markets to Tier 1 so they get evaluated on every cycle during the
+        # pre-release and hunt windows.
+        if self._calendar is not None:
+            imminent = self._calendar.get_upcoming_releases(within_hours=0.1)
+            for rel in imminent:
+                series_str = ", ".join(rel["series_ids"])
+                release_time_str = rel["release_time"].strftime("%H:%M UTC")
+                logger.info(
+                    "[CALENDAR] FRED release imminent: %s (%s) at %s "
+                    "— forcing discovery rescan",
+                    rel["release_name"], series_str, release_time_str,
+                )
+                # Force a discovery rescan by resetting the last-run timestamp.
+                self._last_discovery_at = float("-inf")
+                # Promote all registry markets whose GT series is in this release.
+                if self._fred_src is not None:
+                    for entry in self._registry.all_markets():
+                        sid = self._fred_src.get_series_for_market(entry)
+                        if sid in rel["series_ids"]:
+                            self._registry.mark_urgent(entry.market_id)
 
         # ── Discovery scan (every DISCOVERY_INTERVAL) ──────────────────────
         # Full platform fetch: finds new markets and seeds/refreshes the registry.
@@ -1101,8 +1140,55 @@ class ResolutionBot:
             if signal:
                 signal.ground_truth_prob = gt.ground_truth_prob
                 signal.ground_truth_result = gt  # preserve real source confidence
-                signals.append(signal)
-                gt_evaluated.add(market.market_id)
+
+                # ── Release window check ──────────────────────────────────────
+                # If this market's GT source is a FRED series that is currently
+                # in a release window, gate trading accordingly.
+                #   hold        → never trade; log the held signal
+                #   pre_release → never trade; log the scan-only signal
+                #   hunt        → allow normal trading (debug log only)
+                #   None (idle) → no change
+                _release_window: Optional[str] = None
+                _series_id_for_window: Optional[str] = None
+                _release_time_str: str = "unknown"
+                if self._calendar is not None and self._fred_src is not None:
+                    _series_id_for_window = self._fred_src.get_series_for_market(market)
+                    if _series_id_for_window is not None:
+                        _release_window = self._calendar.get_active_window(
+                            _series_id_for_window
+                        )
+                        _rt = self._calendar._schedule.get(_series_id_for_window)
+                        _release_time_str = (
+                            _rt.strftime("%H:%M UTC") if _rt else "unknown"
+                        )
+
+                if _release_window == "hold":
+                    logger.info(
+                        "[CALENDAR] Holding signal for %s — FRED series %s in hold window "
+                        "(release at %s, waiting for FRED update) | "
+                        "would_have: gap=%.3f gt_prob=%.3f price=%.3f action=%s",
+                        market.market_id, _series_id_for_window, _release_time_str,
+                        signal.effective_gap, gt.ground_truth_prob,
+                        market.yes_price, signal.action,
+                    )
+                    gt_evaluated.add(market.market_id)
+                elif _release_window == "pre_release":
+                    logger.info(
+                        "[CALENDAR] %s in pre-release window — scan only, no trades "
+                        "| gap=%.3f gt_prob=%.3f price=%.3f action=%s",
+                        market.market_id, signal.effective_gap,
+                        gt.ground_truth_prob, market.yes_price, signal.action,
+                    )
+                    gt_evaluated.add(market.market_id)
+                else:
+                    if _release_window == "hunt":
+                        logger.debug(
+                            "[CALENDAR] %s in hunt window for %s — FRED confirmed "
+                            "updated, trading enabled",
+                            market.market_id, _series_id_for_window,
+                        )
+                    signals.append(signal)
+                    gt_evaluated.add(market.market_id)
             else:
                 n_gap_too_small += 1
                 gt_evaluated.add(market.market_id)

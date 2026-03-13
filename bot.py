@@ -20,8 +20,10 @@ from typing import Optional
 import requests
 
 from config import AppConfig
+from data.ground_truth.economic_fred import FRED_SERIES
 from data.markets.kalshi import KalshiClient
 from data.markets.polymarket import PolymarketClient
+from data.release_calendar import FREDReleaseCalendar
 from monitoring.alerts import AlertManager
 from monitoring.event_db import EventDB
 from resolution.executor import ResolutionBot
@@ -165,6 +167,15 @@ class BotCoordinator:
         self._event_db = EventDB()
         self._alerts = AlertManager(config.monitoring)
 
+        # ── FRED release calendar ─────────────────────────────────────────
+        # Track upcoming BLS/BEA data releases and manage pre/hold/hunt windows.
+        # Series list comes from FREDEconomicSource's own series registry so the
+        # calendar always matches what the GT source is actually watching.
+        self._calendar = FREDReleaseCalendar(
+            series_ids=list(FRED_SERIES.keys()),
+        )
+        self._calendar.refresh_schedule()
+
         # ── Resolution drift bot ──────────────────────────────────────────
         self._resolution = ResolutionBot(
             kalshi_client=self._kalshi,
@@ -179,6 +190,7 @@ class BotCoordinator:
             scan_interval=bc.resolution_scan_interval_seconds,
             state_store=self._state,
             dynamic_exit_enabled=bc.dynamic_exit_enabled,
+            calendar=self._calendar,
         )
 
         self._cycle_count: int = 0
