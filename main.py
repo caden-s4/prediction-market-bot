@@ -84,10 +84,29 @@ def _restore_sleep() -> None:
             pass
 
 
-def _print_summary(result: dict, cfg: AppConfig, show_names: bool = False) -> None:
+def _print_force_test_banner() -> None:
+    """Print a prominent startup banner when --force-test is active."""
+    print("  \u256c" + "\u2550" * 62 + "\u256c")
+    print("  \u2551  \u26a0  FORCE-TEST MODE \u2014 SAFETY GUARDS DISABLED               \u2551")
+    print("  \u2551  \u2022 Illiquidity filter: OFF                                \u2551")
+    print("  \u2551  \u2022 Minimum gap threshold: 1% (normally 5-25%)             \u2551")
+    print("  \u2551  \u2022 Ghost mode only \u2014 live trading blocked                  \u2551")
+    print("  \u2551  \u2022 All trades are simulated \u2014 no real orders placed        \u2551")
+    print("  \u256a" + "\u2550" * 62 + "\u256a")
+    print()
+
+
+def _print_summary(
+    result: dict,
+    cfg: AppConfig,
+    show_names: bool = False,
+    force_test: bool = False,
+) -> None:
     """Print a clean, human-readable cycle summary to stdout."""
     now = datetime.now(tz=_PST).strftime("%H:%M:%S")
     mode = "GHOST TRADE" if cfg.bot.dry_run else "LIVE"
+    if force_test:
+        mode += " [FORCE-TEST]"
 
     platforms = []
     if cfg.kalshi.enabled:
@@ -803,6 +822,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print the full market name and details for each trade fired",
     )
+    parser.add_argument(
+        "--force-test",
+        action="store_true",
+        default=False,
+        help="Force-test mode: disables illiquidity filter and lowers gap threshold to 1%% "
+             "for pipeline validation. Ghost mode ONLY — refuses to start if LIVE_TRADING=true.",
+    )
 
     # ── Signal testing / isolation ─────────────────────────────────────────────
     _sig_group = parser.add_argument_group("signal testing")
@@ -874,6 +900,17 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    # ── Force-test live-mode hard block ────────────────────────────────────────
+    # This check runs BEFORE any bot initialisation.  The flag disables safety
+    # guards; combining it with live trading would cause real money losses.
+    if args.force_test:
+        if os.environ.get("LIVE_TRADING", "").lower() == "true":
+            print("\n  !! SAFETY BLOCK: --force-test cannot be used with LIVE_TRADING=true !!")
+            print("  !! This flag disables safety guards and would cause real money losses !!")
+            print("  !! Set LIVE_TRADING=false or remove --force-test !!\n")
+            sys.exit(1)
+
     # --info is a shortcut for --log-level INFO; explicit --log-level takes priority
     # if both are set (e.g. --info --log-level DEBUG the user gets DEBUG).
     log_level = args.log_level
@@ -925,6 +962,13 @@ def main() -> None:
     if signal_test.enabled:
         _print_test_mode_banner(signal_test)
 
+    if args.force_test:
+        logger.warning(
+            "FORCE-TEST mode enabled — illiquidity filter DISABLED, min gap set to 1%%. "
+            "This is for pipeline testing ONLY. Do NOT use for real trading."
+        )
+        _print_force_test_banner()
+
     if cfg.bot.dry_run:
         logger.warning(
             "GHOST TRADE mode – simulated trades will be tracked this session "
@@ -932,7 +976,7 @@ def main() -> None:
             "Set LIVE_TRADING=true in .env to trade live."
         )
 
-    coordinator = BotCoordinator(config=cfg)
+    coordinator = BotCoordinator(config=cfg, force_test=args.force_test)
 
     # In dry-run mode always show trade details so it's obvious what would have
     # fired.  --names also forces it in live mode (or overrides are additive).
@@ -941,7 +985,7 @@ def main() -> None:
     if args.once:
         logger.info("Running single scan cycle (--once mode)")
         result = coordinator.run_once(skip_stabilization=True)
-        _print_summary(result, cfg, show_names=show_names)
+        _print_summary(result, cfg, show_names=show_names, force_test=args.force_test)
         if signal_test.enabled:
             from resolution.signal_stats import SignalStats  # noqa: PLC0415
             SignalStats.get().end_cycle(print_report=True)
@@ -965,7 +1009,7 @@ def main() -> None:
                     # first call, so fresh prices are fetched before any gap
                     # evaluation; there is nothing stale to guard against.
                     result = coordinator.run_once(skip_stabilization=True)
-                    _print_summary(result, cfg, show_names=show_names)
+                    _print_summary(result, cfg, show_names=show_names, force_test=args.force_test)
                     cycle_count += 1
                     if signal_test.enabled:
                         from resolution.signal_stats import SignalStats  # noqa: PLC0415

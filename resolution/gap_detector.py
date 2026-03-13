@@ -113,9 +113,11 @@ class GapDetector:
         self,
         fee_cache: FeeCache,
         base_gap: float = BASE_GAP_THRESHOLD,
+        force_test: bool = False,
     ) -> None:
         self._fee_cache = fee_cache
         self._base_gap = base_gap
+        self._force_test = force_test
         # Signal cache for the fuzzy cross-platform scan.
         # The gap evaluation loop (K Kalshi × P Poly) dominates cycle time:
         # build_pairs() is O(K×P) SequenceMatcher work, and the fee-cache
@@ -325,7 +327,15 @@ class GapDetector:
         MAX_MIN_GAP (0.25) ensures that near-certain signals (e.g. gas price
         gap=99.5%) are never blocked purely because the market has many hours
         left — the formula would otherwise demand min_gap=0.499 at 15.3h.
+
+        In force-test mode the threshold is overridden to 1% so almost any
+        gap passes — this exists solely for end-to-end pipeline validation
+        and must never be used in production.
         """
+        if self._force_test:
+            min_gap = 0.01  # 1% — let almost everything through for testing
+            logger.debug("[FORCE-TEST] min_gap overridden to %.2f", min_gap)
+            return min_gap
         return min(self._base_gap + hours * TIME_GAP_PREMIUM, MAX_MIN_GAP)
 
     def _enough_time(self, market: Market) -> bool:
