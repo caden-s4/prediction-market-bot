@@ -70,14 +70,12 @@ _SPORTS_SERIES_TICKERS = [
 _GAME_SERIES_PREFIXES = ("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME")
 
 # Extra hours added to midnight UTC of the game date to estimate game end time.
-# Must cover the latest possible tipoff/kickoff + game duration in UTC.
-# NBA/NCAAB: latest ~10:30pm ET = ~2:30am UTC next day, game ~2.5h → ~5am UTC.
-# NFL: latest ~8:30pm ET = ~0:30am UTC next day, game ~3.5h → ~4am UTC.
-# Adding 30h from game-date midnight UTC covers all scenarios with buffer.
+# 6h keeps estimated_end within the 24h scan window while still covering all
+# game times (midnight UTC + 6h = 6am UTC, which is before any tipoff/kickoff).
 _GAME_END_OFFSET_HOURS: Dict[str, int] = {
-    "KXNBAGAME": 30,
-    "KXNCAAMBGAME": 30,
-    "KXNFLGAME": 32,
+    "KXNBAGAME": 6,
+    "KXNCAAMBGAME": 6,
+    "KXNFLGAME": 6,
 }
 
 _MONTH_MAP = {
