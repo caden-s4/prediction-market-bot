@@ -34,6 +34,9 @@ from data.ground_truth.economic_fred import FREDEconomicSource
 from data.ground_truth.financial import FinancialDataSource
 from data.ground_truth.router import GroundTruthRouter, is_paper_only
 from data.release_calendar import FREDReleaseCalendar
+from data.sports.live_game_monitor import refresh_if_stale as refresh_sports_cache
+from data.sports.shock_detector import run_shock_detection
+from data.sports import resolution_detector as _res_det
 from data.markets.base import BaseMarketClient, Market, Order, Side
 from data.markets.polymarket_ws import PolymarketWSManager
 from monitoring.alerts import AlertManager
@@ -425,6 +428,44 @@ class ResolutionBot:
         # Populated on the first discovery cycle and kept current thereafter.
         self._registry = TierRegistry()
 
+        # ── Sports live pipeline: inject Kalshi callbacks into ResolutionDetector ──
+        # The detector needs two callables to dispatch post-game resolution checks:
+        #   market_id_resolver – looks up a Kalshi market_id given team names/sport
+        #   market_price_fetcher – re-fetches yes_price for a specific market_id
+        # Both are thin lambdas over the Kalshi client; the detector calls them only
+        # in background threads, so None-safety guards are essential.
+        def _sports_market_id_resolver(
+            home_team: str, away_team: str, sport: str
+        ) -> Optional[str]:
+            """Walk the registry to find a Kalshi game market for this matchup."""
+            from data.sports.market_matcher import match_market  # noqa: PLC0415
+            ht, at = home_team.lower(), away_team.lower()
+            for entry in self._registry.all_markets():
+                m = entry.market
+                if m.platform != "kalshi":
+                    continue
+                result = match_market(m.market_id, m.question, sport)
+                if result is None:
+                    continue
+                rh = result["home_team"].lower()
+                ra = result["away_team"].lower()
+                if (ht in rh or rh in ht) and (at in ra or ra in at):
+                    return m.market_id
+            return None
+
+        def _sports_price_fetcher(market_id: str) -> Optional[float]:
+            """Return the current Kalshi YES ask price, or None on failure."""
+            if kalshi_client is None:
+                return None
+            try:
+                fresh = kalshi_client.get_market(market_id)
+                return fresh.yes_price if fresh is not None else None
+            except Exception:
+                return None
+
+        _res_det.initialize(_sports_market_id_resolver, _sports_price_fetcher)
+        logger.info("ResolutionBot: sports live pipeline initialized")
+
         # When each tier / discovery scan last ran (monotonic seconds).
         # float("-inf") guarantees the discovery condition fires on the very
         # first call regardless of how small time.monotonic() is (e.g. on a
@@ -705,6 +746,45 @@ class ResolutionBot:
             for m in (t1_markets[:2] + t2_markets[:1])
         ]
 
+        # ── Sports live data refresh ────────────────────────────────────────
+        # refresh_sports_cache() is the single entry point that:
+        #   1. Fetches ESPN scoreboards (NBA/NFL/NCAAB) if the 15s TTL has elapsed
+        #   2. Updates _game_snapshots so SportsLiveSource.fetch() finds live games
+        #   3. Resets the newly-confirmed finals list for this cycle
+        # run_shock_detection() then diffs current vs previous game state to cache
+        # any actionable probability shocks for SportsLiveSource to read.
+        # check_for_resolution_lags() dispatches background threads for games that
+        # just went final, checking whether Kalshi price has caught up yet.
+        # All three must run before GT evaluation; failure must never crash the cycle.
+        _sports_games_active = 0
+        try:
+            refresh_sports_cache()
+            shock_signals = run_shock_detection()
+            if shock_signals:
+                logger.info(
+                    "ResolutionBot: shock detector — %d actionable signal(s) cached",
+                    len(shock_signals),
+                )
+            resolution_signals = _res_det.check_for_resolution_lags()
+            if resolution_signals:
+                logger.info(
+                    "ResolutionBot: resolution detector — %d market(s) newly final",
+                    len(resolution_signals),
+                )
+            from data.sports.live_game_monitor import get_active_snapshots  # noqa: PLC0415
+            _sports_games_active = len(get_active_snapshots())
+            if _sports_games_active:
+                logger.info(
+                    "ResolutionBot: sports live — %d game(s) in progress, "
+                    "%d shock(s), %d resolution signal(s)",
+                    _sports_games_active, len(shock_signals), len(resolution_signals),
+                )
+        except Exception as _sports_exc:
+            logger.warning(
+                "ResolutionBot: sports pipeline refresh failed (ESPN may be down): %s",
+                _sports_exc,
+            )
+
         # ── Cross-platform gap detection (Tier 1 + all Tier 2) ─────────────
         # Use ALL Tier 2 entries (not just the batch) so cross-platform pairs
         # across tiers are detected even when only one side was refreshed.
@@ -850,6 +930,7 @@ class ResolutionBot:
 
         # Refresh registry stats at end so cycle #1 reflects post-discovery state.
         summary["registry"] = self._registry.stats()
+        summary["sports_games_active"] = _sports_games_active
 
         elapsed = (time.monotonic() - cycle_start) * 1000
         summary["cycle_ms"] = round(elapsed)
