@@ -88,7 +88,7 @@ class SportsLiveSource(DataSource):
         # Kalshi sports ticker prefixes
         mid = market.market_id.upper()
         return any(mid.startswith(p) for p in (
-            "KXNBA", "KXNFL", "KXNCAAB", "KXNFL",
+            "KXNBA", "KXNFL", "KXNCAAMBGAME",
         ))
 
     def fetch(self, market: Market) -> Optional[GroundTruthResult]:
@@ -195,7 +195,7 @@ class SportsLiveSource(DataSource):
             return "nfl"
         if "nba" in text or "basketball" in text:
             return "nba"
-        if "ncaab" in text or "college basketball" in text or "ncaa basketball" in text:
+        if "ncaab" in text or "college basketball" in text or "ncaa basketball" in text or "kxncaambgame" in text:
             return "ncaab"
         return None
 
