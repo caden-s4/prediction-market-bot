@@ -14,7 +14,7 @@ import base64
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode
 
@@ -65,6 +65,47 @@ _SPORTS_SERIES_TICKERS = [
     "KXNBAGAME",     # NBA individual game results (e.g. KXNBAGAME-26MAR13MEMDET-DET)
     "KXNCAAMBGAME",  # NCAA Men's Basketball game results
 ]
+
+# Sports game-result series whose close_time is a settlement window, not the game time.
+_GAME_SERIES_PREFIXES = ("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME")
+
+# Extra hours added to midnight UTC of the game date to estimate game end time.
+# Must cover the latest possible tipoff/kickoff + game duration in UTC.
+# NBA/NCAAB: latest ~10:30pm ET = ~2:30am UTC next day, game ~2.5h → ~5am UTC.
+# NFL: latest ~8:30pm ET = ~0:30am UTC next day, game ~3.5h → ~4am UTC.
+# Adding 30h from game-date midnight UTC covers all scenarios with buffer.
+_GAME_END_OFFSET_HOURS: Dict[str, int] = {
+    "KXNBAGAME": 30,
+    "KXNCAAMBGAME": 30,
+    "KXNFLGAME": 32,
+}
+
+_MONTH_MAP = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def _is_game_market(market_id: str) -> bool:
+    return any(market_id.startswith(p) for p in _GAME_SERIES_PREFIXES)
+
+
+def _extract_game_date(market_id: str) -> Optional[datetime]:
+    """Extract game date from market IDs like KXNBAGAME-26MAR13MEMDET-DET.
+
+    The date segment (YYMMMDD) immediately follows the first '-'.
+    Returns midnight UTC on that date, or None if the pattern is not found.
+    """
+    match = re.search(r"-(\d{2})([A-Z]{3})(\d{2})", market_id)
+    if not match:
+        return None
+    year = 2000 + int(match.group(1))
+    month = _MONTH_MAP.get(match.group(2))
+    if not month:
+        return None
+    day = int(match.group(3))
+    return datetime(year, month, day, tzinfo=timezone.utc)
+
 
 _CITY_COORDS: Dict[str, Dict[str, float]] = {
     # Major US metros
@@ -518,6 +559,27 @@ class KalshiClient(BaseMarketClient):
                 else datetime.now(timezone.utc)
             )
 
+            # For sports game markets, Kalshi sets close_time to the settlement
+            # window deadline (~2 weeks after the game), not the actual game time.
+            # Override resolution_date with an estimated game end time derived
+            # from the date encoded in the market ID (e.g. KXNBAGAME-26MAR13…).
+            settlement_deadline = None
+            if _is_game_market(ticker):
+                game_date = _extract_game_date(ticker)
+                if game_date:
+                    offset_hours = next(
+                        (h for p, h in _GAME_END_OFFSET_HOURS.items() if ticker.startswith(p)),
+                        30,
+                    )
+                    estimated_end = game_date + timedelta(hours=offset_hours)
+                    settlement_deadline = resolution_date
+                    resolution_date = estimated_end
+                    logger.debug(
+                        "Sports market %s: overriding resolution_date from %s to %s "
+                        "(game date extraction)",
+                        ticker, settlement_deadline, estimated_end,
+                    )
+
             # Kalshi prices are in cents [0–100]; convert to [0–1]
             yes_bid = float(item.get("yes_bid", 50)) / 100.0
             yes_ask = float(item.get("yes_ask", 50)) / 100.0
@@ -551,6 +613,7 @@ class KalshiClient(BaseMarketClient):
             # Attach additional Kalshi-specific fields as dynamic attributes.
             # All downstream code must use getattr(market, 'field', None) since
             # these are absent on Polymarket markets and may change with API updates.
+            market.settlement_deadline = settlement_deadline  # original Kalshi close_time for game markets
             market.last_price    = _safe_float(item.get("last_price_dollars"))
             market.volume_24h    = _safe_float(item.get("volume_24h_fp"))
             market.liquidity     = _safe_float(item.get("liquidity_dollars"))
