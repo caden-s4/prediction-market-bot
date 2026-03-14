@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
 from data.markets.base import BaseMarketClient, Market
+from data.markets.kalshi import _GAME_SERIES_PREFIXES
 from resolution.priority import PriorityScorer
 from shared.exclusion_list import ExclusionList
 
@@ -311,7 +312,12 @@ class ResolutionScanner:
         if market.category.lower() in EXCLUDED_CATEGORIES or market.is_weather_market():
             return "category"
         hours_left = market.hours_to_resolution   # uses fixed timezone-aware property
-        if not (0 < hours_left <= window_hours):
+        effective_window = (
+            48.0
+            if any(market.market_id.startswith(p) for p in _GAME_SERIES_PREFIXES)
+            else window_hours
+        )
+        if not (0 < hours_left <= effective_window):
             return "hours"
         # Only exclude markets that are literally fully resolved (price at 0 or 1).
         # Near-certain prices (e.g. YES=0.93) are the core of the resolution-drift
