@@ -1205,6 +1205,9 @@ class ResolutionBot:
                     i, total, len(signals),
                 )
 
+            if market.market_id.startswith(("KXNBAGAME", "KXNCAAMBGAME")):
+                logger.info(f"[DEBUG PRICE] {market.market_id} yes_price={market.yes_price:.3f} before any refresh")
+
             # ── Permanent fast-skip check ─────────────────────────────────────
             # Bypasses the router entirely — no can_any_source_handle() call.
             # Markets graduate here after FAST_SKIP_PERM_THRESHOLD consecutive
@@ -1325,6 +1328,8 @@ class ResolutionBot:
             # the normal refresh cycle (e.g. because the bulk endpoint hasn't
             # propagated real prices yet), fetch it individually before the
             # illiquidity filter fires and silently discards it.
+            if market.market_id.startswith(("KXNBAGAME", "KXNCAAMBGAME")):
+                logger.info(f"[DEBUG PRICE] {market.market_id} refresh block reached, about to call get_market")
             if (
                 _is_game_market(market.market_id)
                 and abs(market.yes_price - 0.50) <= 0.02
