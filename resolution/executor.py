@@ -441,8 +441,7 @@ class ResolutionBot:
             """Walk the registry to find a Kalshi game market for this matchup."""
             from data.sports.market_matcher import match_market  # noqa: PLC0415
             ht, at = home_team.lower(), away_team.lower()
-            for entry in self._registry.all_markets():
-                m = entry.market
+            for m in self._registry.all_markets():
                 if m.platform != "kalshi":
                     continue
                 result = match_market(m.market_id, m.question, sport)
