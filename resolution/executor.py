@@ -1345,6 +1345,18 @@ class ResolutionBot:
                                 "ResolutionBot: price refresh %s %.3f → %.3f",
                                 market.market_id, old_price, market.yes_price,
                             )
+                        else:
+                            logger.info(
+                                "ResolutionBot: price refresh %s attempted, "
+                                "Kalshi returned %.3f (still ≈0.50; will hit illiquidity filter)",
+                                market.market_id, fresh.yes_price,
+                            )
+                    else:
+                        logger.info(
+                            "ResolutionBot: price refresh %s attempted, "
+                            "Kalshi returned None (will hit illiquidity filter)",
+                            market.market_id,
+                        )
                 except Exception as _refresh_exc:
                     logger.debug(
                         "ResolutionBot: price refresh failed for %s: %s",
