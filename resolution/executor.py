@@ -38,6 +38,7 @@ from data.sports.live_game_monitor import refresh_if_stale as refresh_sports_cac
 from data.sports.shock_detector import run_shock_detection
 from data.sports import resolution_detector as _res_det
 from data.markets.base import BaseMarketClient, Market, Order, Side
+from data.markets.kalshi import _is_game_market
 from data.markets.polymarket_ws import PolymarketWSManager
 from monitoring.alerts import AlertManager
 from resolution.confidence import ConfidenceScorer
@@ -785,6 +786,25 @@ class ResolutionBot:
                 _sports_exc,
             )
 
+        # ── Promote live game markets to T1 ────────────────────────────────
+        # When games are in progress, game markets need T1 treatment (every
+        # cycle) rather than slow T2/T3 rotation.  For each non-T1 game market
+        # in the registry, check whether it matches an active ESPN snapshot; if
+        # so, mark it urgent so the tier registry moves it to T1 this cycle.
+        if _sports_games_active > 0:
+            from data.sports.market_matcher import match_market  # noqa: PLC0415
+            for tier in (2, 3):
+                for entry in self._registry.get_tier(tier):
+                    m = entry.market
+                    if _is_game_market(m.market_id):
+                        result = match_market(m.market_id, m.question)
+                        if result:
+                            self._registry.mark_urgent(m.market_id)
+                            logger.debug(
+                                "ResolutionBot: promoted %s to T1 (game may be live)",
+                                m.market_id,
+                            )
+
         # ── Cross-platform gap detection (Tier 1 + all Tier 2) ─────────────
         # Use ALL Tier 2 entries (not just the batch) so cross-platform pairs
         # across tiers are detected even when only one side was refreshed.
@@ -1299,6 +1319,39 @@ class ResolutionBot:
                 if gt.ground_truth_prob is None:
                     n_no_prob += 1
                     continue
+
+            # ── Game market stale-price refresh ───────────────────────────────
+            # Kalshi's bulk /markets endpoint initialises game markets with a
+            # 50¢ placeholder bid/ask.  If the market still shows ~0.50 after
+            # the normal refresh cycle (e.g. because the bulk endpoint hasn't
+            # propagated real prices yet), fetch it individually before the
+            # illiquidity filter fires and silently discards it.
+            if (
+                _is_game_market(market.market_id)
+                and abs(market.yes_price - 0.50) <= 0.02
+                and self._kalshi is not None
+            ):
+                try:
+                    fresh = self._kalshi.get_market(market.market_id)
+                    if fresh is not None and fresh.yes_price is not None:
+                        old_price = market.yes_price
+                        market.yes_price = fresh.yes_price
+                        market.no_price = getattr(fresh, "no_price", round(1.0 - fresh.yes_price, 4))
+                        for attr in ("yes_ask", "yes_bid", "volume_24h", "liquidity", "open_interest"):
+                            val = getattr(fresh, attr, None)
+                            if val is not None:
+                                setattr(market, attr, val)
+                        if abs(old_price - market.yes_price) > 0.02:
+                            logger.info(
+                                "ResolutionBot: price refresh %s %.3f → %.3f",
+                                market.market_id, old_price, market.yes_price,
+                            )
+                except Exception as _refresh_exc:
+                    logger.debug(
+                        "ResolutionBot: price refresh failed for %s: %s",
+                        market.market_id, _refresh_exc,
+                    )
+            # ─────────────────────────────────────────────────────────────────
 
             # ── Per-market illiquid check ─────────────────────────────────────
             # The series-level filter above catches whole bracket series at 50¢.
