@@ -204,9 +204,13 @@ class SportsLiveSource(DataSource):
         home_canonical = match["home_team"].lower()
         away_canonical = match["away_team"].lower()
 
+        snapshots = list(get_active_snapshots())
+        if snapshots:
+            logger.info(f"[DEBUG] _find_game_snapshot: searching for home={home_canonical} away={away_canonical}, first snapshot: home={snapshots[0].home_team} away={snapshots[0].away_team} sport={snapshots[0].sport}")
+
         best = None
         best_score = 0
-        for snap in get_active_snapshots():
+        for snap in snapshots:
             if snap.sport != sport:
                 continue
             snap_home = snap.home_team.lower()
