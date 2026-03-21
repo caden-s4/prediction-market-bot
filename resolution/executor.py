@@ -1208,6 +1208,40 @@ class ResolutionBot:
             if market.market_id.startswith(("KXNBAGAME", "KXNCAAMBGAME")):
                 logger.info(f"[DEBUG PRICE] {market.market_id} yes_price={market.yes_price:.3f} before any refresh")
 
+            # ── Game market price refresh (BEFORE GT fetch) ───────────────────
+            # Must run here — before GT fetch, before any continue statements.
+            # GT returns prob=None for pre-game markets, so a refresh gated
+            # behind GT result is dead code for those markets.
+            if (
+                market.market_id.startswith(("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME"))
+                and abs(market.yes_price - 0.50) <= 0.02
+                and self._kalshi is not None
+            ):
+                try:
+                    fresh = self._kalshi.get_market(market.market_id)
+                    if fresh is not None:
+                        new_price = getattr(fresh, "yes_price", None)
+                        if new_price is not None:
+                            old_price = market.yes_price
+                            market.yes_price = new_price
+                            market.no_price = round(1.0 - new_price, 4)
+                            if abs(old_price - new_price) > 0.02:
+                                logger.info(
+                                    "ResolutionBot: game price refresh %s: %.3f → %.3f",
+                                    market.market_id, old_price, new_price,
+                                )
+                            else:
+                                logger.debug(
+                                    "ResolutionBot: game price refresh %s: Kalshi also at %.3f",
+                                    market.market_id, new_price,
+                                )
+                except Exception as _e:
+                    logger.debug(
+                        "ResolutionBot: game price refresh failed %s: %s",
+                        market.market_id, _e,
+                    )
+            # ─────────────────────────────────────────────────────────────────
+
             # ── Permanent fast-skip check ─────────────────────────────────────
             # Bypasses the router entirely — no can_any_source_handle() call.
             # Markets graduate here after FAST_SKIP_PERM_THRESHOLD consecutive
@@ -1321,53 +1355,6 @@ class ResolutionBot:
                 if gt.ground_truth_prob is None:
                     n_no_prob += 1
                     continue
-
-            # ── Game market stale-price refresh ───────────────────────────────
-            # Kalshi's bulk /markets endpoint initialises game markets with a
-            # 50¢ placeholder bid/ask.  If the market still shows ~0.50 after
-            # the normal refresh cycle (e.g. because the bulk endpoint hasn't
-            # propagated real prices yet), fetch it individually before the
-            # illiquidity filter fires and silently discards it.
-            if market.market_id.startswith(("KXNBAGAME", "KXNCAAMBGAME")):
-                logger.info(f"[DEBUG PRICE] {market.market_id} refresh block reached, about to call get_market")
-            if (
-                _is_game_market(market.market_id)
-                and abs(market.yes_price - 0.50) <= 0.02
-                and self._kalshi is not None
-            ):
-                try:
-                    fresh = self._kalshi.get_market(market.market_id)
-                    if fresh is not None and fresh.yes_price is not None:
-                        old_price = market.yes_price
-                        market.yes_price = fresh.yes_price
-                        market.no_price = getattr(fresh, "no_price", round(1.0 - fresh.yes_price, 4))
-                        for attr in ("yes_ask", "yes_bid", "volume_24h", "liquidity", "open_interest"):
-                            val = getattr(fresh, attr, None)
-                            if val is not None:
-                                setattr(market, attr, val)
-                        if abs(old_price - market.yes_price) > 0.02:
-                            logger.info(
-                                "ResolutionBot: price refresh %s %.3f → %.3f",
-                                market.market_id, old_price, market.yes_price,
-                            )
-                        else:
-                            logger.info(
-                                "ResolutionBot: price refresh %s attempted, "
-                                "Kalshi returned %.3f (still ≈0.50; will hit illiquidity filter)",
-                                market.market_id, fresh.yes_price,
-                            )
-                    else:
-                        logger.info(
-                            "ResolutionBot: price refresh %s attempted, "
-                            "Kalshi returned None (will hit illiquidity filter)",
-                            market.market_id,
-                        )
-                except Exception as _refresh_exc:
-                    logger.debug(
-                        "ResolutionBot: price refresh failed for %s: %s",
-                        market.market_id, _refresh_exc,
-                    )
-            # ─────────────────────────────────────────────────────────────────
 
             # ── Per-market illiquid check ─────────────────────────────────────
             # The series-level filter above catches whole bracket series at 50¢.
