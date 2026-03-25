@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import random
 import re
 import time
@@ -30,15 +31,22 @@ from dataclasses import dataclass, field, replace as dc_replace
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
+try:
+    from zoneinfo import ZoneInfo as _ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo as _ZoneInfo  # type: ignore[no-redef]
+
+from data.ground_truth.base import GroundTruthResult, SourceType
 from data.ground_truth.economic_fred import FREDEconomicSource
-from data.ground_truth.financial import FinancialDataSource
+from data.ground_truth.financial import FinancialDataSource, _PRICE_CACHE as _FINANCIAL_PRICE_CACHE
 from data.ground_truth.router import GroundTruthRouter, is_paper_only
 from data.release_calendar import FREDReleaseCalendar
 from data.sports.live_game_monitor import refresh_if_stale as refresh_sports_cache
 from data.sports.shock_detector import run_shock_detection
 from data.sports import resolution_detector as _res_det
+from data.sports.resolution_detector import ResolutionSignal, drain_ghost_exits as _drain_ghost_exits
 from data.markets.base import BaseMarketClient, Market, Order, Side
-from data.markets.kalshi import _is_game_market
+from data.markets.kalshi import _is_game_market, _is_financial_bracket_market
 from data.markets.polymarket_ws import PolymarketWSManager
 from monitoring.alerts import AlertManager
 from resolution.confidence import ConfidenceScorer
@@ -46,7 +54,7 @@ from resolution.decay_monitor import (
     DecayAction, DecayMonitor, OpenResolutionPosition,
 )
 from resolution.gap_detector import GapDetector, GapSignal, MAX_MIN_GAP
-from resolution.priority import PriorityScorer
+from resolution.priority import PriorityScorer, _SERIES_TO_SYMBOL, _parse_strike
 from resolution.scanner import ResolutionScanner
 from resolution.tier_registry import TierRegistry
 from shared.bankroll import Bankroll
@@ -119,10 +127,22 @@ _NO_SOURCE_STREAK_THRESHOLD = 5
 # handle this market until new GT sources are added.
 FAST_SKIP_PERM_THRESHOLD = 3
 
-# If the live order-book mid-price deviates more than this from the scanner price,
-# the scanner data is stale. Skip the trade rather than entering at a price that
-# no longer exists in the real order book.
-STALE_PRICE_THRESHOLD = 0.12     # 12 cents
+# Stale-price guard: relative + absolute-floor approach.
+# threshold = max(scanner_price × RELATIVE, FLOOR)
+# A 25¢ market allows ~4¢ drift (floor); a 90¢ market allows 13.5¢ drift.
+# This catches the dangerous case where a cheap market moves 48% but only 12¢.
+STALE_PRICE_RELATIVE_THRESHOLD = 0.15   # 15% of scanner price
+STALE_PRICE_ABSOLUTE_FLOOR     = 0.04   # minimum 4¢ absolute floor
+
+# Maximum distance (as a fraction of underlying price) between a financial
+# bracket market's strike and the current underlying before we skip GT
+# evaluation entirely.  Prevents trading "NQ above 22,600" when NQ is 24,000.
+_BRACKET_PROXIMITY_MAX = 0.05      # 5% deep-OTM gate
+
+# Ghost mode: cancel pending ghost orders that haven't been filled within this
+# many minutes.  Only applies to positions entered with an empty order book
+# (bracket bypass).
+_GHOST_FILL_TIMEOUT_MINUTES = 10
 
 # Minimum absolute expected value per contract before a trade is fired.
 # EV is computed as: for BUY YES → gt_prob - price; for BUY NO → (1-gt_prob) - price.
@@ -203,6 +223,14 @@ def _check_minimum_ev(
     return ev >= MIN_EV, ev
 
 
+# ── Price refresh TTL cache ────────────────────────────────────────────────────
+# Tracks the last time each market_id had a get_market() call for price refresh.
+# Markets that are genuinely at 0.50 live would otherwise be refreshed every
+# cycle.  Skip if refreshed within the last 120 seconds.
+_price_refresh_cache: Dict[str, float] = {}   # market_id → monotonic time of last refresh
+_PRICE_REFRESH_TTL_S: float = 120.0
+
+
 # ── Order-book cooldown ────────────────────────────────────────────────────────
 # When a market's order book is empty (no YES ask, no YES bid, or mid_price=None)
 # we set a 30-minute cooldown so the same market doesn't waste a T1 slot on every
@@ -224,6 +252,16 @@ def _set_orderbook_cooldown(market_id: str, minutes: int = 30) -> None:
     )
 
 
+def _is_us_market_hours() -> bool:
+    """Return True if the current wall-clock time is within regular US equity
+    market hours (09:30–16:00 Eastern, Monday–Friday)."""
+    from datetime import time as _time
+    _now = datetime.now(_ZoneInfo("America/New_York"))
+    if _now.weekday() >= 5:       # Saturday=5, Sunday=6
+        return False
+    return _time(9, 30) <= _now.time() <= _time(16, 0)
+
+
 @dataclass
 class TradeRecord:
     """Tracks a live resolution drift position."""
@@ -243,6 +281,8 @@ class TradeRecord:
     entry_time: float = field(default_factory=time.time)
     order_id: Optional[str] = None
     requires_human_review: bool = False   # set on startup if gt_prob flipped >50% since entry
+    fill_status: str = "filled"           # "filled" | "pending" | "cancelled"
+    limit_price_used: Optional[float] = None  # limit at placement (pending-fill tracking)
 
 
 @dataclass
@@ -376,6 +416,7 @@ class ResolutionBot:
         dynamic_exit_enabled: bool = True,
         calendar: Optional[FREDReleaseCalendar] = None,
         force_test: bool = False,
+        min_confidence: float = 0.80,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
@@ -421,7 +462,7 @@ class ResolutionBot:
             priority_scorer=_priority_scorer,
         )
         self._gap_detector = GapDetector(fee_cache, force_test=force_test)
-        self._confidence = ConfidenceScorer()
+        self._confidence = ConfidenceScorer(threshold=min_confidence)
         self._decay = DecayMonitor(dynamic_exit_enabled=dynamic_exit_enabled)
 
         # ── Tiered market registry ─────────────────────────────────────────────
@@ -449,7 +490,14 @@ class ResolutionBot:
                     continue
                 rh = result["home_team"].lower()
                 ra = result["away_team"].lower()
-                if (ht in rh or rh in ht) and (at in ra or ra in at):
+                # match_market encodes YES team as "home_team" by convention,
+                # which may not match ESPN's actual home/away designation.
+                # Check both orderings so NCAAW/NCAAB neutral-site games resolve.
+                if (
+                    (ht in rh or rh in ht) and (at in ra or ra in at)
+                ) or (
+                    (ht in ra or ra in ht) and (at in rh or rh in at)
+                ):
                     return m.market_id
             return None
 
@@ -503,6 +551,7 @@ class ResolutionBot:
         # urgent T1 flags are only cleared when GT actually returned a usable signal
         # (not when GT returned None due to the series-mismatch buffer or no source).
         self._last_gt_evaluated_ids: frozenset = frozenset()
+        self._last_gt_coverage: dict = {}
         # Consecutive no_source cycle counter per market_id.
         # Incremented each cycle a market passes can_any_source_handle() but
         # fetch() still returns None; reset to 0 when fetch() returns data.
@@ -517,6 +566,20 @@ class ResolutionBot:
         # Markets whose fast-skip streak has crossed the threshold.  Checked
         # before any router call; these markets skip the GT loop entirely.
         self._no_source_perm_skipped: set = set()
+        # Consecutive unfilled-timeout counter per market_id (ghost mode only).
+        # After 3 timeouts the market is added to _unfilled_timeout_perm_skipped
+        # so the bot stops placing dead orders on illiquid markets this session.
+        self._unfilled_timeout_count: Dict[str, int] = {}
+        self._unfilled_timeout_perm_skipped: set = set()
+        # Consecutive EV-failure counter per market_id.  After 3 consecutive EV
+        # failures the market is added to the same perm-skip set so the GT loop
+        # stops wasting time on structurally-negative-EV positions.
+        self._ev_fail_count: Dict[str, int] = {}
+        # Consecutive confidence-failure counter per market_id.  After 3 consecutive
+        # confidence-gate failures the market is added to _unfilled_timeout_perm_skipped
+        # to stop evaluating markets that can never trade (e.g. pre-game sports with
+        # source_confidence=0.65 < gate=0.80).
+        self._confidence_fail_count: Dict[str, int] = {}
         # Previous cycle's perm-skip count — used to detect when the population
         # changes so we can log a single informational line instead of per-market spam.
         self._prev_perm_skip_count: int = 0
@@ -570,6 +633,16 @@ class ResolutionBot:
             silently scan 0 markets).
         """
         logger.debug("=== ResolutionBot tier-1 cycle start ===")
+
+        # Fix 6: re-check LIVE_TRADING every cycle in case .env was edited while
+        # the bot was running.  force_test must never coexist with live trading.
+        if self._force_test and os.environ.get("LIVE_TRADING", "false").lower() == "true":
+            logger.critical(
+                "ResolutionBot: LIVE_TRADING=true detected at cycle start — "
+                "disabling force_test immediately"
+            )
+            self._force_test = False
+
         self._kalshi_backend_down = False   # reset circuit breaker each cycle
         cycle_start = time.monotonic()
         now_mono = time.monotonic()
@@ -757,6 +830,9 @@ class ResolutionBot:
         # just went final, checking whether Kalshi price has caught up yet.
         # All three must run before GT evaluation; failure must never crash the cycle.
         _sports_games_active = 0
+        shock_signals: list = []
+        resolution_signals: list = []
+        ghost_exits: list = []
         try:
             refresh_sports_cache()
             shock_signals = run_shock_detection()
@@ -766,6 +842,7 @@ class ResolutionBot:
                     len(shock_signals),
                 )
             resolution_signals = _res_det.check_for_resolution_lags()
+            ghost_exits = _drain_ghost_exits()
             if resolution_signals:
                 logger.info(
                     "ResolutionBot: resolution detector — %d market(s) newly final",
@@ -784,6 +861,21 @@ class ResolutionBot:
                 "ResolutionBot: sports pipeline refresh failed (ESPN may be down): %s",
                 _sports_exc,
             )
+
+        # ── Ghost position exits for confirmed finals ───────────────────────
+        # When a game goes CONFIRMED FINAL, exit any open ghost positions on
+        # that market at the settlement value (1.0 or 0.0).  This runs before
+        # GT evaluation so the position is gone before it would be re-evaluated.
+        if ghost_exits:
+            try:
+                _n_ghost_exited = self._exit_ghost_positions_for_finals(ghost_exits)
+                if _n_ghost_exited:
+                    logger.info(
+                        "ResolutionBot: ghost final exit — %d position(s) closed at settlement",
+                        _n_ghost_exited,
+                    )
+            except Exception as _gex_exc:
+                logger.warning("ResolutionBot: ghost final exit error: %s", _gex_exc)
 
         # ── Promote live game markets to T1 ────────────────────────────────
         # When games are in progress, game markets need T1 treatment (every
@@ -854,6 +946,49 @@ class ResolutionBot:
         for sig in cross_signals + fuzzy_signals:
             self._registry.mark_urgent(sig.market_to_buy.market_id)
 
+        # ── Prioritize just-finalized game markets ──────────────────────────
+        # When a game goes final this cycle, the corresponding Kalshi market is
+        # mispriced for only a short window before other bots reprice it.
+        # Sorting those markets to the front of active_markets ensures GT
+        # evaluation + order placement happens in the next few seconds rather
+        # than after 100+ other markets are processed.
+        try:
+            from data.sports.live_game_monitor import get_newly_confirmed_finals  # noqa: PLC0415
+            from data.sports.market_matcher import match_market as _match_market  # noqa: PLC0415
+            _newly_final = get_newly_confirmed_finals()
+            if _newly_final:
+                _final_teams: set = set()
+                for _cg in _newly_final:
+                    _final_teams.add(_cg.home_team.lower())
+                    _final_teams.add(_cg.away_team.lower())
+
+                def _is_final_game_market(m: "Market") -> bool:
+                    if not _is_game_market(m.market_id):
+                        return False
+                    _r = _match_market(m.market_id, m.question)
+                    if _r is None:
+                        return False
+                    return (
+                        _r["home_team"].lower() in _final_teams
+                        or _r["away_team"].lower() in _final_teams
+                    )
+
+                _hot, _rest = [], []
+                for _m in active_markets:
+                    (_hot if _is_final_game_market(_m) else _rest).append(_m)
+                if _hot:
+                    logger.info(
+                        "ResolutionBot: prioritizing %d just-finalized game market(s) "
+                        "for immediate GT evaluation: %s",
+                        len(_hot),
+                        ", ".join(_m.market_id for _m in _hot),
+                    )
+                    active_markets = _hot + _rest
+        except Exception as _sort_exc:
+            logger.warning(
+                "ResolutionBot: failed to prioritize final game markets: %s", _sort_exc
+            )
+
         # ── Information signals (GT fetch for active markets) ───────────────
         info_signals = self._fetch_info_signals(active_markets)
 
@@ -864,13 +999,39 @@ class ResolutionBot:
         # Persist sticky-T1 promotions so they survive a restart.
         self._save_sticky_t1()
 
-        all_signals = cross_signals + fuzzy_signals + info_signals
+        # ── Resolution lag signals (confirmed finals, still mispriced) ───────
+        # Convert ResolutionSignals → GapSignals so they run through _try_execute.
+        # These are prepended to info_signals so they execute first — resolution
+        # lag windows are seconds wide and shouldn't wait behind slower GT signals.
+        resolution_gap_signals: List[GapSignal] = []
+        if resolution_signals:
+            market_by_id = {m.market_id: m for m in self._registry.all_markets()}
+            for rsig in resolution_signals:
+                market = market_by_id.get(rsig.market_id)
+                if market is None:
+                    logger.warning(
+                        "ResolutionBot: resolution signal for %s — not in registry, skipping",
+                        rsig.market_id,
+                    )
+                    continue
+                gsig = self._resolution_signal_to_gap(rsig, market)
+                resolution_gap_signals.append(gsig)
+                self._registry.mark_urgent(market.market_id)
+                logger.info(
+                    "ResolutionBot: [RESOLUTION LAG] %s | correct=%.2f market=%.3f "
+                    "gap=%.1f%% lag=%.0fms",
+                    rsig.market_id, rsig.correct_prob, rsig.market_price,
+                    rsig.gap * 100, rsig.resolution_lag_ms,
+                )
+
+        all_signals = cross_signals + fuzzy_signals + resolution_gap_signals + info_signals
         self._last_signals = all_signals
         summary["signals_flagged"] = len(all_signals)
         logger.info(
-            "ResolutionBot: %d exact + %d fuzzy cross-platform + %d info signals = %d total "
+            "ResolutionBot: %d exact + %d fuzzy cross-platform + %d resolution lag + %d info signals = %d total "
             "(T1=%d T2_batch=%d/%d total_t2=%d)",
-            len(cross_signals), len(fuzzy_signals), len(info_signals), len(all_signals),
+            len(cross_signals), len(fuzzy_signals), len(resolution_gap_signals),
+            len(info_signals), len(all_signals),
             len(t1_markets), len(t2_markets),
             len(self._registry.get_tier(2)), len(all_t2_markets),
         )
@@ -896,6 +1057,7 @@ class ResolutionBot:
         # ── Confidence gate pre-screen (for display/logging only) ───────────
         display_signals: List[GapSignal] = []
         confidence_blocked = 0
+        cooldown_blocked = 0
         for signal in all_signals:
             mid = signal.market_to_buy.market_id
             if (
@@ -906,14 +1068,18 @@ class ResolutionBot:
             gt = signal.ground_truth_result
             score = self._confidence.score(signal.market_to_buy, gt, signal)
             if score.passes:
-                display_signals.append(signal)
+                if _is_in_orderbook_cooldown(mid) and not self._force_test:
+                    cooldown_blocked += 1
+                else:
+                    display_signals.append(signal)
             else:
                 confidence_blocked += 1
 
         summary["confidence_blocked"] = confidence_blocked
+        summary["cooldown_blocked"] = cooldown_blocked
         logger.info(
-            "ResolutionBot: confidence gate: %d pass, %d blocked",
-            len(display_signals), confidence_blocked,
+            "ResolutionBot: confidence gate: %d pass, %d confidence-blocked, %d cooldown-blocked",
+            len(display_signals), confidence_blocked, cooldown_blocked,
         )
         summary["signals_detail"] = [
             {
@@ -950,6 +1116,7 @@ class ResolutionBot:
         # Refresh registry stats at end so cycle #1 reflects post-discovery state.
         summary["registry"] = self._registry.stats()
         summary["sports_games_active"] = _sports_games_active
+        summary["gt_coverage"] = self._last_gt_coverage
 
         elapsed = (time.monotonic() - cycle_start) * 1000
         summary["cycle_ms"] = round(elapsed)
@@ -1112,6 +1279,61 @@ class ResolutionBot:
 
     # ── Signal execution ──────────────────────────────────────────────────────
 
+    def _resolution_signal_to_gap(
+        self, sig: ResolutionSignal, market: Market
+    ) -> GapSignal:
+        """
+        Convert a ResolutionSignal (confirmed ESPN final, live Kalshi price
+        already re-fetched by the background thread) into a GapSignal so it
+        can flow through _try_execute unchanged.
+
+        Confidence is pre-verified at 0.99; gap is pre-checked against a live
+        Kalshi price fetch (not the stale bulk-API price).  The signal bypasses
+        the GT router — outcome is known with certainty.
+        """
+        fee = self._fee_cache.get_taker_fee(market.platform, market.market_id)
+        effective_gap = max(0.0, sig.gap - fee)
+
+        gt = GroundTruthResult(
+            ground_truth_prob=sig.correct_prob,
+            confidence=sig.confidence,          # always 0.99
+            source_type=SourceType.HARD,
+            source_name="ResolutionDetector/ConfirmedFinal",
+            source_url="https://site.api.espn.com/apis/site/v2/sports",
+            raw_data={
+                "game_id": sig.game_id,
+                "sport": sig.sport,
+                "home_team": sig.home_team,
+                "away_team": sig.away_team,
+                "winner": sig.winner,
+                "resolution_lag_ms": sig.resolution_lag_ms,
+                "market_price_at_detection": sig.market_price,
+            },
+            reasoning=(
+                f"Confirmed final: {sig.sport.upper()} {sig.home_team} vs "
+                f"{sig.away_team} — winner={sig.winner} | "
+                f"correct={sig.correct_prob:.2f} market={sig.market_price:.3f} "
+                f"({sig.resolution_lag_ms:.0f}ms lag)"
+            ),
+            data_published_at=datetime.now(timezone.utc),
+            # Outcome is known — never ambiguous
+            directional_confidence="yes" if sig.correct_prob >= 0.99 else "no",
+        )
+
+        return GapSignal(
+            signal_type="information",
+            market_to_buy=market,
+            market_reference=None,
+            target_price=sig.market_price,
+            reference_price=sig.correct_prob,
+            ground_truth_prob=sig.correct_prob,
+            raw_gap=sig.gap,
+            effective_gap=effective_gap,
+            taker_fee=fee,
+            ground_truth_result=gt,
+            reasoning=gt.reasoning,
+        )
+
     def _fetch_info_signals(self, markets: List[Market]) -> List[GapSignal]:
         """For each single-platform market, try fetching ground truth and detect gaps."""
         signals = []
@@ -1148,6 +1370,11 @@ class ResolutionBot:
         # when GT returned None (buffer, no source, or stale data).
         gt_evaluated: set = set()
 
+        # FRED markets currently in the hunt window — promoted to T1 eagerly so
+        # the bot surveys them every Tier-1 cycle (15 s) rather than T2 (150 s).
+        # Collected during the main loop; logged in a single line at the end.
+        _hunt_window_fred_markets: List[str] = []
+
         # Bracket GT cache: maps ticker prefix → first GT result for that bracket series.
         # Markets like KXAAAGASW-26MAR02-2.888 / -2.898 / -2.908 … all resolve against
         # the same underlying data point.  We fetch GT once for the first market in each
@@ -1181,21 +1408,40 @@ class ResolutionBot:
                 _prefix_prices.setdefault(pfx, []).append(m.yes_price)
         for pfx, prices in _prefix_prices.items():
             near_50 = sum(1 for p in prices if abs(p - 0.50) <= 0.02)
-            if near_50 > 3:
+            pct_near_50 = near_50 / len(prices) if prices else 0.0
+
+            # Illiquidity gate: proportional + absolute minimum
+            # Flag only if BOTH:
+            #   (1) At least 4 brackets at 0.50 (minimum count to avoid false positives)
+            #   (2) More than 50% of the series at 0.50 (indicates genuinely dead series)
+            # Example: 4/28 = 14% → PASS, 35/40 = 87% → FLAG
+            is_illiquid = near_50 > 3 and pct_near_50 > 0.50
+
+            if is_illiquid:
                 if self._force_test:
                     logger.info(
                         "ResolutionBot: [FORCE-TEST] bypassing series illiquidity filter for %s "
-                        "(%d/%d brackets within 2¢ of 0.50)",
-                        pfx, near_50, len(prices),
+                        "(%d/%d brackets = %.0f%% within 2¢ of 0.50)",
+                        pfx, near_50, len(prices), pct_near_50 * 100,
                     )
                 else:
                     _illiquid_prefixes.add(pfx)
                     logger.info(
                         "ResolutionBot: series %s flagged illiquid — "
-                        "%d/%d brackets priced within 2¢ of 0.50 "
+                        "%d/%d brackets = %.0f%% priced within 2¢ of 0.50 "
                         "(uniform_50_pricing; skipping whole series)",
-                        pfx, near_50, len(prices),
+                        pfx, near_50, len(prices), pct_near_50 * 100,
                     )
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Parallel financial price prefetch ─────────────────────────────────
+        # Fetch all needed financial symbols in parallel before the GT loop.
+        # This pre-warms the _PRICE_CACHE so individual _fetch_price() calls
+        # return instantly instead of blocking on HTTP.  Reduces cycle time from
+        # ~28s (sequential) to ~7s (parallel: 4 symbols × 7s → 1 × 7s + overhead).
+        _all_financial_symbols = [s for s in _SERIES_TO_SYMBOL.values() if s is not None]
+        if _all_financial_symbols:
+            self._ground_truth.prefetch_financial_prices(_all_financial_symbols)
         # ─────────────────────────────────────────────────────────────────────
 
         for i, market in enumerate(candidates, 1):
@@ -1205,20 +1451,29 @@ class ResolutionBot:
                     i, total, len(signals),
                 )
 
-            if market.market_id.startswith(("KXNBAGAME", "KXNCAAMBGAME")):
-                logger.info(f"[DEBUG PRICE] {market.market_id} yes_price={market.yes_price:.3f} before any refresh")
-
-            # ── Game market price refresh (BEFORE GT fetch) ───────────────────
-            # Must run here — before GT fetch, before any continue statements.
-            # GT returns prob=None for pre-game markets, so a refresh gated
-            # behind GT result is dead code for those markets.
+            # ── Pre-GT price refresh (BEFORE GT fetch) ────────────────────────
+            # Game and financial bracket markets have real-time external price
+            # sources and are most likely to have stale discovery prices.
+            # Scoped to these two categories to avoid per-cycle get_market()
+            # calls for politics/entertainment/etc. that don't move frequently.
+            _now_mono = time.monotonic()
+            _last_refresh = _price_refresh_cache.get(market.market_id, 0.0)
+            # Financial brackets use a shorter TTL during live market hours
+            # because NQ/ES can move 50+ points in 2 minutes.
+            _refresh_ttl = (
+                30.0
+                if _is_financial_bracket_market(market.market_id) and _is_us_market_hours()
+                else _PRICE_REFRESH_TTL_S
+            )
             if (
-                market.market_id.startswith(("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME"))
+                (_is_game_market(market.market_id) or _is_financial_bracket_market(market.market_id))
                 and abs(market.yes_price - 0.50) <= 0.02
                 and self._kalshi is not None
+                and (_now_mono - _last_refresh) >= _refresh_ttl
             ):
                 try:
                     fresh = self._kalshi.get_market(market.market_id)
+                    _price_refresh_cache[market.market_id] = time.monotonic()
                     if fresh is not None:
                         new_price = getattr(fresh, "yes_price", None)
                         if new_price is not None:
@@ -1227,19 +1482,33 @@ class ResolutionBot:
                             market.no_price = round(1.0 - new_price, 4)
                             if abs(old_price - new_price) > 0.02:
                                 logger.info(
-                                    "ResolutionBot: game price refresh %s: %.3f → %.3f",
+                                    "ResolutionBot: price refresh %s: %.3f → %.3f",
                                     market.market_id, old_price, new_price,
                                 )
                             else:
                                 logger.debug(
-                                    "ResolutionBot: game price refresh %s: Kalshi also at %.3f",
+                                    "ResolutionBot: price refresh %s: Kalshi also at %.3f",
                                     market.market_id, new_price,
                                 )
                 except Exception as _e:
                     logger.debug(
-                        "ResolutionBot: game price refresh failed %s: %s",
+                        "ResolutionBot: price refresh failed %s: %s",
                         market.market_id, _e,
                     )
+            # ─────────────────────────────────────────────────────────────────
+
+            # ── Game market default illiquid price floor ──────────────────────
+            # Skip game markets at the Kalshi default illiquid price (0.255 ±0.01).
+            # This price never shows real counterparty volume in logs.
+            if _is_game_market(market.market_id):
+                if abs(market.yes_price - 0.255) <= 0.01 or abs(market.no_price - 0.255) <= 0.01:
+                    logger.debug(
+                        "ResolutionBot: skipping %s — game market at default illiquid price "
+                        "(yes=%.3f no=%.3f)",
+                        market.market_id, market.yes_price, market.no_price,
+                    )
+                    n_no_source += 1
+                    continue
             # ─────────────────────────────────────────────────────────────────
 
             # ── Permanent fast-skip check ─────────────────────────────────────
@@ -1261,6 +1530,34 @@ class ResolutionBot:
                 )
                 n_no_source += 1
                 continue
+
+            # ── Deep OTM bracket gate ─────────────────────────────────────────
+            # Skip financial bracket markets where the strike is more than
+            # _BRACKET_PROXIMITY_MAX (5%) from the current underlying price.
+            # Reuses the price already fetched by the priority scorer — no new
+            # API call.  Only applied when the price cache has a fresh entry.
+            if prefix is not None and _is_financial_bracket_market(market.market_id):
+                _otm_series_root = prefix.split("-")[0]
+                _otm_symbol = _SERIES_TO_SYMBOL.get(_otm_series_root)
+                if _otm_symbol is not None:
+                    _otm_cache_entry = _FINANCIAL_PRICE_CACHE.get(_otm_symbol)
+                    if _otm_cache_entry is not None:
+                        _otm_current_price = _otm_cache_entry[1]  # (fetched_at, price, source)
+                        if _otm_current_price is not None and _otm_current_price > 0:
+                            _otm_strike = _parse_strike(market.market_id)
+                            if _otm_strike is not None:
+                                _otm_distance = abs(_otm_current_price - _otm_strike) / _otm_current_price
+                                if _otm_distance > _BRACKET_PROXIMITY_MAX:
+                                    logger.debug(
+                                        "ResolutionBot: skipping %s — strike %.2f is %.1f%% "
+                                        "from current %.2f (deep OTM > %d%%)",
+                                        market.market_id, _otm_strike,
+                                        _otm_distance * 100, _otm_current_price,
+                                        int(_BRACKET_PROXIMITY_MAX * 100),
+                                    )
+                                    n_no_source += 1
+                                    continue
+            # ─────────────────────────────────────────────────────────────────
 
             # ── Bracket deduplication path ────────────────────────────────────
             if prefix and prefix in _bracket_gt:
@@ -1312,8 +1609,13 @@ class ResolutionBot:
                 # has returned None for _NO_SOURCE_STREAK_THRESHOLD consecutive
                 # cycles.  Stop calling fetch() until the streak resets (i.e. until
                 # the market is refreshed or a source begins returning data).
+                #
+                # Game markets are exempt — they are expected to have no source
+                # until the game starts (pre-game state). Skipping them permanently
+                # would cause the bot to miss live signals when the game begins.
                 if (
-                    self._no_source_streak.get(market.market_id, 0)
+                    not market.market_id.startswith(("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME", "KXNCAAWBGAME"))
+                    and self._no_source_streak.get(market.market_id, 0)
                     >= _NO_SOURCE_STREAK_THRESHOLD
                 ):
                     n_no_source_perm_skip += 1
@@ -1392,8 +1694,21 @@ class ResolutionBot:
             n_covered += 1
             coverage_sources[gt.source_name] = coverage_sources.get(gt.source_name, 0) + 1
 
+            # ── FRED hunt window: relaxed min_gap + T1 promotion ─────────────
+            # Compute the release window for this market so gap_detector can
+            # apply a 30% min_gap reduction during the hunt window.  Also collect
+            # hunt-window markets for a single bulk T1 promotion + log below.
+            _gap_release_window: Optional[str] = None
+            if self._calendar is not None and self._fred_src is not None:
+                _gap_fred_series = self._fred_src.get_series_for_market(market)
+                if _gap_fred_series is not None:
+                    _gap_release_window = self._calendar.get_active_window(_gap_fred_series)
+                    if _gap_release_window == "hunt":
+                        _hunt_window_fred_markets.append(market.market_id)
+                        self._registry.mark_urgent(market.market_id)
+
             signal = self._gap_detector.detect_information_signal(
-                market, gt.ground_truth_prob
+                market, gt.ground_truth_prob, release_window=_gap_release_window
             )
             if signal:
                 signal.ground_truth_prob = gt.ground_truth_prob
@@ -1466,6 +1781,13 @@ class ResolutionBot:
             n_no_source, n_no_prob,
             n_covered, sources_str, n_gap_too_small, len(signals),
         )
+        self._last_gt_coverage = {
+            "covered": n_covered,
+            "no_source": n_no_source + n_no_source_fast_skip + n_no_source_perm_skip,
+            "no_prob": n_no_prob,
+            "gap_too_small": n_gap_too_small,
+            "sources": sources_str,
+        }
 
         # Log a single line when the permanent-skip population changes so
         # operators can see the graduation plateau without per-market spam.
@@ -1509,9 +1831,62 @@ class ResolutionBot:
         # Persist evaluated set so run_once can guard the clear_urgent logic.
         self._last_gt_evaluated_ids = frozenset(gt_evaluated)
 
-        # Deduplicate: cap at MAX_SIGNALS_PER_SOURCE_ACTION per (source, direction)
-        # bucket so a single instrument (e.g. Nasdaq) can't consume the whole
-        # bankroll with 40 correlated contracts expressing the same directional bet.
+        # Log hunt window T1 promotions as a single line so operators can see
+        # which markets are under active surveillance during the data release.
+        if _hunt_window_fred_markets:
+            _unique_hunt = sorted(set(_hunt_window_fred_markets))
+            logger.info(
+                "[CALENDAR] FRED hunt window active — %d market(s) promoted to T1: %s",
+                len(_unique_hunt), ", ".join(_unique_hunt[:10])
+                + (" …" if len(_unique_hunt) > 10 else ""),
+            )
+
+        # ── Pass 1: game-level deduplication ─────────────────────────────────
+        # For game markets (KXNBAGAME/KXNCAAMBGAME/etc.), two markets can
+        # express opposite sides of the same outcome:
+        #   KXNCAAMBGAME-26MAR22IOWAFL-IOWA  → BUY YES (Iowa wins, gt=0.98)
+        #   KXNCAAMBGAME-26MAR22IOWAFL-FL    → BUY NO  (Florida loses, gt=0.02)
+        # These are correlated bets.  Keep only the single highest-gap signal
+        # per game (everything before the last '-' in a game market ID).
+        def _game_prefix(market_id: str) -> Optional[str]:
+            if not _is_game_market(market_id):
+                return None
+            parts = market_id.rsplit("-", 1)
+            return parts[0] if len(parts) == 2 else None
+
+        game_buckets: dict = defaultdict(list)
+        non_game_signals: List[GapSignal] = []
+        for sig in signals:
+            gp = _game_prefix(sig.market_to_buy.market_id)
+            if gp:
+                game_buckets[gp].append(sig)
+            else:
+                non_game_signals.append(sig)
+
+        game_deduped: List[GapSignal] = []
+        for gp, gp_sigs in game_buckets.items():
+            # Keep only the best signal per game: prefer mid-range price over
+            # extreme, then highest gap.
+            gp_sigs.sort(key=lambda s: (
+                0 if 0.15 <= s.target_price <= 0.85 else 1,
+                -s.effective_gap,
+            ))
+            kept = gp_sigs[0]
+            game_deduped.append(kept)
+            if len(gp_sigs) > 1:
+                dropped = [s.market_to_buy.market_id for s in gp_sigs[1:]]
+                logger.info(
+                    "ResolutionBot: game dedup %s — kept %s (gap=%.3f), "
+                    "dropped opposite side(s): %s",
+                    gp, kept.market_to_buy.market_id, kept.effective_gap, dropped,
+                )
+
+        signals = game_deduped + non_game_signals
+
+        # ── Pass 2: source+direction deduplication ────────────────────────────
+        # Cap at MAX_SIGNALS_PER_SOURCE_ACTION per (source, direction) bucket
+        # so a single instrument (e.g. Nasdaq) can't consume the whole bankroll
+        # with 40 correlated contracts expressing the same directional bet.
         buckets: dict = defaultdict(list)
         for sig in signals:
             src = (
@@ -1557,6 +1932,10 @@ class ResolutionBot:
             return None  # already in this market
         if self._exclusions.is_excluded(market.platform, mid):
             return None
+        # Skip markets that have timed out unfilled 3+ times this session.
+        base_mid = mid.rsplit("-", 1)[0] if mid.count("-") > 2 else mid
+        if base_mid in self._unfilled_timeout_perm_skipped:
+            return None
         if _is_in_orderbook_cooldown(mid):
             if self._force_test:
                 logger.info(
@@ -1564,8 +1943,9 @@ class ResolutionBot:
                     "(ghost trade doesn't need fill)", mid
                 )
             else:
-                logger.debug(
-                    "ResolutionBot: %s in order-book cooldown — skipping this cycle", mid
+                logger.info(
+                    "ResolutionBot: SKIP %s – order-book cooldown active "
+                    "(signal passed confidence, blocked at execution)", mid
                 )
                 return None
 
@@ -1587,16 +1967,34 @@ class ResolutionBot:
                 )
                 # ob_live stays None; depth_ratio stays None (scorer skips penalty);
                 # limit_price will fall back to signal.target_price below.
+            elif _is_game_market(mid) or _is_financial_bracket_market(mid):
+                # Game and financial bracket markets have intermittent order book
+                # data between trades.  The book appearing empty does NOT mean the
+                # market is dead.  Fall through with ob_live=None; limit_price falls
+                # back to signal.target_price below.  2-min cooldown at limit-price
+                # step keeps retries inside a tight window.
+                logger.info(
+                    "ResolutionBot: %s order book empty — "
+                    "proceeding with signal.target_price=%.3f as limit (bracket bypass)",
+                    mid, signal.target_price,
+                )
             else:
                 # Empty order book — scanner price is unverifiable. Placing an order
                 # based on stale bulk-API data (e.g. Kalshi's default yes_bid=99)
-                # creates unfillable limit orders. Skip entirely and suppress for 30 min.
+                # creates unfillable limit orders. Skip entirely and suppress.
+                # During FRED hunt window, shorten to 2 min so the signal retries
+                # quickly while the market reprices after the data release.
+                _empty_cooldown_min = 30
+                if self._fred_src is not None and self._calendar is not None:
+                    _fs = self._fred_src.get_series_for_market(market)
+                    if _fs is not None and self._calendar.get_active_window(_fs) == "hunt":
+                        _empty_cooldown_min = 2
                 logger.info(
                     "ResolutionBot: SKIP %s – order book empty, cannot verify scanner "
                     "price %.3f (would create unfillable limit order)",
                     mid, signal.target_price,
                 )
-                _set_orderbook_cooldown(mid, minutes=30)
+                _set_orderbook_cooldown(mid, minutes=_empty_cooldown_min)
                 self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
                 return None
 
@@ -1641,10 +2039,27 @@ class ResolutionBot:
                 )
                 # Fall through — fire as a ghost trade for accuracy tracking.
             else:
-                logger.info(
-                    "ResolutionBot: SKIP %s – %s", mid, score.skip_reason
-                )
+                # Track consecutive confidence failures for permanent skip
+                _conf_count = self._confidence_fail_count.get(mid, 0) + 1
+                self._confidence_fail_count[mid] = _conf_count
+                if _conf_count >= 3:
+                    self._unfilled_timeout_perm_skipped.add(mid)
+                    logger.info(
+                        "ResolutionBot: perm-skipping %s after %d consecutive "
+                        "confidence failures (source=%.2f clarity=%.2f vs gate=%.2f)",
+                        mid, _conf_count,
+                        score.source_confidence, score.resolution_clarity,
+                        CONFIDENCE_GATE_LIVE,
+                    )
+                else:
+                    logger.info(
+                        "ResolutionBot: SKIP %s – %s", mid, score.skip_reason
+                    )
                 return None
+        else:
+            # Confidence passed — reset failure counter if any
+            self._confidence_fail_count.pop(mid, None)
+            self._unfilled_timeout_perm_skipped.discard(mid)
 
         # ── Time-adjusted gap gate ─────────────────────────────────────────────
         # Require a larger mispricing for early entries: the further from
@@ -1661,6 +2076,24 @@ class ResolutionBot:
         # Ghost trades are zero-risk; we want the track record.  Live execution
         # still enforces the full gate.
         _min_gap = _minimum_gap_for_entry(market.hours_to_resolution)
+
+        # ── Hunt window aggressiveness: 30% min_gap reduction ──────────────
+        # During the hunt window (T+45min to T+3h after FRED update), the
+        # market is often still stale while FRED has the latest data.  This
+        # creates a higher-quality signal window where smaller gaps are still
+        # profitable — so we reduce the min_gap by 30%.
+        _hunt_window: Optional[str] = None
+        if self._calendar is not None and self._fred_src is not None:
+            _fred_series = self._fred_src.get_series_for_market(market)
+            if _fred_series is not None:
+                _hunt_window = self._calendar.get_active_window(_fred_series)
+                if _hunt_window == "hunt":
+                    _min_gap *= 0.70  # 30% reduction
+                    logger.debug(
+                        "GapDetector: %s in hunt window for %s, min_gap reduced to %.3f",
+                        market.market_id, _fred_series, _min_gap,
+                    )
+
         _cross_ghost_bypass = self._dry_run and is_cross
         if not _cross_ghost_bypass and signal.effective_gap < _min_gap:
             logger.info(
@@ -1759,7 +2192,13 @@ class ResolutionBot:
         # available; ghost trades don't place real orders so drift doesn't matter).
         live_price = ob_live.mid_price if ob_live is not None else signal.target_price
         drift = abs(live_price - signal.target_price)
-        if drift > STALE_PRICE_THRESHOLD:
+        # Relative threshold: 15% of scanner price, floor 4¢.
+        # Catches cheap markets that move 48% but only 12¢ in absolute terms.
+        _stale_threshold = max(
+            signal.target_price * STALE_PRICE_RELATIVE_THRESHOLD,
+            STALE_PRICE_ABSOLUTE_FLOOR,
+        )
+        if drift > _stale_threshold:
             gt_prob = (
                 gt.ground_truth_prob
                 if gt and gt.ground_truth_prob is not None
@@ -1769,15 +2208,17 @@ class ResolutionBot:
             live_effective_gap = live_gap - signal.taker_fee
             if live_effective_gap < _minimum_gap_for_entry(market.hours_to_resolution):
                 logger.info(
-                    "ResolutionBot: SKIP %s – stale scanner %.3f → live %.3f, "
-                    "recalc gap %.3f below time-adjusted threshold (no real edge)",
-                    mid, signal.target_price, live_price, live_effective_gap,
+                    "ResolutionBot: SKIP %s – stale scanner %.3f → live %.3f "
+                    "(drift=%.3f > threshold=%.3f), recalc gap %.3f below min",
+                    mid, signal.target_price, live_price,
+                    drift, _stale_threshold, live_effective_gap,
                 )
                 return None
             logger.info(
-                "ResolutionBot: STALE corrected %s – scanner %.3f → live %.3f, "
-                "live effective_gap=%.3f – proceeding",
-                mid, signal.target_price, live_price, live_effective_gap,
+                "ResolutionBot: STALE corrected %s – scanner %.3f → live %.3f "
+                "(drift=%.3f > threshold=%.3f), live effective_gap=%.3f – proceeding",
+                mid, signal.target_price, live_price,
+                drift, _stale_threshold, live_effective_gap,
             )
             signal.target_price = live_price
             signal.effective_gap = live_effective_gap
@@ -1820,6 +2261,14 @@ class ResolutionBot:
                 mid, _ev, MIN_EV,
                 signal.action, signal.target_price, gt_prob_for_gap,
             )
+            _ev_count = self._ev_fail_count.get(mid, 0) + 1
+            self._ev_fail_count[mid] = _ev_count
+            if _ev_count >= 3:
+                self._unfilled_timeout_perm_skipped.add(mid)
+                logger.warning(
+                    "ResolutionBot: perm-skipping %s after %d consecutive EV failures",
+                    mid, _ev_count,
+                )
             return None
         logger.info(
             "ResolutionBot: EV check PASS %s — EV=%.3f "
@@ -1906,6 +2355,18 @@ class ResolutionBot:
         #
         # Fix: bid at the live ask (BUY_YES) or live bid (BUY_NO) so the
         # order crosses the spread and executes as a taker immediately.
+        if _is_game_market(mid):
+            _ob_cooldown_minutes = 2          # NBA quarters are 12 min; 30 min kills 2.5
+        elif _is_financial_bracket_market(mid) and _is_us_market_hours():
+            _ob_cooldown_minutes = 5          # futures can revive within minutes during hours
+        else:
+            _ob_cooldown_minutes = 30
+        # During FRED hunt window, shorten to 2 min for FRED-linked markets so
+        # empty-book retries are fast while the market reprices after release.
+        if _ob_cooldown_minutes > 2 and self._fred_src is not None and self._calendar is not None:
+            _fred_series_id = self._fred_src.get_series_for_market(market)
+            if _fred_series_id is not None and self._calendar.get_active_window(_fred_series_id) == "hunt":
+                _ob_cooldown_minutes = 2
         if signal.action == "buy_yes":
             limit_price = ob_live.best_yes_ask if ob_live is not None else None
             if limit_price is None:
@@ -1915,12 +2376,22 @@ class ResolutionBot:
                         "(book empty, using signal.target_price for ghost trade)", mid
                     )
                     limit_price = signal.target_price
+                elif _is_game_market(mid) or _is_financial_bracket_market(mid):
+                    # Game / financial bracket bypass: use signal.target_price as
+                    # limit.  The scanner price is the last-traded mid; placing at
+                    # this price creates a resting limit order that fills on the
+                    # next trade.
+                    logger.info(
+                        "ResolutionBot: %s no YES ask — "
+                        "using signal.target_price=%.3f as limit (bracket bypass)", mid, signal.target_price
+                    )
+                    limit_price = signal.target_price
                 else:
                     logger.info(
                         "ResolutionBot: SKIP %s – no YES ask in order book "
                         "(no sellers to fill against)", mid
                     )
-                    _set_orderbook_cooldown(mid, minutes=30)
+                    _set_orderbook_cooldown(mid, minutes=_ob_cooldown_minutes)
                     self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
                     return None
         else:
@@ -1935,12 +2406,19 @@ class ResolutionBot:
                         "(book empty, using signal.target_price for ghost trade)", mid
                     )
                     limit_price = signal.target_price
+                elif _is_game_market(mid) or _is_financial_bracket_market(mid):
+                    # Game / financial bracket bypass: use signal.target_price as limit.
+                    logger.info(
+                        "ResolutionBot: %s no YES bid — "
+                        "using signal.target_price=%.3f as limit (bracket bypass)", mid, signal.target_price
+                    )
+                    limit_price = signal.target_price
                 else:
                     logger.info(
                         "ResolutionBot: SKIP %s – no YES bid in order book "
                         "(no NO sellers to fill against)", mid
                     )
-                    _set_orderbook_cooldown(mid, minutes=30)
+                    _set_orderbook_cooldown(mid, minutes=_ob_cooldown_minutes)
                     self._registry.clear_urgent(mid)   # demote T1→T2 if signal_urgent
                     return None
         logger.info(
@@ -1974,6 +2452,17 @@ class ResolutionBot:
         )
 
         _gt_raw_entry = (signal.ground_truth_result.raw_data or {}) if signal.ground_truth_result else {}
+        # Ghost orders placed with an empty order book are marked "pending":
+        # they are resting limit orders that may or may not fill.  The
+        # _check_pending_ghost_fills() monitor auto-cancels them after
+        # _GHOST_FILL_TIMEOUT_MINUTES if the price never reaches the limit.
+        _ghost_pending = (
+            self._dry_run
+            and order_id is not None
+            and isinstance(order_id, str)
+            and order_id.startswith("ghost_")
+            and ob_live is None
+        )
         self._positions[mid] = TradeRecord(
             market_id=mid,
             platform=market.platform,
@@ -1986,7 +2475,15 @@ class ResolutionBot:
             source_confidence=score.source_confidence,
             distance_pct=float(_gt_raw_entry.get("margin_pct", 0.0)),
             order_id=order_id,
+            fill_status="pending" if _ghost_pending else "filled",
+            limit_price_used=limit_price if _ghost_pending else None,
         )
+        if _ghost_pending:
+            logger.info(
+                "ResolutionBot: ghost order %s marked PENDING (empty book at placement, "
+                "limit=%.3f) — will auto-cancel after %d min if unfilled",
+                mid, limit_price, _GHOST_FILL_TIMEOUT_MINUTES,
+            )
         if self._paper_log is not None:
             _tier = getattr(self._registry._entries.get(mid), "tier", 0)
             _src_name = gt.source_name if gt else "cross-platform"
@@ -2238,6 +2735,68 @@ class ResolutionBot:
         src = rec.signal.ground_truth_result.source_name or ""
         return src.startswith(_FINANCIAL_SOURCE_PREFIXES)
 
+    def _check_pending_ghost_fills(self) -> int:
+        """Cancel ghost orders that were placed with an empty order book but
+        haven't filled within _GHOST_FILL_TIMEOUT_MINUTES.
+
+        Only runs in dry_run (ghost) mode.  After the timeout we check whether
+        the market price has moved near the limit price (within 5¢).  If so,
+        the order is considered filled and the position stays open.  Otherwise
+        the position is cancelled and capital is returned.
+
+        Returns the number of positions cancelled.
+        """
+        _FILL_TOLERANCE = 0.05   # price within 5¢ of limit → treat as filled
+        cancelled = 0
+        now = time.time()
+        for mid, rec in list(self._positions.items()):
+            if rec.fill_status != "pending":
+                continue
+            elapsed_min = (now - rec.entry_time) / 60.0
+            if elapsed_min < _GHOST_FILL_TIMEOUT_MINUTES:
+                continue
+            # Timeout reached — check if market price moved to the limit range.
+            current_price = self._get_current_price(rec.market)
+            limit = rec.limit_price_used if rec.limit_price_used is not None else rec.entry_price
+            if current_price is not None and abs(current_price - limit) <= _FILL_TOLERANCE:
+                rec.fill_status = "filled"
+                logger.info(
+                    "ResolutionBot: ghost pending fill CONFIRMED %s — "
+                    "price=%.3f within %.2f of limit=%.3f after %.0f min",
+                    mid, current_price, _FILL_TOLERANCE, limit, elapsed_min,
+                )
+                # Book came alive — reset churn-prevention counters so the
+                # market isn't banned if it signals again next session.
+                _base = mid.rsplit("-", 1)[0] if mid.count("-") > 2 else mid
+                self._unfilled_timeout_count.pop(_base, None)
+                self._unfilled_timeout_perm_skipped.discard(_base)
+                self._ev_fail_count.pop(mid, None)
+            else:
+                logger.info(
+                    "ResolutionBot: cancelling unfilled ghost order %s after %.0f min "
+                    "(current=%s, limit=%.3f)",
+                    mid, elapsed_min,
+                    f"{current_price:.3f}" if current_price is not None else "unknown",
+                    limit,
+                )
+                self._exit_position(
+                    mid, realized_pnl_usd=0.0,
+                    current_price=current_price if current_price is not None else rec.entry_price,
+                    exit_reason="unfilled_timeout",
+                )
+                cancelled += 1
+                # Track consecutive unfilled timeouts per market; perm-skip after 3.
+                base_mid = mid.rsplit("-", 1)[0] if mid.count("-") > 2 else mid
+                count = self._unfilled_timeout_count.get(base_mid, 0) + 1
+                self._unfilled_timeout_count[base_mid] = count
+                if count >= 3:
+                    self._unfilled_timeout_perm_skipped.add(base_mid)
+                    logger.warning(
+                        "ResolutionBot: perm-skipping %s after 3 unfilled timeouts",
+                        base_mid,
+                    )
+        return cancelled
+
     def _monitor_positions(self) -> int:
         """Run hard-stop check then decay monitor on all open positions.
 
@@ -2252,6 +2811,10 @@ class ResolutionBot:
             return 0
 
         exits = 0
+
+        # ── Pass 0: pending ghost fill timeout ───────────────────────────────
+        if self._dry_run:
+            exits += self._check_pending_ghost_fills()
 
         # ── Pass 1: financial hard stop ───────────────────────────────────────
         # Iterate over a snapshot so we can safely pop from self._positions.
@@ -2339,6 +2902,51 @@ class ResolutionBot:
                     exit_reason=_decay_reason,
                 )
                 exits += 1
+        return exits
+
+    def _exit_ghost_positions_for_finals(self, ghost_exits: list) -> int:
+        """
+        Close open ghost positions whose game just reached CONFIRMED FINAL.
+
+        ghost_exits: list of (market_id, correct_prob) from drain_ghost_exits().
+          correct_prob = 1.0 if the home team (YES side) won, 0.0 otherwise.
+
+        Exits at the settlement value so P&L is accurate.  Skips any live
+        (non-ghost) positions — those need real order handling.
+        """
+        exits = 0
+        for market_id, correct_prob in ghost_exits:
+            rec = self._positions.get(market_id)
+            if rec is None:
+                continue
+            if not rec.order_id or not rec.order_id.startswith("ghost_"):
+                logger.debug(
+                    "ResolutionBot: ghost final exit skipped %s — live position, "
+                    "needs real order", market_id,
+                )
+                continue
+
+            if rec.action == "buy_yes":
+                nc = rec.size_usd / rec.entry_price if rec.entry_price > 1e-9 else 0.0
+                pnl = (correct_prob - rec.entry_price) * nc
+            else:
+                no_cost = 1.0 - rec.entry_price
+                nc = rec.size_usd / no_cost if no_cost > 1e-9 else 0.0
+                pnl = (rec.entry_price - correct_prob) * nc
+
+            outcome = "WIN" if pnl >= 0 else "LOSS"
+            logger.info(
+                "ResolutionBot: [GHOST EXIT] %s %s entry=%.3f settled=%.1f "
+                "contracts=%.2f pnl=$%.2f [%s]",
+                rec.action, market_id, rec.entry_price, correct_prob, nc, pnl, outcome,
+            )
+            self._exit_position(
+                market_id,
+                realized_pnl_usd=pnl,
+                current_price=correct_prob,
+                exit_reason="game_final",
+            )
+            exits += 1
         return exits
 
     def _exit_position(
@@ -2615,6 +3223,8 @@ class ResolutionBot:
                 "question": rec.market.question,
                 "category": rec.market.category,
                 "tags": rec.market.tags,
+                "fill_status": rec.fill_status,
+                "limit_price_used": rec.limit_price_used,
             }
 
         if self._dry_run:
@@ -2734,6 +3344,8 @@ class ResolutionBot:
                     source_confidence=saved["source_confidence"],
                     entry_time=saved.get("entry_time", time.time()),
                     order_id=saved.get("order_id"),
+                    fill_status=saved.get("fill_status", "filled"),
+                    limit_price_used=saved.get("limit_price_used"),
                 )
                 loaded += 1
 
