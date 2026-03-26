@@ -64,10 +64,23 @@ _SPORTS_SERIES_TICKERS = [
     # Game-result (moneyline) series — different series prefix from the prop/season markets
     "KXNBAGAME",     # NBA individual game results (e.g. KXNBAGAME-26MAR13MEMDET-DET)
     "KXNCAAMBGAME",  # NCAA Men's Basketball game results
+    "KXNCAAWBGAME",  # NCAA Women's Basketball game results
 ]
 
 # Sports game-result series whose close_time is a settlement window, not the game time.
-_GAME_SERIES_PREFIXES = ("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME")
+_GAME_SERIES_PREFIXES = ("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME", "KXNCAAWBGAME")
+
+_FINANCIAL_BRACKET_PREFIXES = (
+    "KXNASDAQ100",   # covers KXNASDAQ100 and KXNASDAQ100U
+    "KXBRENTD",
+    "KXWTI",         # covers KXWTI and KXWTIW
+    "KXAAAGASW",
+    "KXTNOTED",      # 10-yr Treasury daily bracket (KXTNOTED ≠ KXTNOTEW)
+    "KXTNOTEW",
+    "KXGOLDW",
+    "KXSILVERW",
+    "KXINX",
+)
 
 # Extra hours added to midnight UTC of the game date to estimate game end time.
 # 30h covers the latest possible game end in UTC (e.g. 10:30pm ET tipoff + 2.5h
@@ -77,6 +90,7 @@ _GAME_END_OFFSET_HOURS: Dict[str, int] = {
     "KXNBAGAME": 30,
     "KXNCAAMBGAME": 30,
     "KXNFLGAME": 30,
+    "KXNCAAWBGAME": 30,
 }
 
 _MONTH_MAP = {
@@ -87,6 +101,10 @@ _MONTH_MAP = {
 
 def _is_game_market(market_id: str) -> bool:
     return any(market_id.startswith(p) for p in _GAME_SERIES_PREFIXES)
+
+
+def _is_financial_bracket_market(market_id: str) -> bool:
+    return any(market_id.startswith(p) for p in _FINANCIAL_BRACKET_PREFIXES)
 
 
 def _extract_game_date(market_id: str) -> Optional[datetime]:
@@ -511,13 +529,14 @@ class KalshiClient(BaseMarketClient):
             "Kalshi sports scan: %d markets across %d series",
             len(results), len(_SPORTS_SERIES_TICKERS),
         )
-        _game_prefixes = ("KXNBAGAME", "KXNCAAMBGAME")
+        _game_prefixes = ("KXNBAGAME", "KXNCAAMBGAME", "KXNCAAWBGAME")
         game_markets = [m for m in results if any(m.market_id.startswith(p) for p in _game_prefixes)]
         nba_count = sum(1 for m in game_markets if m.market_id.startswith("KXNBAGAME"))
         ncaab_count = sum(1 for m in game_markets if m.market_id.startswith("KXNCAAMBGAME"))
+        ncaaw_count = sum(1 for m in game_markets if m.market_id.startswith("KXNCAAWBGAME"))
         logger.info(
-            "Kalshi sports scan: %d game-result markets found (NBA=%d, NCAAB=%d)",
-            len(game_markets), nba_count, ncaab_count,
+            "Kalshi sports scan: %d game-result markets found (NBA=%d, NCAAB=%d, NCAAW=%d)",
+            len(game_markets), nba_count, ncaab_count, ncaaw_count,
         )
         return results
 
@@ -579,14 +598,27 @@ class KalshiClient(BaseMarketClient):
                         ticker, settlement_deadline, estimated_end,
                     )
 
-            # Kalshi prices are in cents [0–100]; convert to [0–1]
-            yes_bid = float(item.get("yes_bid", 50)) / 100.0
-            yes_ask = float(item.get("yes_ask", 50)) / 100.0
-            no_bid = float(item.get("no_bid", 50)) / 100.0
-            no_ask = float(item.get("no_ask", 50)) / 100.0
+            # Kalshi prices: try cent-based integers first [0–100], fall back to
+            # dollar fractions [0–1] if the cent fields are absent from the response.
+            _yes_bid_c = item.get("yes_bid")
+            _yes_ask_c = item.get("yes_ask")
+            _no_bid_c  = item.get("no_bid")
+            _no_ask_c  = item.get("no_ask")
+
+            if _yes_bid_c is not None and _yes_ask_c is not None:
+                yes_bid = float(_yes_bid_c) / 100.0
+                yes_ask = float(_yes_ask_c) / 100.0
+                no_bid  = float(_no_bid_c)  / 100.0 if _no_bid_c is not None else 0.50
+                no_ask  = float(_no_ask_c)  / 100.0 if _no_ask_c is not None else 0.50
+            else:
+                # Dollar-denominated fallback (field names end in _dollars)
+                yes_bid = _safe_float(item.get("yes_bid_dollars")) or 0.50
+                yes_ask = _safe_float(item.get("yes_ask_dollars")) or 0.50
+                no_bid  = 1.0 - yes_ask
+                no_ask  = 1.0 - yes_bid
 
             yes_price = (yes_bid + yes_ask) / 2.0
-            no_price = (no_bid + no_ask) / 2.0
+            no_price  = (no_bid + no_ask)  / 2.0
 
             # Infer category from series ticker or question keywords
             category = self._infer_category(ticker, question, is_weather)
@@ -672,17 +704,18 @@ class KalshiClient(BaseMarketClient):
     def get_order_book(self, market_id: str) -> OrderBook:
         try:
             data = self._get(f"/markets/{market_id}/orderbook")
-            book = data.get("orderbook", {})
-            # Kalshi order book: "yes" = YES bid levels, "no" = NO bid levels.
+            # API returns "orderbook_fp" (fingerprint), not "orderbook"
+            book = data.get("orderbook_fp", {})
+            # Kalshi order book: "yes_dollars" = YES bid levels, "no_dollars" = NO bid levels.
             # NO bids at price p cents are equivalent to YES asks at (100 - p) cents,
             # because a NO buyer willing to pay p for NO is offering 100-p for YES.
             yes_bids = [
                 PriceLevel(price=float(b[0]) / 100.0, size=float(b[1]))
-                for b in sorted(book.get("yes") or [], key=lambda x: -x[0])
+                for b in sorted(book.get("yes_dollars") or [], key=lambda x: -x[0])
             ]
             yes_asks = [
                 PriceLevel(price=(100.0 - float(a[0])) / 100.0, size=float(a[1]))
-                for a in sorted(book.get("no") or [], key=lambda x: -x[0])
+                for a in sorted(book.get("no_dollars") or [], key=lambda x: -x[0])
             ]
             return OrderBook(
                 market_id=market_id,
