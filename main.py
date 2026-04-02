@@ -41,6 +41,18 @@ import logging
 import platform
 import os
 import sys
+
+# Force UTF-8 on Windows console so Unicode characters (─ → ≤ ✓ etc.) in log
+# messages and print() calls don't raise UnicodeEncodeError on cp1252 terminals.
+# reconfigure() is the correct Python 3.7+ API for changing an existing stream's
+# encoding in-place — it works for both console and piped stdout.
+# This must run before any logging or print calls.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass  # already UTF-8 or stream doesn't support reconfigure
 import threading
 import time
 from datetime import datetime

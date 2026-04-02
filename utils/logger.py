@@ -61,6 +61,15 @@ def setup_logging(
     numeric_level = getattr(logging, level.upper(), logging.WARNING)
 
     # ── Console handler: uses the requested level (WARNING by default) ────────
+    # Ensure the stream uses UTF-8 so Unicode chars (→ ─ ≤ etc.) don't raise
+    # UnicodeEncodeError on Windows cp1252 terminals.  reconfigure() is the
+    # correct in-place API; it's a no-op if the stream is already UTF-8 or
+    # doesn't support reconfigure (e.g. StringIO in tests).
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(numeric_level)
     console_handler.setFormatter(formatter)
