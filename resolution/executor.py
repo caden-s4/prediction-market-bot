@@ -27,6 +27,7 @@ import random
 import re
 import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace as dc_replace
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
@@ -67,6 +68,17 @@ logger = logging.getLogger(__name__)
 
 KELLY_FRACTION = 0.12             # 12% fractional Kelly (conservative for thin books)
 MAX_POSITION_FRACTION = 0.20      # hard cap: 20% of total bankroll per position
+
+# Ghost-mode sizing cap: Kelly sizing uses this as the effective bankroll ceiling
+# regardless of how much simulated P&L has accumulated.  The actual bankroll
+# total_usd continues to grow for tracking purposes — this cap only constrains
+# what feeds into position sizing, preventing compounding from inflating positions.
+GHOST_SIZING_BANKROLL_CAP = 500.0
+
+# Re-entry cooldown after any exit (market-level and series-level).
+# Prevents the bot from immediately re-entering the same market or same series
+# bracket after an exit, which was causing bankroll-compounding spiral trades.
+_EXIT_COOLDOWN_SECONDS = 1800     # 30 minutes
 
 # Hard stop for financial-source positions (Yahoo Finance / Twelve Data / Alpha Vantage).
 # If the market price moves this many points against our entry, exit immediately —
@@ -169,6 +181,17 @@ MAX_SERIES_EXPOSURE_FRACTION = 0.15
 # positions per series to be statistically meaningful.  The cap still prevents
 # 100% concentration in one series; 50% is the limit.
 MAX_SERIES_EXPOSURE_FRACTION_GHOST = 0.50
+
+# ── Liquidity realism guards ─────────────────────────────────────────────────
+# These prevent ghost-mode PnL inflation from fills that would never execute
+# on a real exchange.
+
+# Minimum cost per contract.  When buying YES at $0.01 for $500, you'd get
+# 50,000 contracts — but no real book has that depth at a penny.  Skip any
+# trade where the effective cost per contract is below this floor.
+# For BUY YES: cost = entry_price.  For BUY NO: cost = 1 - entry_price.
+MIN_EFFECTIVE_ENTRY_PRICE = 0.05   # 5 cents
+
 
 
 def _minimum_gap_for_entry(hours_remaining: float) -> float:
@@ -346,10 +369,11 @@ def _print_paper_summary(summary: dict) -> None:
     date_str  = summary.get("date_str", "today")
     entries     = summary.get("total_entries", 0)
     exits       = summary.get("exits", 0)
-    open_pos    = summary.get("open_positions", 0)
+    unfilled    = summary.get("unfilled_orders", 0)
     cap_blocked = summary.get("cap_blocked", 0)
     wins        = summary.get("wins", 0)
     losses    = summary.get("losses", 0)
+    drawdowns = summary.get("drawdowns", 0)
     win_rate  = summary.get("win_rate", 0.0)
     total_pnl = summary.get("total_pnl", 0.0)
     avg_pnl   = summary.get("avg_pnl_per_trade", 0.0)
@@ -363,9 +387,12 @@ def _print_paper_summary(summary: dict) -> None:
     print(f"  GHOST TRADE DAILY SUMMARY  [{date_str}]")
     print(sep)
     cap_str = f"   Cap-blocked: {cap_blocked}" if cap_blocked else ""
-    print(f"  Entries: {entries}   Exits: {exits}   Open: {open_pos}{cap_str}")
+    unfilled_str = f"   Unfilled: {unfilled}" if unfilled else ""
+    print(f"  Entries: {entries}   Exits: {exits}{unfilled_str}{cap_str}")
     if exits > 0:
-        print(f"  Wins: {wins}  Losses: {losses}  Win rate: {win_rate:.1%}")
+        drawdown_str = f"  Drawdowns: {drawdowns}" if drawdowns else ""
+        print(f"  Wins: {wins}  Losses: {losses}{f'  ' + drawdown_str if drawdown_str else ''}")
+        print(f"  Win rate: {win_rate:.1%}")
         print(f"  Total P&L:  ${total_pnl:+.2f}   Avg/trade: ${avg_pnl:+.2f}")
         print(f"  Avg gap at entry: {avg_gap:.1%}   Avg hold: {avg_hold:.0f}min")
         if best:
@@ -580,6 +607,16 @@ class ResolutionBot:
         # to stop evaluating markets that can never trade (e.g. pre-game sports with
         # source_confidence=0.65 < gate=0.80).
         self._confidence_fail_count: Dict[str, int] = {}
+        # Consecutive financial hard-stop counter per market_id.  After 3 hard stops
+        # the market is perm-skipped this session.  A 30-minute orderbook cooldown is
+        # also set on each hard stop so the same market cannot be re-entered immediately.
+        self._hard_stop_count: Dict[str, int] = {}
+        # Post-exit re-entry cooldowns.  Set in _exit_position() for both the
+        # specific market and its series prefix.  Checked in _try_execute() before
+        # sizing to prevent compounding spirals where repeated wins on the same
+        # market inflate the ghost bankroll then immediately feed back into sizing.
+        self._exit_cooldowns: Dict[str, float] = {}        # market_id → expiry (time.time())
+        self._series_exit_cooldowns: Dict[str, float] = {} # series_prefix → expiry
         # Previous cycle's perm-skip count — used to detect when the population
         # changes so we can log a single informational line instead of per-market spam.
         self._prev_perm_skip_count: int = 0
@@ -1389,7 +1426,112 @@ class ResolutionBot:
         # so even the first bracket lookup per cycle is usually served from memory.
         _bracket_gt: Dict[str, Optional["GroundTruthResult"]] = {}
 
-        # ── Uniform-50 illiquid filter ────────────────────────────────────────
+        # ── Pre-GT price refresh (BEFORE illiquidity check) ──────────────────
+        # Game and financial bracket markets have real-time external price sources
+        # and are most likely to have stale discovery prices (default 0.50¢).
+        # Refresh these prices from the live order book BEFORE any filtering,
+        # so the illiquidity check uses current prices, not stale scanner data.
+        #
+        # Performance: use the module-level TTL cache to skip markets refreshed
+        # recently, then fan out remaining calls across 8 threads to avoid the
+        # 200+ serial HTTP calls that previously took 60–90s per cycle.
+        _now_mono = time.monotonic()
+        _markets_by_id: Dict[str, object] = {m.market_id: m for m in candidates}
+        _to_refresh: List[str] = []
+
+        # Mark all non-bracket/non-game markets as price-OK (scanner price is
+        # acceptable for gap detection on these).  Game and financial bracket
+        # markets must be explicitly refreshed before gap detection — their
+        # scanner prices are often stale 0.50 defaults or wide-spread mids.
+        for m in candidates:
+            _needs_refresh = _is_game_market(m.market_id) or _is_financial_bracket_market(m.market_id)
+            m.price_refresh_success = not _needs_refresh
+
+        for m in candidates:
+            if not (_is_game_market(m.market_id) or _is_financial_bracket_market(m.market_id)):
+                continue
+            # Financial bracket markets: only refresh when near 0.50 (stale Kalshi default).
+            # Game markets: ALWAYS refresh — live game prices can be anywhere (0.01–0.99)
+            # and a stale scanner price (e.g. 0.0099 from earlier in the game) will produce
+            # phantom 100x leverage on the contract count and fake P&L.
+            if _is_financial_bracket_market(m.market_id) and not (abs(m.yes_price - 0.50) <= 0.02):
+                # Price is not near the stale 0.50 default — accept it as valid.
+                m.price_refresh_success = True
+                continue
+            if self._kalshi is None:
+                continue
+            # Skip if refreshed within TTL — financial brackets during market hours
+            # use a shorter 30s TTL because NQ/ES can move 50+ points in 2 minutes.
+            _market_ttl = (
+                30.0
+                if _is_financial_bracket_market(m.market_id) and _is_us_market_hours()
+                else _PRICE_REFRESH_TTL_S
+            )
+            if (_now_mono - _price_refresh_cache.get(m.market_id, 0.0)) < _market_ttl:
+                # Recently refreshed within TTL — accept cached price.
+                m.price_refresh_success = True
+                continue
+            _to_refresh.append(m.market_id)
+
+        if _to_refresh:
+            logger.debug(
+                "ResolutionBot: pre-GT price refresh — %d markets need refresh (base TTL=%.0fs, skipped=%d)",
+                len(_to_refresh),
+                _PRICE_REFRESH_TTL_S,
+                sum(1 for m in candidates
+                    if (_is_game_market(m.market_id) or _is_financial_bracket_market(m.market_id))
+                    and m.market_id not in _to_refresh),
+            )
+
+            def _fetch_price(mid: str):
+                try:
+                    return mid, self._kalshi.get_market(mid)
+                except Exception as _e:
+                    logger.debug("ResolutionBot: pre-GT price refresh failed %s: %s", mid, _e)
+                    return mid, None
+
+            _t_refresh_start = time.monotonic()
+            _refresh_ok = 0
+            _refresh_fail = 0
+            with ThreadPoolExecutor(max_workers=8) as _pool:
+                _futures = {_pool.submit(_fetch_price, mid): mid for mid in _to_refresh}
+                for _fut in as_completed(_futures):
+                    mid, fresh = _fut.result()
+                    m = _markets_by_id.get(mid)
+                    if fresh is not None:
+                        # Only cache successful refreshes — failed refreshes must
+                        # NOT update the cache, otherwise subsequent cycles skip
+                        # the market thinking it was refreshed while it still has
+                        # a stale scanner price.
+                        _price_refresh_cache[mid] = time.monotonic()
+                        if m is not None:
+                            new_price = getattr(fresh, "yes_price", None)
+                            if new_price is not None:
+                                old_price = m.yes_price
+                                m.yes_price = new_price
+                                m.no_price = round(1.0 - new_price, 4)
+                                m.price_refresh_success = True
+                                _refresh_ok += 1
+                                if abs(old_price - new_price) > 0.02:
+                                    logger.info(
+                                        "ResolutionBot: pre-GT price refresh %s: %.3f → %.3f",
+                                        mid, old_price, new_price,
+                                    )
+                    else:
+                        _refresh_fail += 1
+                        if m is not None:
+                            logger.info(
+                                "ResolutionBot: pre-GT price refresh FAILED %s — "
+                                "market will be blocked from gap detection (stale price %.3f)",
+                                mid, m.yes_price,
+                            )
+            logger.debug(
+                "ResolutionBot: pre-GT price refresh done — %d ok, %d failed, %.1fs",
+                _refresh_ok, _refresh_fail, time.monotonic() - _t_refresh_start,
+            )
+        # ─────────────────────────────────────────────────────────────────────
+
+        # ── Uniform-50 illiquid filter (NOW uses refreshed prices) ───────────
         # Real mispricings are bracket-specific: only the bracket(s) straddling the
         # current underlying value diverge from 50¢.  When every bracket in a series
         # simultaneously shows ~50¢ it means the series has never been traded and
@@ -1400,6 +1542,7 @@ class ResolutionBot:
         # Rule: if more than 3 brackets in the same series all have yes_price within
         # ±0.02 of 0.50 (i.e. 0.48–0.52), flag the entire series as illiquid and
         # skip every bracket in it with reason='uniform_50_pricing'.
+        # NOTE: This check now runs AFTER price refresh, so it uses live prices.
         _illiquid_prefixes: set = set()
         _prefix_prices: Dict[str, list] = {}
         for m in candidates:
@@ -1959,6 +2102,27 @@ class ResolutionBot:
         # The Kalshi bulk /markets endpoint often returns stale yes_bid/yes_ask
         # (e.g. 49/50 by default) while the real order book is at 0.99 or 0.01.
         ob_live = self._get_live_book(market)
+
+        # Diagnostic logging for financial bracket markets (next 3 cycles)
+        if _is_financial_bracket_market(mid):
+            if ob_live is None:
+                logger.info(
+                    "ResolutionBot: orderbook state for %s: "
+                    "ask=None bid=None ask_size=None bid_size=None mid=None raw_response=None",
+                    mid
+                )
+            else:
+                logger.info(
+                    "ResolutionBot: orderbook state for %s: "
+                    "ask=%.4f bid=%.4f ask_size=%s bid_size=%s mid=%.4f raw_response=OrderBook",
+                    mid,
+                    ob_live.best_yes_ask or 0.0,
+                    ob_live.best_yes_bid or 0.0,
+                    getattr(ob_live, 'yes_ask_size', 'unknown'),
+                    getattr(ob_live, 'yes_bid_size', 'unknown'),
+                    ob_live.mid_price or 0.0
+                )
+
         if ob_live is None:
             if self._force_test:
                 logger.info(
@@ -2276,6 +2440,31 @@ class ResolutionBot:
             mid, _ev, signal.action, signal.target_price, gt_prob_for_gap,
         )
 
+        # ── Re-entry cooldown check ────────────────────────────────────────────
+        # Block re-entry into a market (or any bracket in the same date-series)
+        # within 30 min of an exit.  Without this, the bot immediately re-enters
+        # resolved markets, compounds ghost P&L into the next size, and produces
+        # a bankroll-compounding spiral (e.g. $553 → $607 → $5,229 on KXBRENTD).
+        _now_ts = time.time()
+        # Purge expired cooldowns lazily to keep the dict from growing unbounded.
+        self._exit_cooldowns = {k: v for k, v in self._exit_cooldowns.items() if v > _now_ts}
+        self._series_exit_cooldowns = {k: v for k, v in self._series_exit_cooldowns.items() if v > _now_ts}
+        if mid in self._exit_cooldowns:
+            _remaining = int(self._exit_cooldowns[mid] - _now_ts) // 60
+            logger.info(
+                "ResolutionBot: SKIP %s – exit cooldown active (%d min remaining)",
+                mid, _remaining,
+            )
+            return None
+        _series_pfx = _bracket_prefix(mid)
+        if _series_pfx is not None and _series_pfx in self._series_exit_cooldowns:
+            _remaining = int(self._series_exit_cooldowns[_series_pfx] - _now_ts) // 60
+            logger.info(
+                "ResolutionBot: SKIP %s – series exit cooldown active for %s (%d min remaining)",
+                mid, _series_pfx, _remaining,
+            )
+            return None
+
         # Size using fractional Kelly (time-to-resolution weighting applied inside)
         size_usd = self._compute_size(
             signal, score.source_confidence, score.resolution_clarity
@@ -2429,6 +2618,22 @@ class ResolutionBot:
             mid,
         )
 
+        # ── Extreme-price guard ───────���──────────────────────────────��───────
+        # When the cost per contract is below MIN_EFFECTIVE_ENTRY_PRICE the
+        # resulting contract count (size_usd / cost) explodes, creating
+        # unrealistic leverage.  At $0.01/contract, a $500 position buys
+        # 50,000 contracts — no real book supports that fill.
+        _eff_cost = limit_price if signal.action == "buy_yes" else (1.0 - limit_price)
+        if _eff_cost < MIN_EFFECTIVE_ENTRY_PRICE:
+            logger.info(
+                "ResolutionBot: SKIP %s — effective cost per contract $%.4f "
+                "below minimum $%.2f (action=%s limit=%.4f) — unrealistic "
+                "leverage at extreme price",
+                mid, _eff_cost, MIN_EFFECTIVE_ENTRY_PRICE,
+                signal.action, limit_price,
+            )
+            return None
+
         # Reserve capital
         if not self._bankroll.reserve(mid, size_usd):
             return None
@@ -2469,7 +2674,7 @@ class ResolutionBot:
             market=market,
             signal=signal,
             action=signal.action,
-            entry_price=signal.target_price,
+            entry_price=limit_price,
             size_usd=size_usd,
             ground_truth_prob=gt_prob,
             source_confidence=score.source_confidence,
@@ -2491,7 +2696,7 @@ class ResolutionBot:
                 market_id=mid,
                 platform=market.platform,
                 action=signal.action,
-                entry_price=signal.target_price,
+                entry_price=limit_price,
                 size_usd=size_usd,
                 gt_prob=gt_prob,
                 gap=signal.effective_gap,
@@ -2502,7 +2707,7 @@ class ResolutionBot:
                 entry_time=self._positions[mid].entry_time,
             )
         self._save_positions()
-        _entry = signal.target_price
+        _entry = limit_price
         if signal.action == "buy_yes":
             _entry_nc = size_usd / _entry if _entry > 1e-9 else 0.0
         else:
@@ -2701,8 +2906,17 @@ class ResolutionBot:
                 hours_left, source_confidence, resolution_clarity, frac,
             )
 
-        size = kelly * frac * self._bankroll.total_usd
-        max_size = self._bankroll.total_usd * MAX_POSITION_FRACTION
+        # Ghost-mode sizing cap: use a fixed bankroll ceiling regardless of how
+        # much simulated P&L has accumulated.  The real bankroll.total_usd keeps
+        # growing for tracking purposes; we only cap what feeds into sizing so
+        # a compounding win streak cannot inflate positions into the hundreds.
+        sizing_bankroll = (
+            min(self._bankroll.total_usd, GHOST_SIZING_BANKROLL_CAP)
+            if self._dry_run
+            else self._bankroll.total_usd
+        )
+        size = kelly * frac * sizing_bankroll
+        max_size = sizing_bankroll * MAX_POSITION_FRACTION
         return round(min(size, max_size), 2)
 
     def _compute_depth_ratio(self, signal: GapSignal, ob: "OrderBook") -> float:
@@ -2771,6 +2985,7 @@ class ResolutionBot:
                 self._unfilled_timeout_count.pop(_base, None)
                 self._unfilled_timeout_perm_skipped.discard(_base)
                 self._ev_fail_count.pop(mid, None)
+                self._hard_stop_count.pop(mid, None)
             else:
                 logger.info(
                     "ResolutionBot: cancelling unfilled ghost order %s after %.0f min "
@@ -2826,15 +3041,30 @@ class ResolutionBot:
                 continue
 
             # Direction-aware adverse move (positive = moved against our position).
+            # entry_price = YES BID at order placement (Kalshi stores NO orders
+            # using the YES price field).  current_price = YES mid from order book.
             if rec.action == "buy_yes":
                 move = rec.entry_price - current_price
             else:
+                # Adverse move for buy_no = YES price rose above entry.
+                # BUT: for deep-OTM NO entries (entry_YES ≈ 0.006), the YES mid
+                # on an illiquid book (bid=0.006, ask=0.994) collapses to 0.50 —
+                # a mid-price artefact that is NOT a real adverse move.
+                # Guard: skip the hard-stop check when entry is deep OTM AND
+                # current mid is near 0.50 (the illiquid sentinel value).
+                if rec.entry_price < 0.10 and 0.40 <= current_price <= 0.60:
+                    self._hard_stop_count.pop(mid, None)
+                    continue
                 move = current_price - rec.entry_price
 
             if move < FINANCIAL_HARD_STOP_THRESHOLD:
                 continue
 
             # Compute realised P&L using correct Kalshi contract economics.
+            # For buy_yes: entry_price is the YES price paid per contract.
+            # For buy_no:  entry_price is the YES BID; NO cost = 1 - entry_price.
+            #   P&L = (entry_YES - current_YES) × nc — negative when YES rises
+            #   (adverse for buy_no), which is the correct loss sign.
             if rec.action == "buy_yes":
                 nc = rec.size_usd / rec.entry_price if rec.entry_price > 1e-9 else 0.0
                 pnl = (current_price - rec.entry_price) * nc
@@ -2855,6 +3085,17 @@ class ResolutionBot:
             self._exit_position(mid, pnl, current_price=current_price,
                                 exit_reason="hard_stop")
             exits += 1
+            # Prevent immediate re-entry: 30-min cooldown on this exact market.
+            _set_orderbook_cooldown(mid, minutes=30)
+            # Track consecutive hard stops; perm-skip after 3.
+            _hs_count = self._hard_stop_count.get(mid, 0) + 1
+            self._hard_stop_count[mid] = _hs_count
+            if _hs_count >= 3:
+                self._unfilled_timeout_perm_skipped.add(mid)
+                logger.warning(
+                    "ResolutionBot: perm-skipping %s after %d consecutive hard stops",
+                    mid, _hs_count,
+                )
 
         if not self._positions:
             return exits
@@ -2940,6 +3181,18 @@ class ResolutionBot:
                 "contracts=%.2f pnl=$%.2f [%s]",
                 rec.action, market_id, rec.entry_price, correct_prob, nc, pnl, outcome,
             )
+            # Debug: verify settlement value is binary (1.0 or 0.0)
+            if correct_prob not in (0.0, 1.0):
+                logger.error(
+                    "ResolutionBot: CRITICAL — game_final exit for %s has non-binary settlement! "
+                    "winner_prob=%.2f (expected 1.00 or 0.00). position_side=%s entry=%.3f",
+                    market_id, correct_prob, rec.action, rec.entry_price,
+                )
+            logger.info(
+                "ResolutionBot: game_final exit for %s: position_side=%s settlement_value=%.1f "
+                "entry=%.3f pnl=$%.2f exit_reason=game_final",
+                market_id, rec.action, correct_prob, rec.entry_price, pnl,
+            )
             self._exit_position(
                 market_id,
                 realized_pnl_usd=pnl,
@@ -2962,6 +3215,25 @@ class ResolutionBot:
         if not rec:
             return
         self._bankroll.release(market_id, realized_pnl_usd=realized_pnl_usd)
+
+        # Set re-entry cooldowns so the bot cannot immediately re-enter this
+        # market or any bracket in the same date-series.  This prevents the
+        # compounding spiral where repeated exits feed P&L back into sizing.
+        _cooldown_expiry = time.time() + _EXIT_COOLDOWN_SECONDS
+        self._exit_cooldowns[market_id] = _cooldown_expiry
+        _series_pfx = _bracket_prefix(market_id)
+        if _series_pfx is not None:
+            self._series_exit_cooldowns[_series_pfx] = _cooldown_expiry
+            logger.info(
+                "ResolutionBot: exit cooldown set — %s and series %s locked for %d min",
+                market_id, _series_pfx, _EXIT_COOLDOWN_SECONDS // 60,
+            )
+        else:
+            logger.info(
+                "ResolutionBot: exit cooldown set — %s locked for %d min",
+                market_id, _EXIT_COOLDOWN_SECONDS // 60,
+            )
+
         # Clean up no-source tracking for this market.
         self._no_source_streak.pop(market_id, None)
         self._no_source_fast_skip_streak.pop(market_id, None)
@@ -2981,6 +3253,17 @@ class ResolutionBot:
             offset = realized_pnl_usd / _nc
             raw = (rec.entry_price + offset) if rec.action == "buy_yes" else (rec.entry_price - offset)
             exit_price = max(0.0, min(1.0, raw))
+            logger.debug(
+                "ResolutionBot: back-calculated exit_price for %s: pnl=$%.2f nc=%.2f offset=%.4f "
+                "raw=%.4f → clamped=%.4f", market_id, realized_pnl_usd, _nc, offset, raw, exit_price,
+            )
+        # Trace game_final exits to ensure they use settlement values
+        if exit_reason == "game_final":
+            logger.info(
+                "ResolutionBot: _exit_position finalize game_final: market=%s exit_price=%.4f "
+                "pnl=$%.2f entry=%.3f side=%s",
+                market_id, exit_price or rec.entry_price, realized_pnl_usd, rec.entry_price, rec.action,
+            )
         if capture is None:
             if rec.action == "buy_yes":
                 theo = (rec.ground_truth_prob - rec.entry_price) * _nc
@@ -2997,7 +3280,7 @@ class ResolutionBot:
             action=rec.action,
             size_usd=rec.size_usd,
             entry_price=rec.entry_price,
-            exit_price=exit_price or rec.entry_price,
+            exit_price=exit_price if exit_price is not None else rec.entry_price,
             num_contracts=_nc,
             pnl=realized_pnl_usd,
             capture=capture,
@@ -3010,7 +3293,7 @@ class ResolutionBot:
 
         if self._paper_log is not None:
             _hold_min = (time.time() - rec.entry_time) / 60.0
-            _exit_p   = exit_price or rec.entry_price
+            _exit_p   = exit_price if exit_price is not None else rec.entry_price
             _pnl_pct  = realized_pnl_usd / rec.size_usd if rec.size_usd > 0 else 0.0
             self._paper_log.log_exit(
                 market_id=market_id,
@@ -3039,7 +3322,7 @@ class ResolutionBot:
         _thresh_str = f" exit_thresh={dynamic_exit_threshold:.0%}" if dynamic_exit_threshold is not None else ""
         logger.info(
             "ResolutionBot: EXITED %s entry=%.4f exit=%.4f contracts=%.2f pnl=$%.2f%s",
-            market_id, rec.entry_price, exit_price or rec.entry_price, _nc, realized_pnl_usd,
+            market_id, rec.entry_price, exit_price if exit_price is not None else rec.entry_price, _nc, realized_pnl_usd,
             _thresh_str,
         )
 
@@ -3145,7 +3428,7 @@ class ResolutionBot:
             else:
                 theo_max = (rec.entry_price - rec.ground_truth_prob) * rec.size_usd
                 current_gain = (
-                    (rec.entry_price - current_price) * rec.size_usd
+                    ((1.0 - current_price) - rec.entry_price) * rec.size_usd
                     if current_price is not None else 0.0
                 )
             capture = current_gain / theo_max if theo_max > 1e-6 else 0.0
@@ -3177,8 +3460,23 @@ class ResolutionBot:
             if not client:
                 return None
             ob = client.get_order_book(market.market_id)
-            return ob if ob.mid_price is not None else None
-        except Exception:
+            if ob.mid_price is not None:
+                return ob
+            # API returned an OrderBook but it's empty (no orders on either side)
+            logger.info(
+                "ResolutionBot: _get_live_book %s → API returned OK but empty book "
+                "(best_ask=%s best_bid=%s yes_asks=%d yes_bids=%d)",
+                market.market_id,
+                ob.best_yes_ask, ob.best_yes_bid,
+                len(ob.yes_asks) if ob.yes_asks else 0,
+                len(ob.yes_bids) if ob.yes_bids else 0,
+            )
+            return None
+        except Exception as exc:
+            logger.info(
+                "ResolutionBot: _get_live_book %s → EXCEPTION: %s",
+                market.market_id, exc,
+            )
             return None
 
     def _get_current_price(self, market: Market) -> Optional[float]:

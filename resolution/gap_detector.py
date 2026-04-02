@@ -41,7 +41,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
 from data.ground_truth.base import GroundTruthResult, SourceType
 from data.ground_truth.cross_platform import CrossPlatformSource
@@ -57,6 +57,50 @@ MAX_MIN_GAP        = 0.25    # cap — near-certain signals must not be blocked 
 
 # Minimum hours remaining to act (avoid resolution chaos in last few minutes)
 MIN_HOURS_TO_RESOLUTION = 0.25  # 15 minutes
+
+# ── Category-specific base gap overrides ──────────────────────────────────────
+# Each category demands a minimum mispricing before the time premium is added.
+# Higher base gaps protect against categories with ambiguous resolution criteria
+# or oracle-dispute risk; lower gaps let clear-cut markets trade on tighter edges.
+#
+# Override with env var CATEGORY_BASE_GAP_<CATEGORY>=<float> (e.g. CATEGORY_BASE_GAP_WEATHER=0.08)
+# to tune at runtime without code changes.
+#
+# Checked against market.category (case-insensitive), then market.tags.
+_CATEGORY_BASE_GAP: Dict[str, float] = {
+    # Weather — resolution criteria often ambiguous ("above normal"?) and
+    # NWS/NOAA data can be revised after market close.
+    "weather": 0.08,
+
+    # Economics / FRED — authoritative data source but interpretation risk
+    # (seasonal adjustments, revisions) warrants a wider floor than sports.
+    "economics": 0.05,
+    "economic":  0.05,
+
+    # Financial — clear settlement (exchange close price), tight floor OK.
+    "financial": 0.04,
+
+    # Sports — binary result, live ESPN data, tight floor OK.
+    "sports": 0.04,
+    "sport":  0.04,
+
+    # Politics — binary result but resolution often delayed / disputed.
+    "politics": 0.06,
+    "political": 0.06,
+}
+
+# Tags that map to a category base gap (checked when category lookup misses).
+_TAG_BASE_GAP: Dict[str, float] = {
+    "weather":   0.08,
+    "climate":   0.08,
+    "economics": 0.05,
+    "economy":   0.05,
+    "fed":       0.05,
+    "cpi":       0.05,
+    "jobs":      0.05,
+    "politics":  0.06,
+    "election":  0.06,
+}
 
 
 @dataclass
@@ -171,10 +215,16 @@ class GapDetector:
         self,
         market: Market,
         ground_truth_prob: float,
+        release_window: Optional[str] = None,
     ) -> Optional[GapSignal]:
         """
         For a single market, compare its current price to the ground truth
         probability. Flag if the gap (after fees) exceeds the threshold.
+
+        release_window: pass 'hunt' when the market is in a FRED hunt window
+        so that the min_gap threshold is relaxed by 30%. This reflects that
+        during the hunt window the GT data is confirmed-fresh (FRED updated)
+        while the market is still stale — signal quality is higher than normal.
         """
         # ── Batch boundary: flush previous cycle's summary ────────────────────
         # detect_information_signal() is called per-market in a tight loop.
@@ -199,11 +249,31 @@ class GapDetector:
         if not self._enough_time(market):
             return None
 
+        # Block markets with stale prices — game and financial bracket markets
+        # must have a successful pre-GT price refresh before gap detection.
+        # Without this, wide-spread OTM orderbooks produce a mid_price of ~0.50
+        # that looks like a 50% gap when the real YES price is ~0.006.
+        if not getattr(market, "price_refresh_success", True):
+            logger.info(
+                "[SIGNAL] BLOCKED %s | reason=stale_price mkt_price=%.3f "
+                "— price refresh failed or was not attempted this cycle",
+                market.market_id, market.yes_price,
+            )
+            self._cycle_blocked += 1
+            return None
+
         fee = self._fee_cache.get_taker_fee(market.platform, market.market_id)
         raw_gap = abs(ground_truth_prob - market.yes_price)
         effective_gap = raw_gap - fee
 
-        min_gap = self._time_adjusted_min_gap(market.hours_to_resolution)
+        base_gap = self._category_base_gap(market)
+        min_gap = self._time_adjusted_min_gap(market.hours_to_resolution, base_gap)
+        if release_window == "hunt":
+            min_gap *= 0.70   # 30% reduction: FRED data is confirmed-fresh, market is stale
+            logger.debug(
+                "GapDetector: %s in FRED hunt window — min_gap reduced to %.3f",
+                market.market_id, min_gap,
+            )
         side = "YES" if ground_truth_prob > market.yes_price else "NO"
 
         if effective_gap < min_gap:
@@ -220,14 +290,15 @@ class GapDetector:
                 self._cycle_near_miss += 1
             return None
 
-        _uncapped_gap = self._base_gap + market.hours_to_resolution * TIME_GAP_PREMIUM
+        _uncapped_gap = base_gap + market.hours_to_resolution * TIME_GAP_PREMIUM
         _cap_note = f" capped@{MAX_MIN_GAP:.2f}" if _uncapped_gap > MAX_MIN_GAP else ""
+        _cat_note = f" cat={market.category}" if base_gap != self._base_gap else ""
         reasoning = (
             f"Information signal: market_price={market.yes_price:.3f} "
             f"ground_truth={ground_truth_prob:.3f} raw_gap={raw_gap:.3f} "
             f"taker_fee={fee:.3f} effective_gap={effective_gap:.3f} "
             f"min_gap={min_gap:.3f} "
-            f"({self._base_gap:.2f}+{market.hours_to_resolution:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f}{_cap_note})"
+            f"({base_gap:.2f}+{market.hours_to_resolution:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f}{_cap_note}{_cat_note})"
         )
         logger.info(
             "[SIGNAL] ACTIONABLE %s | gt_prob=%.3f mkt_price=%.3f "
@@ -281,7 +352,8 @@ class GapDetector:
         effective_gap = raw_gap - lagging_fee
 
         hours = min(poly.hours_to_resolution, kalshi.hours_to_resolution)
-        min_gap = self._time_adjusted_min_gap(hours)
+        base_gap = self._category_base_gap(kalshi)
+        min_gap = self._time_adjusted_min_gap(hours, base_gap)
         if effective_gap < min_gap:
             logger.debug(
                 "GapDetector: pair %s/%s eff_gap=%.3f below threshold %.3f "
@@ -290,14 +362,14 @@ class GapDetector:
             )
             return None
 
-        _uncapped_cross = self._base_gap + hours * TIME_GAP_PREMIUM
+        _uncapped_cross = base_gap + hours * TIME_GAP_PREMIUM
         _cap_note_cross = f" capped@{MAX_MIN_GAP:.2f}" if _uncapped_cross > MAX_MIN_GAP else ""
         reasoning = (
             f"Cross-platform gap: poly={poly.yes_price:.3f} kalshi={kalshi.yes_price:.3f} "
             f"raw_gap={raw_gap:.3f} lagging_fee={lagging_fee:.3f} "
             f"effective_gap={effective_gap:.3f} ({platform_label}) "
             f"min_gap={min_gap:.3f} "
-            f"({self._base_gap:.2f}+{hours:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f}{_cap_note_cross})"
+            f"({base_gap:.2f}+{hours:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f}{_cap_note_cross})"
         )
         logger.info(
             "GapDetector: FLAGGED %s/%s – %s",
@@ -316,11 +388,29 @@ class GapDetector:
             reasoning=reasoning,
         )
 
-    def _time_adjusted_min_gap(self, hours: float) -> float:
+    def _category_base_gap(self, market: Market) -> float:
+        """Return the category-specific base gap floor for this market.
+
+        Checks _CATEGORY_BASE_GAP by market.category, then falls back to
+        _TAG_BASE_GAP by scanning market.tags, then falls back to self._base_gap.
+        """
+        cat = (market.category or "").lower().strip()
+        if cat in _CATEGORY_BASE_GAP:
+            return _CATEGORY_BASE_GAP[cat]
+        tags_lower: Set[str] = {t.lower() for t in (market.tags or [])}
+        for tag, gap in _TAG_BASE_GAP.items():
+            if tag in tags_lower:
+                return gap
+        return self._base_gap
+
+    def _time_adjusted_min_gap(self, hours: float, base_gap: Optional[float] = None) -> float:
         """
         Return the minimum effective gap required given hours to resolution.
 
         min_gap = min(base_gap + hours × TIME_GAP_PREMIUM, MAX_MIN_GAP)
+
+        base_gap defaults to self._base_gap when not supplied; pass the result
+        of _category_base_gap(market) to apply a category-specific floor.
 
         The further from resolution, the larger the gap must be to justify
         entering: early positions have more time to go wrong.  The cap at
@@ -336,7 +426,8 @@ class GapDetector:
             min_gap = 0.01  # 1% — let almost everything through for testing
             logger.debug("[FORCE-TEST] min_gap overridden to %.2f", min_gap)
             return min_gap
-        return min(self._base_gap + hours * TIME_GAP_PREMIUM, MAX_MIN_GAP)
+        bg = base_gap if base_gap is not None else self._base_gap
+        return min(bg + hours * TIME_GAP_PREMIUM, MAX_MIN_GAP)
 
     def _enough_time(self, market: Market) -> bool:
         """Return False if market is resolving too soon to safely trade."""
@@ -407,7 +498,8 @@ class GapDetector:
             fee = self._fee_cache.get_taker_fee("kalshi", km.market_id)
             effective_gap = raw_gap - fee
 
-            min_gap = self._time_adjusted_min_gap(km.hours_to_resolution)
+            base_gap = self._category_base_gap(km)
+            min_gap = self._time_adjusted_min_gap(km.hours_to_resolution, base_gap)
             if effective_gap < min_gap:
                 shortfall = min_gap - effective_gap
                 side = "YES" if pm_prob > km.yes_price else "NO"

@@ -54,6 +54,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Track which markets have already logged LARGE_DIVERGENCE to avoid log noise
+_large_divergence_logged: set = set()
+
 # ── Per-category source toggles ───────────────────────────────────────────────
 # Read once at import time from environment / .env file.
 # Each GT_*_ENABLED variable accepts three values:
@@ -413,14 +416,17 @@ class GroundTruthRouter:
             best = max(tradeable, key=lambda r: r.confidence)
             return self._validate_result(best, market)
 
-        # No tradeable result – return highest-confidence candidate for logging
+        # No tradeable result – return highest-confidence candidate for logging.
+        # Still pass through _validate_result so the gt_prob clamp (0.02–0.98)
+        # is applied even on non-tradeable results; the executor may log
+        # gt_prob from this result into ghost_trades.jsonl.
         if candidates:
             best = max(candidates, key=lambda r: r.confidence)
             logger.info(
                 "GroundTruthRouter: best non-tradeable result confidence=%.2f for %s",
                 best.confidence, market.market_id,
             )
-            return best
+            return self._validate_result(best, market)
 
         logger.debug("GroundTruthRouter: no source could handle %s", market.market_id)
         if none_reasons:
@@ -479,6 +485,20 @@ class GroundTruthRouter:
         if result.ground_truth_prob is None:
             return result
 
+        # Universal clamp — GT sources (financial, FRED) return hard 0.0/1.0 when
+        # the price is clearly above/below a strike.  Passing exact 0.0 or 1.0 into
+        # the executor produces nonsensical ghost-trade entries (e.g. KXBRENTD
+        # gt_prob=0.0, KXAAAGASM gt_prob=1.0).  Clamp here, at the single choke
+        # point that every tradeable result (normal and bracket) passes through,
+        # rather than in each individual source.
+        _clamped = max(0.02, min(0.98, result.ground_truth_prob))
+        if _clamped != result.ground_truth_prob:
+            logger.debug(
+                "GroundTruthRouter: clamped gt_prob %.4f → %.4f for %s",
+                result.ground_truth_prob, _clamped, market.market_id,
+            )
+            result = dc_replace(result, ground_truth_prob=_clamped)
+
         gap = abs(result.ground_truth_prob - market.yes_price)
 
         if gap < 0.04:
@@ -501,13 +521,20 @@ class GroundTruthRouter:
             # requires_human_review=True so the executor can:
             #   - In ghost/dry-run mode: fire a ghost trade for accuracy tracking.
             #   - In live mode: send a Telegram alert and await manual approval.
-            logger.warning(
-                "GroundTruthRouter: LARGE_DIVERGENCE market=%s gap=%.1f%% "
-                "ground_truth=%.2f market_price=%.2f — flagging for human review "
-                "(confidence NOT capped; executor will decide based on dry_run mode)",
-                market.market_id, gap * 100,
-                result.ground_truth_prob, market.yes_price,
-            )
+            if market.market_id not in _large_divergence_logged:
+                logger.warning(
+                    "GroundTruthRouter: LARGE_DIVERGENCE market=%s gap=%.1f%% "
+                    "ground_truth=%.2f market_price=%.2f — flagging for human review "
+                    "(confidence NOT capped; executor will decide based on dry_run mode)",
+                    market.market_id, gap * 100,
+                    result.ground_truth_prob, market.yes_price,
+                )
+                _large_divergence_logged.add(market.market_id)
+            else:
+                logger.debug(
+                    "GroundTruthRouter: LARGE_DIVERGENCE market=%s (repeated, suppressed)",
+                    market.market_id,
+                )
             return dc_replace(
                 result,
                 raw_data={
@@ -558,3 +585,10 @@ class GroundTruthRouter:
     def prepend_source(self, source: DataSource) -> None:
         """Add a high-priority custom data source at the front of the list."""
         self._sources.insert(0, source)
+
+    def prefetch_financial_prices(self, symbols: List[str]) -> None:
+        """Prefetch financial prices in parallel before GT evaluation loop."""
+        for src in self._sources:
+            if isinstance(src, FinancialDataSource):
+                src.prefetch_symbols_parallel(symbols)
+                return
