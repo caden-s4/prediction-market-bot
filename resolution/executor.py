@@ -1027,7 +1027,14 @@ class ResolutionBot:
             )
 
         # ── Information signals (GT fetch for active markets) ───────────────
-        info_signals = self._fetch_info_signals(active_markets)
+        try:
+            info_signals = self._fetch_info_signals(active_markets)
+        except Exception:
+            logger.exception(
+                "ResolutionBot: _fetch_info_signals failed — "
+                "returning empty signals for this cycle"
+            )
+            info_signals = []
 
         # Urgent-promote markets with detected info gaps.
         for sig in info_signals:
@@ -1383,6 +1390,13 @@ class ResolutionBot:
         logger.info(
             "ResolutionBot: fetching ground truth for %d candidate markets…", total
         )
+
+        if not candidates:
+            logger.info(
+                "ResolutionBot: no candidate markets this cycle — "
+                "skipping GT evaluation and prefetch"
+            )
+            return []
 
         # Coverage diagnostic counters — reset to 0 on every call; these are
         # per-cycle (per-batch) counts, never cumulative across cycles.
