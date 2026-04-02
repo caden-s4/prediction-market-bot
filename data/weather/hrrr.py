@@ -60,7 +60,7 @@ class HRRRClient(BaseWeatherClient):
             "timezone": "UTC",
         }
 
-        resp = requests.get(self._BASE_URL, params=params, timeout=15)
+        resp = requests.get(self._BASE_URL, params=params, timeout=15, proxies={})
         resp.raise_for_status()
         data = resp.json()
         return self._parse(data, horizon_hours)

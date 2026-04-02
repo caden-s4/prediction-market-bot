@@ -140,9 +140,17 @@ class ResolutionScanner:
         Re-fetch current data for a set of already-known markets.
 
         Uses the per-market ``get_market(market_id)`` endpoint where the
-        platform client supports it.  If the client returns ``None`` (endpoint
-        not implemented or market not found) the last-known ``Market`` object
-        is kept unchanged so callers always get a full list back.
+        platform client supports it, then overlays the live order book mid_price
+        to correct stale yes_price fields on illiquid markets.
+
+        The Kalshi bulk /markets endpoint often returns cached yes_bid/yes_ask
+        (e.g. 49/50 by default) that don't reflect true market liquidity.
+        get_order_book() provides the true bid/ask, so we update yes_price to
+        its mid_price before returning.
+
+        If the client returns ``None`` (endpoint not implemented or market not
+        found) the last-known ``Market`` object is kept unchanged so callers
+        always get a full list back.
 
         Fails silently per market: a single failed refresh only loses freshness
         for that market, not the whole batch.  The executor's ``_try_execute``
@@ -159,7 +167,20 @@ class ResolutionScanner:
                 continue
             try:
                 fresh = client.get_market(market.market_id)
-                refreshed.append(fresh if fresh is not None else market)
+                if fresh is None:
+                    refreshed.append(market)
+                    continue
+
+                # Overlay live order book mid_price to correct stale yes_price.
+                try:
+                    ob = client.get_order_book(market.market_id)
+                    if ob is not None and ob.mid_price is not None:
+                        fresh.yes_price = ob.mid_price
+                except Exception:
+                    # Order book fetch failed; keep fresh.yes_price from get_market().
+                    pass
+
+                refreshed.append(fresh)
             except Exception as exc:
                 logger.debug(
                     "ResolutionScanner: refresh failed for %s/%s: %s",
@@ -223,13 +244,6 @@ class ResolutionScanner:
                             reason = self._reject_reason(m, window_hours)
                             if reason:
                                 rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
-                                if reason == "hours" and m.market_id.startswith(("KXNBAGAME", "KXNCAAMBGAME")):
-                                    logger.info(
-                                        "[DEBUG] Sports market rejected: %s hours_left=%.1f "
-                                        "resolution_date=%s window=%.1f",
-                                        m.market_id, m.hours_to_resolution,
-                                        m.resolution_date, window_hours,
-                                    )
                             else:
                                 seen.add(m.market_id)
                                 results.append(m)
@@ -242,6 +256,34 @@ class ResolutionScanner:
                 except Exception as exc:
                     logger.debug(
                         "ResolutionScanner: kalshi sports supplement failed: %s", exc
+                    )
+
+            # Financial bracket supplement: query bracket series tickers directly.
+            # Financial bracket markets (KXNASDAQ100, KXWTI, KXGOLD, etc.) are not
+            # returned by the default paginated fetch — they must be queried via
+            # series_ticker parameter. This ensures bracket markets for FRED arbitrage
+            # are discovered fresh each cycle.
+            if hasattr(client, "get_financial_bracket_markets"):
+                try:
+                    bracket_markets = client.get_financial_bracket_markets()
+                    added = 0
+                    for m in bracket_markets:
+                        if m.market_id not in seen:
+                            reason = self._reject_reason(m, window_hours)
+                            if reason:
+                                rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
+                            else:
+                                seen.add(m.market_id)
+                                results.append(m)
+                                added += 1
+                    if added:
+                        logger.info(
+                            "ResolutionScanner: kalshi financial bracket supplement → %d additional markets",
+                            added,
+                        )
+                except Exception as exc:
+                    logger.debug(
+                        "ResolutionScanner: kalshi financial bracket supplement failed: %s", exc
                     )
         else:
             for category in SCAN_CATEGORIES:
@@ -312,11 +354,25 @@ class ResolutionScanner:
         if market.category.lower() in EXCLUDED_CATEGORIES or market.is_weather_market():
             return "category"
         hours_left = market.hours_to_resolution   # uses fixed timezone-aware property
-        effective_window = (
-            48.0
-            if any(market.market_id.startswith(p) for p in _GAME_SERIES_PREFIXES)
-            else window_hours
+
+        # Extend scan window for markets with external resolution sources:
+        # - Game markets (48h): same-day, quick turnaround
+        # - Financial brackets (72h): daily/weekly, need longer scan window for weekend discovery
+        #   (e.g. Monday 4pm brackets discovered Saturday afternoon are ~48h away)
+        _FINANCIAL_BRACKET_PREFIXES = (
+            "KXNASDAQ100", "KXINX", "KXWTI", "KXBRENTD",
+            "KXGOLDD", "KXGOLDW", "KXSILVERD", "KXSILVERW", "KXCOPPERD",
+            "KXAAAGASW", "KXTNOTED", "KXTNOTEW"
         )
+        _GAME_SERIES_PREFIXES = ("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME", "KXNCAAWBGAME")
+
+        if any(market.market_id.startswith(p) for p in _GAME_SERIES_PREFIXES):
+            effective_window = 48.0
+        elif any(market.market_id.startswith(p) for p in _FINANCIAL_BRACKET_PREFIXES):
+            effective_window = 72.0
+        else:
+            effective_window = window_hours
+
         if not (0 < hours_left <= effective_window):
             return "hours"
         # Only exclude markets that are literally fully resolved (price at 0 or 1).

@@ -111,6 +111,7 @@ class BotConfig:
     resolution_kelly_fraction: float            # Fractional Kelly (default 12%)
     resolution_max_position_fraction: float     # Hard cap per position (default 20%)
     resolution_scan_interval_seconds: int       # How often to poll (default 300 = 5 min)
+    min_confidence_threshold: float             # Both confidence dimensions must meet this (default 0.80)
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -126,6 +127,7 @@ class BotConfig:
             resolution_kelly_fraction=float(_get("RESOLUTION_KELLY_FRACTION", "0.12")),
             resolution_max_position_fraction=float(_get("RESOLUTION_MAX_POSITION_FRACTION", "0.20")),
             resolution_scan_interval_seconds=int(float(_get("RESOLUTION_SCAN_INTERVAL_SECONDS", "300"))),
+            min_confidence_threshold=float(_get("MIN_CONFIDENCE_THRESHOLD", "0.80")),
         )
 
 

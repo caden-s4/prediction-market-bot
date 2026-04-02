@@ -117,8 +117,12 @@ FRED_SERIES: Dict[str, dict] = {
         "name": "Nonfarm Payrolls",
         "unit": "thousands",
         "keywords": [
+            # Longest keywords first so the best-match heuristic fires correctly.
+            "nonfarm payrolls added",  # Kalshi sometimes uses full phrase
             "nonfarm payroll", "nonfarm payrolls",
-            "us jobs added", "job gains", "us payrolls",
+            "us jobs added", "jobs added", "job gains", "us payrolls",
+            "employment situation",    # BLS release name; appears in some questions
+            "payrolls report",
         ],
         "frequency": "monthly",
         "lag_days": 7,
@@ -326,7 +330,7 @@ class FREDEconomicSource(DataSource):
                         f"threshold={threshold:.0f}k ({direction_str}). "
                         f"→ {outcome_str} confidence={_CONFIDENCE:.2f}"
                     ),
-                    data_published_at=obs_date.replace(tzinfo=timezone.utc),
+                    data_published_at=None,  # FRED validates staleness internally; skip freshness penalty
                 )
 
             obs = self._fetch_series(series_id)
@@ -361,17 +365,34 @@ class FREDEconomicSource(DataSource):
             ground_truth_prob = 1.0 if (value > threshold) == is_above else 0.0
             outcome_str = "YES" if ground_truth_prob == 1.0 else "NO"
 
+            # ── Staleness penalty: observations >5 days old lose confidence ──
+            # Used for series where EIA/weekly data may have updated since FRED
+            # published (e.g., gas prices, unemployment claims).  Reduces false
+            # signals from stale data while still allowing them to trade.
+            # Confidence: 0.90 @ 5d → 0.70 @ 10d → floor @ 0.70
+            now = datetime.utcnow()
+            days_old = (now.date() - obs_date.date()).days
+            confidence = _CONFIDENCE
+            if days_old > 5:
+                staleness_penalty = min((days_old - 5) * 0.04, 0.20)
+                confidence = max(_CONFIDENCE - staleness_penalty, 0.70)
+                logger.info(
+                    "FREDEconSource: %s observation is %d days old, "
+                    "confidence reduced from %.2f to %.2f",
+                    series_id, days_old, _CONFIDENCE, confidence,
+                )
+
             logger.info(
                 "FREDEconSource: %s series=%s value=%.4f threshold=%.4f "
-                "direction=%s → %s (obs_date=%s)",
+                "direction=%s → %s (obs_date=%s, confidence=%.2f)",
                 market.market_id, series_id, value, threshold,
                 direction_str.upper(), outcome_str,
-                obs_date.strftime("%Y-%m-%d"),
+                obs_date.strftime("%Y-%m-%d"), confidence,
             )
 
             return GroundTruthResult(
                 ground_truth_prob=ground_truth_prob,
-                confidence=_CONFIDENCE,
+                confidence=confidence,
                 source_type=SourceType.HARD,
                 source_name=f"FRED/{series_id}",
                 source_url=f"https://fred.stlouisfed.org/series/{series_id}",
@@ -388,7 +409,7 @@ class FREDEconomicSource(DataSource):
                     f"threshold={threshold:.4f} ({direction_str}). "
                     f"→ {outcome_str} confidence={_CONFIDENCE:.2f}"
                 ),
-                data_published_at=obs_date.replace(tzinfo=timezone.utc),
+                data_published_at=None,  # FRED validates staleness internally; skip freshness penalty
             )
 
         except Exception as exc:
@@ -476,6 +497,7 @@ class FREDEconomicSource(DataSource):
                     "limit": 1,
                 },
                 timeout=_TIMEOUT,
+                proxies={},
             )
             resp.raise_for_status()
             observations = resp.json().get("observations", [])
@@ -566,6 +588,7 @@ class FREDEconomicSource(DataSource):
                     "limit": 2,
                 },
                 timeout=_TIMEOUT,
+                proxies={},
             )
             resp.raise_for_status()
             observations = resp.json().get("observations", [])

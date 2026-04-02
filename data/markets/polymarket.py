@@ -135,6 +135,8 @@ class PolymarketClient(BaseMarketClient):
         self._funder_address = funder_address
         self._chain_id = chain_id
         self._session = requests.Session()
+        self._session.trust_env = False
+        self._session.proxies = {}
         # In public mode skip authenticated CLOB client entirely
         self._clob_client = None if public_mode else self._init_clob_client()
         if public_mode:

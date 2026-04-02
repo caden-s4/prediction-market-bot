@@ -103,6 +103,17 @@ class SignalEngine:
         """Register a function called whenever evaluate_all() produces signals."""
         self._callbacks.append(fn)
 
+    def clear_registrations(self) -> None:
+        """Remove all registered books and arb pairs.
+
+        Call before replaying recorded data so replay books start from a clean
+        slate instead of accumulating on top of any live-session registrations.
+        Callbacks are intentionally preserved.
+        """
+        self._books.clear()
+        self._arb_pairs.clear()
+        logger.debug("SignalEngine: registrations cleared")
+
     # ── Evaluation ─────────────────────────────────────────────────────────────
 
     def evaluate_all(self) -> List[Signal]:

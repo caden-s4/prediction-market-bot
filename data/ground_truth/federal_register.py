@@ -135,7 +135,7 @@ class FederalRegisterSource(DataSource):
             ],
         }
 
-        resp = requests.get(f"{_FR_BASE}/documents.json", params=params, timeout=_TIMEOUT)
+        resp = requests.get(f"{_FR_BASE}/documents.json", params=params, timeout=_TIMEOUT, proxies={})
         resp.raise_for_status()
         data = resp.json()
         results = data.get("results", [])
@@ -323,6 +323,7 @@ class FederalRegisterSource(DataSource):
                 "https://www.courtlistener.com/api/rest/v3/search/",
                 params=params,
                 timeout=_TIMEOUT,
+                proxies={},
             )
             resp.raise_for_status()
             data = resp.json()

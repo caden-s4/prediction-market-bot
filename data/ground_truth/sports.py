@@ -2,14 +2,15 @@
 data.ground_truth.sports – live sports scores via ESPN API (free, no key needed).
 
 Supports:
-  - NFL, NBA, MLB, NHL, MLS, NCAAF, NCAAB
+  - NFL, NBA, MLB, NHL, MLS, NCAAF, NCAAB, NCAAW
   - Soccer (EPL, Champions League via ESPN)
 
 Confidence:
   0.95  Game is FINAL — authoritative, full confidence.
   0.65  In-progress AND in final period AND lead is substantial (≥28% edge).
+  0.65  Pre-game with ESPN moneyline odds (vig-removed implied probability).
   None  In-progress but not final period or lead is too small — wait for final.
-  0.0   Pre-game — no outcome yet.
+  0.0   Pre-game with no odds available.
 
 In-progress probability uses a time-weighted formula:
   prob = clip(0.5 + lead × 0.03 × time_weight, 0.08, 0.92)
@@ -55,6 +56,8 @@ _SPORT_MAP = {
     "ncaa basketball": "basketball/mens-college-basketball",
     "college basketball": "basketball/mens-college-basketball",
     "ncaabb": "basketball/mens-college-basketball",
+    "ncaambgame": "basketball/mens-college-basketball",  # matches KXNCAAMBGAME ticker
+    "ncaawbgame": "basketball/womens-college-basketball",  # matches KXNCAAWBGAME ticker
     "cbb": "basketball/mens-college-basketball",
     "epl": "soccer/eng.1",
     "premier league": "soccer/eng.1",
@@ -138,6 +141,22 @@ SPORT_KEYWORDS = (
     "win the tournament", "win the match", "win the game",
     "beat", "defeat", "advance to",
 )
+
+def _american_odds_to_prob(odds_str: str) -> Optional[float]:
+    """Convert American moneyline odds string to raw implied probability.
+
+    e.g. '-355' → 0.780,  '+280' → 0.263.
+    Returns None if the string cannot be parsed.
+    """
+    try:
+        o = float(str(odds_str).strip())
+        if o > 0:
+            return 100.0 / (o + 100.0)
+        else:
+            return abs(o) / (abs(o) + 100.0)
+    except (ValueError, TypeError):
+        return None
+
 
 # Prop/mention markets: "will announcers say X during game Y" — ESPN scores can't
 # answer these, so bail out early rather than returning a misleading result.
@@ -240,6 +259,25 @@ class SportsDataSource(DataSource):
         # false scoreboard lookups for non-football sports markets.
         return None
 
+    def _get_yes_team(self, market) -> Optional[str]:
+        """Return the full canonical name (lowercase) of the YES team for this market.
+
+        For Kalshi game markets (KXNBAGAME / KXNCAAMBGAME / KXMLBSTGAME), the
+        YES team is encoded in the market_id suffix and resolved via the alias
+        table in market_matcher — much more reliable than parsing question text.
+        Falls back to _extract_teams()[0] for non-game markets.
+        """
+        mid = market.market_id.upper()
+        if any(mid.startswith(p) for p in (
+            "KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME", "KXMLBSTGAME", "KXNCAAWBGAME",
+        )):
+            from data.sports.market_matcher import match_market as _mm  # noqa: PLC0415
+            match = _mm(market.market_id, market.question, None)
+            if match and match.get("market_team"):
+                return match["market_team"].lower()
+        teams = self._extract_teams(market.question)
+        return teams[0].lower() if teams else None
+
     def _extract_teams(self, question: str) -> list:
         """Extract team names from the market question.
 
@@ -258,6 +296,13 @@ class SportsDataSource(DataSource):
                 teams = [g.strip() for g in m.groups() if g and len(g.strip()) <= 40]
                 if teams:
                     return teams
+
+        # "X at Y Winner?" — Kalshi game market format ("Golden State at Atlanta Winner?")
+        m = re.search(r"^(.+?) at (.+?) Winner\??$", question.strip(), re.IGNORECASE)
+        if m:
+            left, right = m.group(1).strip(), m.group(2).strip()
+            if 2 <= len(left) <= 35 and 2 <= len(right) <= 35:
+                return [left, right]
 
         # "X vs Y" — only accept if both sides look like short team/city names
         for sep in (" vs. ", " vs ", " v. ", " v "):
@@ -295,7 +340,7 @@ class SportsDataSource(DataSource):
 
         url = f"{_ESPN_BASE}/{sport_path}/scoreboard"
         try:
-            resp = requests.get(url, timeout=timeout)
+            resp = requests.get(url, timeout=timeout, proxies={})
             resp.raise_for_status()
             data = resp.json()
             events = data.get("events", [])
@@ -324,32 +369,49 @@ class SportsDataSource(DataSource):
             event_name = event.get("name", "").lower()
             short_name = event.get("shortName", "").lower()
 
-            # Check if any team from the market question appears in the event
+            # Require ALL extracted teams to appear in the event name.
+            # A single-team match is not sufficient — it would match the wrong
+            # game when the same team played earlier the same day.
             if teams:
                 matched = sum(
                     1 for t in teams
                     if t.lower() in event_name or t.lower() in short_name
                 )
-                if matched >= 1:
+                if matched >= len(teams):
                     return event
             else:
-                # Fuzzy: check significant words from the question
+                # No teams extracted — require at least 2 significant words to
+                # reduce false positives from the fuzzy fallback.
                 words = [w for w in market_text.split() if len(w) > 4]
-                if any(w in event_name for w in words):
+                if sum(1 for w in words if w in event_name) >= 2:
                     return event
 
         return None
 
     # ── Sport configuration for time-progress calculation ─────────────────────
 
-    # (total_periods, minutes_per_period) by sport path prefix
+    # (total_periods, minutes_per_period) keyed by full sport_path first,
+    # then by sport prefix as fallback.  NCAAB uses 2 halves × 20 min, not
+    # NBA's 4 quarters × 12 min — they share the "basketball" prefix so the
+    # full path must be checked first.
     _SPORT_TIMING = {
+        # Full-path entries (checked first — override prefix fallbacks)
+        "basketball/mens-college-basketball":   (2, 20),  # NCAAB: 2 halves × 20 min
+        "basketball/womens-college-basketball": (4, 10),  # NCAAW: 4 quarters × 10 min
+        # Prefix entries (fallback)
         "basketball": (4, 12),   # NBA: 4 quarters × 12 min
         "football": (4, 15),     # NFL/NCAAF: 4 quarters × 15 min
         "hockey": (3, 20),       # NHL: 3 periods × 20 min
         "soccer": (2, 45),       # EPL etc.: 2 halves × 45 min
         "baseball": (9, 20),     # MLB: 9 innings × ~20 min (approximate)
     }
+
+    def _sport_timing(self, sport_path: str) -> tuple:
+        """Return (total_periods, minutes_per_period) for a sport path."""
+        # Try full path first (e.g. "basketball/mens-college-basketball"),
+        # then prefix (e.g. "basketball") as fallback.
+        sport_key = sport_path.split("/")[0]
+        return self._SPORT_TIMING.get(sport_path, self._SPORT_TIMING.get(sport_key, (4, 15)))
 
     def _game_progress(self, sport_path: str, period: int, clock_str: str) -> float:
         """
@@ -358,8 +420,7 @@ class SportsDataSource(DataSource):
         Derived from the current period number and clock string ("MM:SS") from ESPN.
         Falls back to period-only estimate if the clock can't be parsed.
         """
-        sport_key = sport_path.split("/")[0]  # "basketball", "football", etc.
-        total_periods, period_mins = self._SPORT_TIMING.get(sport_key, (4, 15))
+        total_periods, period_mins = self._sport_timing(sport_path)
         total_mins = total_periods * period_mins
 
         # Minutes already completed from previous periods
@@ -410,8 +471,7 @@ class SportsDataSource(DataSource):
         # Log it explicitly so it's visible in debugging, but the formula
         # handles OT correctly — progress is capped at 1.0 → time_weight = 2.0,
         # maximally amplifying the lead signal.
-        sport_key_ot = sport_path.split("/")[0]
-        _total_periods_ot, _ = self._SPORT_TIMING.get(sport_key_ot, (4, 15))
+        _total_periods_ot, _ = self._sport_timing(sport_path)
         if state == "in" and period > _total_periods_ot:
             logger.debug(
                 "SportsSource: %s game in OT (period %d, regulation=%d)",
@@ -434,10 +494,18 @@ class SportsDataSource(DataSource):
 
         winner_name = None
         if completed and competitors:
-            try:
-                winner_name = max(scores, key=lambda k: scores[k])
-            except Exception:
-                pass
+            # Prefer ESPN's authoritative winner flag over max(scores).
+            # max(scores) can be wrong in rare cases (tied regulation score
+            # before OT, or stale score data).
+            for c in competitors:
+                if c.get("winner", False):
+                    winner_name = c.get("team", {}).get("displayName", "")
+                    break
+            if not winner_name:
+                try:
+                    winner_name = max(scores, key=lambda k: scores[k])
+                except Exception:
+                    pass
 
         # Derive ground truth probability
         question_lower = market.question.lower()
@@ -447,13 +515,14 @@ class SportsDataSource(DataSource):
         if completed and winner_name:
             # Game is final – determine if YES or NO based on market question.
             winner_lower = winner_name.lower()
-            teams = self._extract_teams(market.question)
-            if teams:
-                yes_team = teams[0].lower()
+            yes_team = self._get_yes_team(market)
+            if yes_team:
                 yes_won = yes_team in winner_lower or winner_lower in yes_team
             else:
                 yes_won = winner_lower in question_lower
-            ground_truth_prob = 1.0 if yes_won else 0.0
+            # Safety floor: clamp to [0.02, 0.98] so the confidence gate can
+            # still pass while preventing exact certainty in the gap detector.
+            ground_truth_prob = 0.98 if yes_won else 0.02
             reasoning = (
                 f"FINAL: {winner_name} won. "
                 f"Market YES {'resolved' if yes_won else 'resolved against'}."
@@ -471,18 +540,32 @@ class SportsDataSource(DataSource):
             # Gate: only return a signal if we're in the FINAL period/quarter
             # AND the lead is substantial (prob ≥ 0.78 or ≤ 0.22).  Otherwise
             # return None and let the cycle wait for the final result.
-            sport_key = sport_path.split("/")[0]
-            total_periods, _ = self._SPORT_TIMING.get(sport_key, (4, 15))
+            total_periods, _ = self._sport_timing(sport_path)
             in_final_period = period >= total_periods
 
             if len(scores) >= 2:
-                vals = sorted(scores.values(), reverse=True)
-                lead = vals[0] - vals[1]
+                # Determine if the YES team is winning so probability is
+                # directionally correct.  Extract YES team from question;
+                # fall back to leading-team=YES if extraction fails.
+                yes_team_lower = self._get_yes_team(market) or ""
+                leading_team = max(scores, key=lambda k: scores[k])
+                trailing_team = min(scores, key=lambda k: scores[k])
+                lead = scores[leading_team] - scores[trailing_team]
+
+                # Is the YES team the one that's currently leading?
+                if yes_team_lower:
+                    yes_is_leading = (
+                        yes_team_lower in leading_team.lower()
+                        or leading_team.lower() in yes_team_lower
+                    )
+                else:
+                    yes_is_leading = True  # unknown direction; assume leading
 
                 progress = self._game_progress(sport_path, period, clock_str)
                 time_weight = 0.5 + progress * 1.5   # 0.5 → 2.0
 
                 raw_prob = 0.5 + lead * 0.03 * time_weight
+                raw_prob = raw_prob if yes_is_leading else (1.0 - raw_prob)
                 prob = min(max(raw_prob, 0.08), 0.92)  # hard cap
                 substantial = prob >= 0.78 or prob <= 0.22
 
@@ -511,11 +594,97 @@ class SportsDataSource(DataSource):
             source_type = SourceType.HARD
 
         else:
-            # Pre-game – no ground truth yet
+            # Pre-game – try ESPN moneyline odds for an implied win probability.
+            # ESPN scoreboard includes DraftKings moneyline close odds for upcoming
+            # games.  Convert to vig-removed implied probability and assign the
+            # same confidence as an in-progress signal (0.65) since both are
+            # market-derived rather than ground-truth outcomes.
+            logger.info(
+                "SportsDataSource: pre-game odds check for %s", market.market_id
+            )
             ground_truth_prob = None
             confidence = 0.0
             reasoning = "Game has not started."
             source_type = SourceType.AGGREGATED
+
+            try:
+                odds_list = comp.get("odds", [])
+                if not odds_list:
+                    logger.info(
+                        "SportsSource: pre-game %s — no odds in ESPN data (odds_list empty)",
+                        market.market_id,
+                    )
+                else:
+                    o = odds_list[0]
+                    # ESPN puts moneyline numbers at:
+                    #   odds[0]['moneyline']['home']['close']['odds']  (e.g. '-1000')
+                    #   odds[0]['moneyline']['away']['close']['odds']  (e.g. '+650')
+                    # The home team abbreviation lives at:
+                    #   odds[0]['homeTeamOdds']['team']['abbreviation']
+                    moneyline_block = o.get("moneyline", {}) or {}
+                    home_odds_str = (
+                        moneyline_block.get("home", {}).get("close", {}).get("odds")
+                    )
+                    away_odds_str = (
+                        moneyline_block.get("away", {}).get("close", {}).get("odds")
+                    )
+                    # Determine which team is "home" so we can assign yes_prob correctly.
+                    home_abbrev = (
+                        o.get("homeTeamOdds", {}).get("team", {}).get("abbreviation", "")
+                    ).lower()
+                    if not home_odds_str or not away_odds_str:
+                        logger.info(
+                            "SportsSource: pre-game %s — moneyline block present but "
+                            "home/away close odds missing. moneyline_block=%s",
+                            market.market_id, moneyline_block,
+                        )
+                    else:
+                        home_raw = _american_odds_to_prob(str(home_odds_str))
+                        away_raw = _american_odds_to_prob(str(away_odds_str))
+                        if home_raw and away_raw:
+                            total = home_raw + away_raw
+                            if total > 0:
+                                home_fair = home_raw / total
+                                away_fair = away_raw / total
+
+                                # Match YES team to home/away using the home abbreviation
+                                # from homeTeamOdds.team.abbreviation.
+                                yes_team_lower = (self._get_yes_team(market) or "").lower()
+                                yes_prob: Optional[float] = None
+                                if yes_team_lower:
+                                    yes_is_home = (
+                                        yes_team_lower in home_abbrev
+                                        or home_abbrev in yes_team_lower
+                                    )
+                                    yes_prob = home_fair if yes_is_home else away_fair
+
+                                if yes_prob is not None:
+                                    ground_truth_prob = yes_prob
+                                    confidence = 0.65
+                                    source_type = SourceType.AGGREGATED
+                                    reasoning = (
+                                        f"Pre-game moneyline odds (vig-removed): "
+                                        f"home({home_abbrev})={home_odds_str} "
+                                        f"away={away_odds_str} → "
+                                        f"home_fair={home_fair:.3f} away_fair={away_fair:.3f} "
+                                        f"yes_team='{yes_team_lower}' "
+                                        f"yes_is_home={yes_is_home} yes_prob={yes_prob:.3f}"
+                                    )
+                                    logger.info(
+                                        "SportsSource: pre-game odds for %s — %s",
+                                        market.market_id, reasoning,
+                                    )
+                                else:
+                                    logger.info(
+                                        "SportsSource: pre-game %s — yes_team '%s' "
+                                        "could not be determined (home_abbrev='%s')",
+                                        market.market_id, yes_team_lower, home_abbrev,
+                                    )
+            except Exception as _odds_exc:
+                logger.info(
+                    "SportsSource: pre-game odds exception for %s: %s",
+                    market.market_id, _odds_exc,
+                )
 
         return GroundTruthResult(
             ground_truth_prob=ground_truth_prob,

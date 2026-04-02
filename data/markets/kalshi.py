@@ -72,14 +72,17 @@ _GAME_SERIES_PREFIXES = ("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME", "KXNCAAWBGAME
 
 _FINANCIAL_BRACKET_PREFIXES = (
     "KXNASDAQ100",   # covers KXNASDAQ100 and KXNASDAQ100U
-    "KXBRENTD",
-    "KXWTI",         # covers KXWTI and KXWTIW
-    "KXAAAGASW",
-    "KXTNOTED",      # 10-yr Treasury daily bracket (KXTNOTED ≠ KXTNOTEW)
-    "KXTNOTEW",
-    "KXGOLDW",
-    "KXSILVERW",
-    "KXINX",
+    "KXINX",         # S&P 500 index
+    "KXWTI",         # WTI crude oil (covers KXWTI daily and KXWTIW weekly)
+    "KXBRENTD",      # Brent crude daily
+    "KXGOLDD",       # Gold daily brackets
+    "KXGOLDW",       # Gold weekly brackets
+    "KXSILVERD",     # Silver daily brackets
+    "KXSILVERW",     # Silver weekly brackets
+    "KXCOPPERD",     # Copper daily brackets
+    "KXAAAGASW",     # AAA gas storage weekly
+    "KXTNOTED",      # 10-year Treasury daily bracket
+    "KXTNOTEW",      # 10-year Treasury weekly bracket
 )
 
 # Extra hours added to midnight UTC of the game date to estimate game end time.
@@ -221,6 +224,8 @@ class KalshiClient(BaseMarketClient):
         # Path prefix for signing (e.g. "/trade-api/v2")
         self._path_prefix = urlparse(self._base_url).path.rstrip("/")
         self._session = requests.Session()
+        self._session.trust_env = False
+        self._session.proxies = {}
         self._session.headers.update({
             "Content-Type": "application/json",
             "Accept": "application/json",
@@ -540,6 +545,47 @@ class KalshiClient(BaseMarketClient):
         )
         return results
 
+    def get_financial_bracket_markets(self, limit: int = 100) -> List[Market]:
+        """Fetch financial bracket markets (KXNASDAQ100, KXWTI, etc.) directly via series_ticker.
+
+        Financial bracket markets are not returned by the default get_markets() paginated fetch.
+        This method queries each known financial series ticker directly to surface bracket
+        markets for resolution drift arbitrage.
+
+        Silently skips series that return 0 results (not offered / off-season).
+        """
+        results: List[Market] = []
+        seen: set = set()
+
+        for i, series in enumerate(_FINANCIAL_BRACKET_PREFIXES):
+            if i > 0:
+                time.sleep(0.6)  # ~1 req/s — stay under Kalshi rate limit
+            try:
+                params: Dict[str, Any] = {
+                    "status": "open",
+                    "series_ticker": series,
+                    "limit": limit,
+                }
+                data = self._get("/markets", params=params)
+                raw = data.get("markets", [])
+                logger.debug("Kalshi financial series=%s → %d markets", series, len(raw))
+                for item in raw:
+                    ticker = item.get("ticker", "")
+                    if ticker in seen:
+                        continue
+                    seen.add(ticker)
+                    m = self._parse_market(item)
+                    if m:
+                        results.append(m)
+            except Exception as exc:
+                logger.debug("Kalshi financial series=%s fetch failed: %s", series, exc)
+
+        logger.info(
+            "Kalshi financial bracket scan: %d markets across %d series",
+            len(results), len(_FINANCIAL_BRACKET_PREFIXES),
+        )
+        return results
+
     def _log_available_series(self) -> None:
         """Query /series and log all tickers so we can see what's on this API."""
         try:
@@ -701,22 +747,56 @@ class KalshiClient(BaseMarketClient):
 
     # ── Order book ────────────────────────────────────────────────────────────
 
+    # Temporary: log raw orderbook response once per process run to diagnose API shape.
+    _raw_book_logged: bool = False
+
     def get_order_book(self, market_id: str) -> OrderBook:
         try:
             data = self._get(f"/markets/{market_id}/orderbook")
+
+            # Temporary one-shot raw response log to diagnose API shape.
+            if not KalshiClient._raw_book_logged:
+                KalshiClient._raw_book_logged = True
+                import json as _json
+                raw_snippet = _json.dumps(data)[:500]
+                logger.info("RAW orderbook API response for %s: %s", market_id, raw_snippet)
+
             # API returns "orderbook_fp" (fingerprint), not "orderbook"
             book = data.get("orderbook_fp", {})
             # Kalshi order book: "yes_dollars" = YES bid levels, "no_dollars" = NO bid levels.
             # NO bids at price p cents are equivalent to YES asks at (100 - p) cents,
             # because a NO buyer willing to pay p for NO is offering 100-p for YES.
-            yes_bids = [
-                PriceLevel(price=float(b[0]) / 100.0, size=float(b[1]))
-                for b in sorted(book.get("yes_dollars") or [], key=lambda x: -x[0])
-            ]
-            yes_asks = [
-                PriceLevel(price=(100.0 - float(a[0])) / 100.0, size=float(a[1]))
-                for a in sorted(book.get("no_dollars") or [], key=lambda x: -x[0])
-            ]
+
+            def _parse_level(level, side_label: str):
+                """Parse [price, size] level, skipping non-numeric entries."""
+                try:
+                    price_raw, size_raw = level[0], level[1]
+                    price = float(price_raw)
+                    size = float(size_raw)
+                    return price, size
+                except (TypeError, ValueError, IndexError) as e:
+                    logger.warning(
+                        "Skipping malformed orderbook level for %s %s: %r (%s)",
+                        market_id, side_label, level, e,
+                    )
+                    return None
+
+            yes_bid_levels = []
+            for b in book.get("yes_dollars") or []:
+                parsed = _parse_level(b, "yes_bid")
+                if parsed is not None:
+                    yes_bid_levels.append(parsed)
+            yes_bid_levels.sort(key=lambda x: -x[0])
+            yes_bids = [PriceLevel(price=p / 100.0, size=s) for p, s in yes_bid_levels]
+
+            yes_ask_levels = []
+            for a in book.get("no_dollars") or []:
+                parsed = _parse_level(a, "no_bid")
+                if parsed is not None:
+                    yes_ask_levels.append(parsed)
+            yes_ask_levels.sort(key=lambda x: -x[0])
+            yes_asks = [PriceLevel(price=(100.0 - p) / 100.0, size=s) for p, s in yes_ask_levels]
+
             return OrderBook(
                 market_id=market_id,
                 platform=self.PLATFORM,

@@ -790,6 +790,7 @@ class FinancialDataSource(DataSource):
                 params={"symbol": td_symbol, "apikey": _TWELVE_DATA_KEY},
                 timeout=_TIMEOUT,
                 headers={"User-Agent": "Mozilla/5.0"},
+                proxies={},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -836,6 +837,7 @@ class FinancialDataSource(DataSource):
                         "apikey": _ALPHA_VANTAGE_KEY,
                     },
                     timeout=_TIMEOUT,
+                    proxies={},
                 )
                 resp.raise_for_status()
                 rate = (
@@ -855,6 +857,7 @@ class FinancialDataSource(DataSource):
                         "apikey": _ALPHA_VANTAGE_KEY,
                     },
                     timeout=_TIMEOUT,
+                    proxies={},
                 )
                 resp.raise_for_status()
                 price = resp.json().get("Global Quote", {}).get("05. price")
@@ -884,6 +887,7 @@ class FinancialDataSource(DataSource):
                     params={"interval": "1d", "range": "5d"},
                     timeout=_TIMEOUT,
                     headers={"User-Agent": "Mozilla/5.0"},
+                    proxies={},
                 )
                 resp.raise_for_status()
                 meta = resp.json()["chart"]["result"][0]["meta"]
@@ -1018,6 +1022,41 @@ class FinancialDataSource(DataSource):
                 return 0.0, _confidence(margin)
 
         return None, 0.0  # within ±2% — too uncertain
+
+    def prefetch_symbols_parallel(self, symbols: list[str]) -> None:
+        """
+        Prefetch multiple symbols in parallel, populating _PRICE_CACHE.
+
+        Filters to only symbols missing or stale in cache, then fetches in parallel
+        using ThreadPoolExecutor. Results are stored in the module-level _PRICE_CACHE
+        as a side effect of _fetch_price() calls.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        now = time.monotonic()
+        needed = [
+            s for s in symbols
+            if s not in _PRICE_CACHE or (now - _PRICE_CACHE[s][0]) >= _CACHE_TTL
+        ]
+        if not needed:
+            return
+
+        with ThreadPoolExecutor(max_workers=min(len(needed), 4)) as pool:
+            futures = {pool.submit(self._fetch_price, sym): sym for sym in needed}
+            try:
+                for future in as_completed(futures, timeout=45):
+                    sym = futures[future]
+                    try:
+                        future.result()  # result already stored in _PRICE_CACHE
+                    except Exception as e:
+                        logger.warning("FinancialSource: parallel prefetch failed for %s: %s", sym, e)
+            except TimeoutError:
+                finished = {f for f in futures if f.done()}
+                pending = [futures[f] for f in futures if f not in finished]
+                logger.warning(
+                    "FinancialSource: prefetch timed out — %d/%d symbols incomplete: %s",
+                    len(pending), len(needed), pending,
+                )
 
 
 def _parse_float(s: str) -> Optional[float]:

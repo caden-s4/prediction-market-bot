@@ -184,8 +184,23 @@ def _print_summary(
     print(sep)
     print(f"  Markets scanned          {scanned:>5}   {tier_detail}")
     print(f"{reg_str}", end="")
+    gt_cov = result.get("gt_coverage", {})
+    gt_covered     = gt_cov.get("covered", 0)
+    gt_no_source   = gt_cov.get("no_source", 0)
+    gt_no_prob     = gt_cov.get("no_prob", 0)
+    gt_gap_small   = gt_cov.get("gap_too_small", 0)
+    gt_sources     = gt_cov.get("sources", "")
+    if gt_cov:
+        gt_detail = f"covered={gt_covered}  no_source={gt_no_source}  no_prob={gt_no_prob}  gap_small={gt_gap_small}"
+        if gt_sources and gt_sources != "none":
+            gt_detail += f"  [{gt_sources}]"
+    else:
+        gt_detail = ""
+
     print(f"  Cross-platform pairs     {pairs:>5}")
     print(f"  Gap signals detected     {signals:>5}{signal_tag}")
+    if gt_detail:
+        print(f"  GT coverage              {gt_detail}")
     ghost = cfg.bot.dry_run
     trades_label    = "Ghost trades fired" if ghost else "Trades fired"
     positions_label = "Ghost positions    " if ghost else "Open positions     "
@@ -255,11 +270,25 @@ def _print_summary(
             print(f"\n  No trades – first {len(sample)} markets scanned:")
             print(f"  {'─' * (_SEP_W - 2)}")
             for m in sample:
-                cat  = m.get("category", "?")
-                hrs  = m.get("hours_left", 0)
-                yes  = m.get("yes_price", 0)
-                q    = m.get("question", "")
-                print(f"  [{cat:<11}]  {hrs:>5.1f}h  YES={yes:.2f}   {q[:55]}")
+                cat     = m.get("category", "?")
+                hrs     = m.get("hours_left", 0)
+                yes     = m.get("yes_price", 0)
+                q       = m.get("question", "")
+                mid     = m.get("market_id", "")
+                tier    = m.get("tier", "")
+                tier_s  = f"T{tier}" if tier else ""
+
+                # For game markets, extract the yes-team from the market ID suffix
+                # e.g. KXNBAGAME-26MAR21CLENO-CLE → "[CLE wins]"
+                game_tag = ""
+                _GAME_PREFIXES = ("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME", "KXNCAAWBGAME")
+                if any(mid.startswith(pfx) for pfx in _GAME_PREFIXES):
+                    parts = mid.rsplit("-", 1)
+                    if len(parts) == 2:
+                        game_tag = f"  [{parts[1]} wins]"
+
+                tier_bracket = f"[{tier_s}] " if tier_s else ""
+                print(f"  {tier_bracket}[{cat:<11}]  {hrs:>5.1f}h  YES={yes:.2f}   {q[:48]}{game_tag}")
             print()
 
 
@@ -702,6 +731,89 @@ def _print_paper(coordinator: "BotCoordinator", days: int = 1) -> None:
         print()
 
 
+def _print_fred_check(coordinator: "BotCoordinator") -> None:
+    """Print FRED pipeline diagnostic: schedule, observations, and market coverage."""
+    from datetime import datetime, timezone
+    from data.ground_truth.economic_fred import FREDEconomicSource, FRED_SERIES
+    from data.release_calendar import FREDReleaseCalendar, SERIES_TO_RELEASE
+
+    sep = "-" * _SEP_W
+    print(f"\n{sep}")
+    print("  FRED PIPELINE DIAGNOSTIC (April 3 PAYEMS Release Readiness)")
+    print(sep)
+
+    # 1. Release schedule
+    print("\n  [1] RELEASE SCHEDULE")
+    calendar = FREDReleaseCalendar(series_ids=list(SERIES_TO_RELEASE.keys()))
+    calendar.refresh_schedule()
+    now = datetime.now(timezone.utc)
+
+    for series_id in sorted(SERIES_TO_RELEASE.keys()):
+        window = calendar.get_active_window(series_id)
+        release_time = calendar._schedule.get(series_id)
+        if release_time:
+            mins_until = (release_time - now).total_seconds() / 60
+            window_label = window or "idle"
+            if mins_until > 0:
+                print(f"    {series_id}: {release_time.strftime('%Y-%m-%d %H:%M UTC')} "
+                      f"({mins_until:.0f} min away) [window: {window_label}]")
+            else:
+                print(f"    {series_id}: {release_time.strftime('%Y-%m-%d %H:%M UTC')} "
+                      f"(released {-mins_until:.0f} min ago) [window: {window_label}]")
+        else:
+            print(f"    {series_id}: no schedule")
+
+    # 2. Latest observations from FRED
+    print("\n  [2] LATEST FRED OBSERVATIONS")
+    fred_source = FREDEconomicSource()
+    for series_id in sorted(SERIES_TO_RELEASE.keys()):
+        meta = FRED_SERIES.get(series_id)
+        if meta:
+            try:
+                obs = fred_source._fetch_series(series_id)
+                if obs:
+                    value, obs_date = obs
+                    days_old = (now.date() - obs_date.date()).days
+                    status = "✓ current" if days_old <= 7 else f"⚠ {days_old}d old"
+                    print(f"    {series_id}: {value:>10} (obs {obs_date.date()}) {status}")
+                else:
+                    print(f"    {series_id}: (no observation)")
+            except Exception as e:
+                print(f"    {series_id}: error — {e}")
+
+    # 3. FRED-routed markets
+    print("\n  [3] FRED-ROUTED MARKETS (active with real pricing)")
+    print("    (skipped: market list only available during scan cycle)")
+    # Note: market enumeration happens during run_once(); fred-check is a standalone diagnostic
+
+    # 4. Release window simulation
+    print("\n  [4] APRIL 3 PAYEMS RELEASE TIMELINE SIMULATION")
+    print("    Assuming PAYEMS = 2026-04-03 08:30 ET = 12:30 UTC")
+    test_times = [
+        ("08:29 ET", datetime(2026, 4, 3, 12, 29, tzinfo=timezone.utc)),
+        ("08:30 ET (release)", datetime(2026, 4, 3, 12, 30, tzinfo=timezone.utc)),
+        ("08:35 ET (hold)", datetime(2026, 4, 3, 12, 35, tzinfo=timezone.utc)),
+        ("09:00 ET (hold)", datetime(2026, 4, 3, 13, 0, tzinfo=timezone.utc)),
+        ("09:15 ET (FRED updates)", datetime(2026, 4, 3, 13, 15, tzinfo=timezone.utc)),
+        ("09:16 ET (hunt)", datetime(2026, 4, 3, 13, 16, tzinfo=timezone.utc)),
+        ("11:30 ET (hunt)", datetime(2026, 4, 3, 15, 30, tzinfo=timezone.utc)),
+        ("11:31 ET (expired)", datetime(2026, 4, 3, 15, 31, tzinfo=timezone.utc)),
+    ]
+
+    # Create test calendar at each time
+    for label, test_time in test_times:
+        # Mock the current time check by reading the state
+        import unittest.mock as mock
+        with mock.patch("datetime.datetime") as mock_dt:
+            mock_dt.now.return_value = test_time
+            mock_dt.side_effect = lambda *args, **kw: datetime(*args, **kw)
+            window = calendar.get_active_window("PAYEMS")
+        print(f"    {label}: window = {window or 'idle'}")
+
+    print(sep)
+    print()
+
+
 def _print_help() -> None:
     sep = "=" * _SEP_W
     print(f"\n{sep}")
@@ -712,10 +824,11 @@ def _print_help() -> None:
     print("  pairs [N]         Near-miss cross-platform pairs ranked by overlap")
     print("  history / hist    Show all trades resolved this session with P&L")
     print("  paper [N]         Ghost-trade daily summary (default today; N=days back)")
+    print("  fred-check        FRED pipeline diagnostic & April 3 readiness check")
     print("  s  /  scan        Run a scan cycle right now")
-    print("  bank <amount>     Set virtual bankroll for this session (dry-run only)")
+    print("  bank <amount>     Set virtual bankroll (dry-run only; persists across restarts)")
     print("  clear             Wipe all tracked positions (no exit orders placed)")
-    print("  ghost-clear       Remove ghost positions and delete ghost_positions.json")
+    print("  ghost-reset       Blank slate: clear all ghost positions + reset bankroll to $500")
     print("  h  /  help        Show this help")
     print("  Ctrl-C            Stop the bot")
     print(sep)
@@ -750,9 +863,12 @@ def _start_command_listener(
                 elif cmd == "clear":
                     n = coordinator.clear_positions()
                     print(f"  Cleared {n} position(s) from state.")
-                elif cmd == "ghost-clear":
-                    n = coordinator.ghost_clear_positions()
-                    print(f"  Cleared {n} ghost position(s) and deleted ghost_positions.json.")
+                elif cmd in ("ghost-reset", "ghost-clear"):
+                    if not cfg.bot.dry_run:
+                        print("  'ghost-reset' is only available in ghost/dry-run mode.")
+                    else:
+                        n = coordinator.ghost_reset()
+                        print(f"  Ghost reset complete: {n} position(s) cleared, bankroll reset to $500.00.")
                 elif cmd.startswith("bank"):
                     parts = cmd.split()
                     if not cfg.bot.dry_run:
@@ -764,8 +880,7 @@ def _start_command_listener(
                         try:
                             amount = float(parts[1].replace(",", ""))
                             coordinator.set_virtual_bankroll(amount)
-                            print(f"  Virtual bankroll set to ${amount:,.2f}  "
-                                  f"(session only, not saved to .env)")
+                            print(f"  Virtual bankroll set to ${amount:,.2f} (persisted)")
                         except ValueError:
                             print(f"  Usage: bank <amount>   e.g.  bank 500")
                         except RuntimeError as e:
@@ -776,6 +891,8 @@ def _start_command_listener(
                     parts = cmd.split()
                     days = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 1
                     _print_paper(coordinator, days=days)
+                elif cmd == "fred-check":
+                    _print_fred_check(coordinator)
                 elif cmd in ("h", "help", "?"):
                     _print_help()
                 elif cmd:
@@ -789,7 +906,7 @@ def _start_command_listener(
 
     t = threading.Thread(target=_listen, daemon=True, name="cmd-listener")
     t.start()
-    print("  Type 'p' positions · 's' scan now · 'pairs' near-miss · 'history' resolved trades · 'paper [N]' ghost-trade log · 'bank <amount>' virtual bankroll · 'ghost-clear' reset ghost positions · 'help'\n")
+    print("  Type 'p' positions · 's' scan now · 'history' resolved trades · 'paper [N]' ghost-trade log · 'bank <amount>' virtual bankroll · 'ghost-reset' blank slate · 'help'\n")
 
 
 def parse_args() -> argparse.Namespace:
@@ -972,8 +1089,9 @@ def main() -> None:
 
     if cfg.bot.dry_run:
         logger.warning(
-            "GHOST TRADE mode – simulated trades will be tracked this session "
-            "but NO real orders will be placed and positions reset on restart. "
+            "GHOST TRADE mode – simulated trades tracked, NO real orders placed. "
+            "Positions and bankroll persist across restarts. "
+            "Type 'ghost-reset' for a blank slate. "
             "Set LIVE_TRADING=true in .env to trade live."
         )
 

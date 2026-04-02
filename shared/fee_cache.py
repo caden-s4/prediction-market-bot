@@ -127,7 +127,7 @@ class FeeCache:
         feeRateBps is in basis points (100 bps = 1%).
         """
         url = f"{_POLY_CLOB}/markets/{market_id}"
-        resp = requests.get(url, timeout=_TIMEOUT)
+        resp = requests.get(url, timeout=_TIMEOUT, proxies={})
         resp.raise_for_status()
         data = resp.json()
         fee_bps = data.get("feeRateBps", 0)
@@ -149,7 +149,7 @@ class FeeCache:
         absent — the gap threshold acts as the real safety margin.
         """
         url = f"https://api.elections.kalshi.com/trade-api/v2/markets/{market_id}"
-        resp = requests.get(url, timeout=_TIMEOUT)
+        resp = requests.get(url, timeout=_TIMEOUT, proxies={})
         resp.raise_for_status()
         data = resp.json()
         market = data.get("market", data)

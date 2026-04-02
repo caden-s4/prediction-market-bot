@@ -1,0 +1,325 @@
+# BOT DIAGNOSTIC: 2026-03-28 18:49:27 ET to 2026-03-31 12:22:42 ET
+
+Auto-resolved START: 2026-03-28 18:49:27 ET
+Commit: "Docs: Mark financial bracket restoration as complete and verified"
+
+---
+
+## 1. LOG COVERAGE
+
+Files found (in concat order .3 .2 .1 then bot.log):
+
+  bot.log.3  first=2026-03-30 09:10:40 ET   last=2026-03-30 16:32:52 ET   lines=26,678
+  bot.log.2  first=2026-03-30 16:32:52 ET   last=2026-03-31 05:14:58 ET   lines=31,447
+  bot.log.1  first=2026-03-31 05:14:58 ET   last=2026-03-31 12:12:56 ET   lines=29,824
+  bot.log    first=2026-03-31 12:12:56 ET   last=2026-03-31 12:22:42 ET   lines=835
+
+Total lines in range: 88,784
+
+COVERAGE GAP (pre-log): 2026-03-28 18:49 ET to 2026-03-30 09:10 ET — 38.4 hours with NO log files
+available. A prior rotation discarded bot.log.4+. Only 51.2h of the 65.5h window has coverage.
+
+Gaps >10min within covered period (4 total):
+  2026-03-30 11:45 to 2026-03-30 15:53 ET  (248 min — bot offline ~4h)
+  2026-03-30 17:04 to 2026-03-30 23:17 ET  (373 min — bot offline ~6.2h)
+  2026-03-31 10:39 to 2026-03-31 10:51 ET  (12 min)
+  2026-03-31 11:08 to 2026-03-31 11:19 ET  (11 min)
+
+---
+
+## 2. CYCLES
+
+Total completed cycles: 360  (measured by [SIGNAL] Cycle summary lines)
+
+Cycle duration (inter-summary gap, gaps >30min excluded as bot-offline):
+  Min:    3s
+  Avg:  168s
+  Median: 183s
+  Max:  739s  (2026-03-31 10:39 ET — coincides with the 12-min gap above)
+
+Cycles with 0 actionable signals: 65 of 360  (18.1%)
+Actionable per cycle: min=0, max=16, avg=8.3
+
+No per-phase timing is logged (scanner/GT/signal phases not individually timestamped).
+
+---
+
+## 3. TRADES (ghost_trades.jsonl filtered to range)
+
+Range filter: ts >= 2026-03-28 22:49:27 UTC
+
+Counts:
+  Total entries:              108
+  Total exits:                 84
+  Wins:                        14
+  Losses:                      70
+  Unfilled timeouts:            2
+  Other exits (game_final:3, early_exit:8, hard_stop:69, stop_loss:1, resolution:1)
+
+P&L:
+  Gross P&L (logged):  $81,617.81   *** ANOMALOUS — see Section 8 ***
+  Normal P&L (|pnl|<=100 only, 71 exits): -$915.24
+  Fees: not separately logged
+
+Averages (all trades in range):
+  Avg entry price:  $0.3147
+  Avg exit price:   $0.4673
+  Avg hold:         9.4 min
+
+Win rate excl. unfilled: 17.1%  over 82 resolved trades
+
+Current bankroll (ghost_state.json): $575.19  (started $500, realized_pnl=$75.19)
+  Note: bankroll reflects ghost PnL accumulation including anomalous values.
+
+TRADE TABLE (all 84 exits in range):
+Market ID                                          Side     Entry$   Exit$    P&L          Reason               Hold(m)   Entry Time ET
+-----------------------------------------------------------------------------------------------------------------------------------------
+KXNCAAWBGAME-26MAR28OKLASCAR-SCAR                  ?        0.0000   1.0000   4945.50      game_final           25.2      (no entry in range)
+KXNCAAMBGAME-26MAR28IOWAILL-IOWA                   buy_yes  0.2550   0.2550   0.00         unfilled_timeout     11.1      03-28 20:37
+KXNCAAMBGAME-26MAR29TENNMICH-TENN                  buy_yes  0.7500   0.7500   0.00         unfilled_timeout     12.7      03-29 16:46
+KXNCAAWBGAME-26MAR29DUKEUCLA-UCLA                  buy_yes  0.0099   1.0000   5241.53      game_final            7.4      03-29 17:14
+KXBRENTD-26MAR3017-T105                            buy_no   0.5032   0.0064   553.80       early_exit           26.8      03-29 18:23
+KXGOLDD-26MAR3017-T4410                            buy_yes  0.5023   0.0031   -605.13      hard_stop            29.7      03-28 20:48
+KXGOLDD-26MAR3017-T4430                            buy_yes  0.5018   0.0031   -47.83       stop_loss           142.7      03-28 19:01
+KXBRENTD-26MAR3017-T105                            buy_no   0.5032   0.0065   607.71       early_exit           51.6      03-29 18:57
+KXNBAGAME-26MAR29ORLTOR-TOR                        buy_yes  0.0099   1.0000   47416.79     game_final           12.6      03-29 20:16
+KXBRENTD-26MAR3017-T105                            buy_no   0.5032   0.0065   601.09       early_exit           52.4      03-29 19:57
+KXBRENTD-26MAR3017-T105                            buy_no   0.5037   0.0064   5239.80      early_exit           50.9      03-29 20:59
+KXBRENTD-26MAR3017-T108                            buy_no   0.5035   0.9998   -5505.11     hard_stop            84.1      03-29 21:27
+KXBRENTD-26MAR3017-T105                            buy_no   0.5032   0.0064   5827.00      early_exit           53.2      03-29 21:58
+KXAAAGASW-26MAR30-3.990                            buy_no   0.4974   0.4985   -7.03        resolution           10.6      03-29 23:35
+KXBRENTD-26MAR3017-T105                            buy_no   0.5032   0.0064   5860.67      early_exit           52.7      03-29 22:59
+KXBRENTD-26MAR3017-T106                            buy_no   0.5035   0.0071   5882.23      early_exit          116.1      03-29 22:21
+KXBRENTD-26MAR3017-T105                            buy_no   0.5032   0.0064   6467.18      early_exit           50.1      03-29 23:59
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9999   0.5016   -24.10       hard_stop             0.0      03-30 10:14
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9999   0.5016   -22.82       hard_stop             0.0      03-30 10:18
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9999   0.5016   -21.75       hard_stop             0.0      03-30 10:22
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9999   0.5016   -20.73       hard_stop             0.0      03-30 10:26
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9978   0.5024   -19.59       hard_stop             0.0      03-30 10:29
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9978   0.5024   -18.68       hard_stop             0.0      03-30 10:33
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9978   0.5023   -17.76       hard_stop             0.0      03-30 10:37
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9978   0.5023   -16.95       hard_stop             0.0      03-30 10:41
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0065   0.5032   -17.55       hard_stop             0.0      03-30 10:41
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9978   0.5023   -15.29       hard_stop             0.0      03-30 10:45
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0091   0.5045   -15.80       hard_stop             0.0      03-30 10:45
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9978   0.5023   -13.86       hard_stop             0.0      03-30 10:48
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0091   0.5045   -14.19       hard_stop             0.0      03-30 10:48
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0091   0.5045   -12.82       hard_stop             0.0      03-30 10:55
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0092   0.5046   -12.30       hard_stop             0.0      03-30 11:00
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0092   0.5046   -11.68       hard_stop             0.0      03-30 11:02
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0065   0.5032   -11.10       hard_stop             0.0      03-30 11:04
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0092   0.5046   -10.48       hard_stop             0.0      03-30 11:16
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0092   0.5046   -9.89        hard_stop             0.0      03-30 11:20
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0092   0.5046   -9.41        hard_stop             0.0      03-30 11:23
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0092   0.5046   -8.95        hard_stop             0.0      03-30 11:27
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0092   0.5046   -8.48        hard_stop             0.0      03-30 11:30
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0092   0.5046   -8.21        hard_stop             0.0      03-30 11:57
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0092   0.5046   -7.79        hard_stop             0.0      03-30 12:00
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0065   0.5032   -7.24        hard_stop             0.0      03-30 12:10
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0078   0.5039   -6.90        hard_stop             0.0      03-30 13:07
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0065   0.5032   -6.59        hard_stop             0.0      03-30 13:10
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0065   0.5032   -6.22        hard_stop             0.0      03-30 13:14
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0065   0.5032   -5.91        hard_stop             0.0      03-30 13:17
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9978   0.5023   -5.60        hard_stop             0.0      03-30 13:36
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9977   0.5023   -5.32        hard_stop             0.0      03-30 13:40
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9979   0.5024   -23.90       hard_stop             0.0      03-30 13:55
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9979   0.5024   -22.72       hard_stop             0.0      03-30 13:59
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9978   0.5024   -21.62       hard_stop             0.0      03-30 14:04
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9980   0.5025   -20.58       hard_stop             0.0      03-30 14:12
+KXGOLDD-26MAR3117-T4460                            buy_yes  0.9978   0.5023   -19.61       hard_stop             0.0      03-30 14:21
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0082   0.5040   -19.10       hard_stop             0.0      03-30 14:28
+KXBRENTD-26MAR3017-T105.50                         buy_no   0.0065   0.5032   -18.14       hard_stop             0.0      03-30 14:32
+KXBRENTD-26MAR3117-T110                            buy_no   0.0054   0.5024   -17.95       hard_stop             0.0      03-30 18:53
+KXBRENTD-26MAR3117-T110                            buy_no   0.0054   0.5024   -17.03       hard_stop             0.0      03-30 18:56
+KXBRENTD-26MAR3117-T110                            buy_no   0.0055   0.5025   -16.16       hard_stop             0.0      03-30 18:58
+KXBRENTD-26MAR3117-T110                            buy_no   0.0057   0.5026   -25.33       hard_stop             0.0      03-30 19:01
+KXBRENTD-26MAR3117-T110                            buy_no   0.0055   0.5025   -23.99       hard_stop             0.0      03-30 19:04
+KXBRENTD-26MAR3117-T110                            buy_no   0.0055   0.5025   -22.78       hard_stop             0.0      03-30 19:06
+KXBRENTD-26MAR3117-T110                            buy_no   0.0057   0.5026   -21.44       hard_stop             0.0      03-30 19:10
+KXBRENTD-26MAR3117-T110                            buy_no   0.0057   0.5026   -20.22       hard_stop             0.0      03-30 19:12
+KXBRENTD-26MAR3117-T110                            buy_no   0.0063   0.5029   -19.09       hard_stop             0.0      03-30 19:15
+KXBRENTD-26MAR3117-T110                            buy_no   0.0064   0.5030   -18.07       hard_stop             0.0      03-30 19:18
+KXBRENTD-26MAR3117-T110                            buy_no   0.0058   0.5027   -17.29       hard_stop             0.0      03-30 19:21
+KXBRENTD-26MAR3117-T110                            buy_no   0.0051   0.5023   -16.42       hard_stop             0.0      03-30 19:23
+KXBRENTD-26MAR3117-T110                            buy_no   0.0060   0.5028   -15.66       hard_stop             0.0      03-30 19:27
+KXBRENTD-26MAR3117-T110                            buy_no   0.0063   0.5027   -14.82       hard_stop             0.0      03-30 19:30
+KXBRENTD-26MAR3117-T110                            buy_no   0.0058   0.5027   -14.09       hard_stop             0.0      03-30 19:33
+KXBRENTD-26MAR3117-T110                            buy_no   0.0061   0.5028   -13.41       hard_stop             0.0      03-30 19:35
+KXBRENTD-26MAR3117-T110                            buy_no   0.0059   0.5027   -12.74       hard_stop             0.0      03-30 19:38
+KXBRENTD-26MAR3117-T110                            buy_no   0.0060   0.5028   -12.11       hard_stop             0.0      03-30 19:41
+KXBRENTD-26MAR3117-T110                            buy_no   0.0061   0.5028   -11.49       hard_stop             0.0      03-30 19:44
+KXBRENTD-26MAR3117-T110                            buy_no   0.0061   0.5028   -10.95       hard_stop             0.0      03-30 19:47
+KXBRENTD-26MAR3117-T110                            buy_no   0.0058   0.5027   -10.36       hard_stop             0.0      03-30 19:50
+KXBRENTD-26MAR3117-T110                            buy_no   0.0058   0.5026   -9.84        hard_stop             0.0      03-30 19:52
+KXBRENTD-26MAR3117-T110                            buy_no   0.0058   0.5027   -9.34        hard_stop             0.0      03-30 19:55
+KXBRENTD-26MAR3117-T110                            buy_no   0.0058   0.5023   -8.85        hard_stop             0.0      03-30 19:58
+KXBRENTD-26MAR3117-T110                            buy_no   0.0058   0.5023   -8.44        hard_stop             0.0      03-30 20:01
+KXBRENTD-26MAR3117-T110                            buy_no   0.0059   0.5024   -8.04        hard_stop             0.0      03-30 20:04
+KXBRENTD-26MAR3117-T105.00                         buy_no   0.0003   0.4996   23.90        hard_stop             0.0      03-31 13:22
+KXBRENTD-26MAR3117-T105.00                         buy_no   0.0019   0.5004   25.03        hard_stop             0.0      03-31 13:59
+KXBRENTD-26MAR3117-T105.00                         buy_no   0.0021   0.5003   26.26        hard_stop             0.0      03-31 14:35
+
+---
+
+## 4. OPEN POSITIONS
+
+No open positions. (ghost_positions.json: empty as of 2026-03-31T18:35:08 UTC)
+
+---
+
+## 5. SIGNAL FUNNEL
+
+Scanned → GT evaluated → actionable → executed (approximate per cycle):
+  Kalshi candidates:             ~1,556/cycle  (last observed: 1,556)
+  Polymarket candidates:           ~177/cycle  (last observed: 177)
+  Total candidates:              ~1,733/cycle
+  Financial bracket supplement:       +175/cycle (max observed: 175 additional)
+  Sports supplement:                  +42/cycle
+  GT evaluated:                   979-985/cycle
+  [SIGNAL] ACTIONABLE:            3,013  total across all cycles
+  [SIGNAL] BLOCKED:               2,172  total across all cycles
+  Perm-skipped (no_source lines):   565  unique occurrences
+
+Block reason breakdown (BLOCKED lines):
+  gap_too_small:                  2,172  (100% of BLOCKED — all blocks are gap failures)
+  no_source (all log lines):        565
+  no_prob (all log lines):          284
+  perm_skip (permanent skip lines): 554
+  illiquid_series: Not separately logged in BLOCKED lines
+  deep_otm:        Not separately logged in BLOCKED lines
+  confidence_below_threshold: 0 in BLOCKED lines (gate happens post-gap)
+  ev_negative: 0 in BLOCKED lines
+
+Note: no_source/no_prob/perm_skip counts come from non-[SIGNAL] log lines (executor loop).
+All 2,172 BLOCKED lines cite gap_too_small exclusively; other block reasons fire before
+gap evaluation and don't emit [SIGNAL] BLOCKED tags.
+
+---
+
+## 6. GT COVERAGE
+
+GT sources were not parseable from [SIGNAL] ACTIONABLE lines (format omits source= tag).
+Source attribution derived from trade records and log context:
+
+  | Source                        | Evidence                                        |
+  |-------------------------------|------------------------------------------------|
+  | Yahoo Finance/CL=F            | Brent crude trades (majority of entries)        |
+  | Yahoo Finance/GC=F            | Gold trades (KXGOLDD series)                    |
+  | Yahoo Finance/NQ=F            | Nasdaq signals (log: [SIMULATED PRO] NQ=F x123) |
+  | Yahoo Finance/ES=F            | S&P 500 signals                                 |
+  | Yahoo Finance/SI=F            | Silver signals (Yahoo fails observed)           |
+  | Yahoo Finance/^TNX            | Treasury signals                                |
+  | SportsLiveSource/Shock        | 3 game_final trades (TOR, UCLA, SCAR)           |
+  | SportsDataSource              | Pre-game markets (~4,040 routing log lines)     |
+  | FRED                          | KXAAAGASW-26MAR30 trade (resolution exit)       |
+
+GT coverage per cycle: 979–985 markets evaluated (from ground truth progress lines).
+no_source log hits: 565 total (markets with no routable GT source).
+no_prob log hits: 284 total (source found but returned no probability).
+Perm no-source skips active: 554 (graduated permanent skips across session).
+
+---
+
+## 7. ERRORS
+
+ESPN errors: 683 total
+  nfl (400 Bad Request — off-season):  283
+  nfl (ProxyError — proxy down):       100
+  nba (ProxyError):                    100
+  ncaab (ProxyError):                  100
+  ncaaw (ProxyError):                  100
+
+  Note: ProxyError pattern "127.0.0.1:9 refused connection" indicates a local proxy
+  (likely VPN or SOCKS proxy) was configured but unavailable during 09:10–09:13 ET on
+  Mar 30. Bot recovered automatically once proxy came back.
+
+Kalshi 429 rate limits (per-endpoint, top 4):
+  KXGOLDD-* series:         216
+  KXBRENTD-* series:        142
+  KXSILVERD-26MAR3117-*:    110
+  KXNASDAQ100U-26MAR31H1600: 95
+
+Kalshi get_market timeouts/failures: 281
+  "Kalshi get_market failed for KXNASDAQ100U-26MAR31H1300-TN: HTTPSConnectionPool..."
+
+Yahoo Finance fetch failures (proxy-era, all resolve after retry):
+  CL=F:   ~486 (attempt 1+2 combined)
+  NQ=F:   ~400
+  GC=F:   ~394
+  SI=F:   ~395
+  ES=F:   ~200
+  ^TNX:   ~201
+
+Simulated PRO source (NQ=F using Twelve Data stub): 123 occurrences
+  "[SIMULATED PRO] NQ=F → N confidence=N (would require Twelve Data in production)"
+
+Polymarket HTTP 404 (empty order books): 170
+Polymarket get_markets failed (ProxyError period): 162
+
+WARNING lines total: 3,328
+Unhandled exceptions (Traceback blocks): ~99 traceback block lines observed, 2 unique types:
+  1. bot.py:244 run_once crash — executor raised exception in main loop
+     "File ...bot.py, line 244, in run_once"
+  2. cp1252 encoding error in _print_summary (Windows console stdout):
+     "File ...cp1252.py, line 19, in encode" — console output failure, bot continues
+
+---
+
+## 8. ANOMALIES
+
+### ANOMALY 1 — gt_prob at exactly 0.0 or 1.0 (should be clamped to 0.02/0.98)
+Multiple trade entries show gt_prob=0.0 or gt_prob=1.0 in ghost_trades.jsonl:
+  - gt_prob=0.0: All KXBRENTD buy_no entries (e.g., gt_prob=0.0, gap=0.5032 — crude oil
+    far below strike, correct direction, but clamping not applied)
+  - gt_prob=1.0: KXGOLDW-26MAR1317-T4739.99, some KXNCAAWBGAME entries
+  These values should be 0.02/0.98 per the bot's design. The gap calculation is using
+  unclamped GT probabilities, inflating gap values slightly.
+
+### ANOMALY 2 — hard_stop exits with hold_duration_minutes=0.0 (69 occurrences)
+Every hard_stop exit in this window shows hold=0.0 minutes. Pattern:
+  - Bot enters position (entry_price=0.005–0.009 for deep OTM NO contracts)
+  - Same cycle or next cycle: hard_stop fires with exit_price≈0.50
+  Root cause: The scanner's cached mid_price for recently-resolved Brent/Gold markets
+  remains ≈0.50 (stale). Position enters at live price 0.005, but the hard_stop
+  compares against cached mid_price 0.50 — triggering an instant stop at >10x the
+  entry price. The pre-GT price refresh (28,328 total) is NOT preventing this because
+  these markets' orderbooks are empty/stale post-resolution.
+
+### ANOMALY 3 — Same market entered >3 times per session
+Markets with repeated entries (runaway re-entry loop):
+  - KXGOLDD-26MAR3117-T4460:       13 entries, all hard_stop at 0.0min
+  - KXBRENTD-26MAR3017-T105.50:    20 entries (03-30 10:41 to 14:32), all hard_stop
+  - KXBRENTD-26MAR3117-T110:       20 entries (03-30 18:53 to 20:04), all hard_stop
+  - KXBRENTD-26MAR3117-T105.00:     3 entries (03-31 13:22 to 14:35), all hard_stop
+  The hard_stop triggers instantly, but the position is not added to a cooldown/exclusion
+  list, so the next cycle re-enters the same market indefinitely. The series exposure cap
+  (50% ghost) does not prevent this because each exit removes the position before the
+  next entry.
+
+### ANOMALY 4 — Grossly inflated PnL on deep-OTM game_final exits
+  - KXNBAGAME-26MAR29ORLTOR-TOR:    pnl=$47,416.79  (entry=$0.0099, size=$474.12)
+  - KXNCAAWBGAME-26MAR29DUKEUCLA:   pnl=$5,241.53   (entry=$0.0099, size=$52)
+  - KXNCAAWBGAME-26MAR28OKLASCAR:   pnl=$4,945.50   (no entry record in window)
+  The PnL formula computes: (size_usd / entry_price) * (1.0 - entry_price), which gives
+  ~100x leverage for 1% entry prices. A $474 bet at 0.99¢ generates 47,879 contracts;
+  settlement at 1.0 yields $47,416. This is mathematically correct for the contract model
+  but represents an unrealistic ghost position: buying 47,879 Kalshi contracts at $0.0099
+  would cost $474 in reality but would require a counterparty willing to sell 47k contracts.
+  Bankroll ($575.19) reflects these inflated ghost wins.
+
+### ANOMALY 5 — KXBRENTD early_exit P&L appears inverted in sign
+  KXBRENTD-26MAR3017-T105: buy_no at $0.5032, exit_price=$0.0064, pnl=+$553 to +$6467
+  This is NOT inverted — NO was correct (Brent far below $105). Exit at YES=0.64¢ means
+  NO≈99.4¢, representing a win. However the early_exit at prices $553–$6467 is
+  anomalous because these sizes ($553–$6467 per entry) are Kelly-compounded off
+  the inflated ghost bankroll. The real Kelly max would be ~$25–50 at a $500 bankroll.
+
+### ANOMALY 6 — KXBRENTD-26MAR3017-T108 inverted hard_stop (genuine loss)
+  buy_no at $0.5035, exit_price=$0.9998, pnl=-$5,505.11
+  Brent crude above $108 = market moved against NO position. Correct loss direction,
+  but size ($5,507 notional) is anomalously large (same Kelly runaway issue as above).
+
+### ANOMALY 7 — Cycle times >120s
+  Max cycle duration: 739s (2026-03-31 10:39 ET). 168s average exceeds the 120s flag
+  threshold. Given 979–985 markets evaluated with per-market API calls, this is expected
+  but worth monitoring. No single cycle caused a crash.

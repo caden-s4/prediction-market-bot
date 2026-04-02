@@ -24,9 +24,17 @@ env/
 data/state.json
 data/recordings/
 data/*.db
+data/exclusions.json
 *.db
 *.sqlite
 *.sqlite3
+
+# ── Ghost trading state (financial data, not for version control) ─────────────
+ghost_positions.json
+ghost_state.json
+ghost_trades.jsonl
+dispatched_finals.json
+.tier_sticky.json
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
@@ -38,3 +46,11 @@ logs/
 .vscode/
 *.swp
 *.swo
+
+# ── Claude Code / Codex local config (may contain API keys or personal settings)
+.claude/settings.local.json
+.codex/
+.tracecov/
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+*.docx

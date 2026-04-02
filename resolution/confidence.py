@@ -62,7 +62,7 @@ from resolution.gap_detector import GapSignal
 
 logger = logging.getLogger(__name__)
 
-CONFIDENCE_THRESHOLD = 0.80   # both dimensions must meet this
+CONFIDENCE_THRESHOLD = 0.80   # default; overridable via MIN_CONFIDENCE_THRESHOLD env var
 MARGINAL_THRESHOLD   = 0.85   # below this on both axes → requires_depth_check
 
 # ── Category / tag clarity lookup ─────────────────────────────────────────────
@@ -175,6 +175,9 @@ class ConfidenceScorer:
     and resolution clarity. Returns a ConfidenceScore.
     """
 
+    def __init__(self, threshold: float = CONFIDENCE_THRESHOLD) -> None:
+        self._threshold = threshold
+
     def score(
         self,
         market: Market,
@@ -247,8 +250,8 @@ class ConfidenceScorer:
 
         # ── 4. Gate ────────────────────────────────────────────────────────
         passes = (
-            source_conf >= CONFIDENCE_THRESHOLD
-            and resolution_clarity >= CONFIDENCE_THRESHOLD
+            source_conf >= self._threshold
+            and resolution_clarity >= self._threshold
         )
 
         # ── 5. Combined floor check ────────────────────────────────────────
@@ -264,13 +267,13 @@ class ConfidenceScorer:
         skip_reason: Optional[str] = None
         if not passes:
             parts = []
-            if source_conf < CONFIDENCE_THRESHOLD:
+            if source_conf < self._threshold:
                 parts.append(
-                    f"source_confidence={source_conf:.2f} < {CONFIDENCE_THRESHOLD}"
+                    f"source_confidence={source_conf:.2f} < {self._threshold}"
                 )
-            if resolution_clarity < CONFIDENCE_THRESHOLD:
+            if resolution_clarity < self._threshold:
                 parts.append(
-                    f"resolution_clarity={resolution_clarity:.2f} < {CONFIDENCE_THRESHOLD}"
+                    f"resolution_clarity={resolution_clarity:.2f} < {self._threshold}"
                 )
             if has_hard_dispute:
                 parts.append("hard oracle dispute keyword detected")

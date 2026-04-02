@@ -153,6 +153,7 @@ class EIADataSource(DataSource):
                     "length":               "5",
                 },
                 timeout=_TIMEOUT,
+                proxies={},
             )
             resp.raise_for_status()
             data = resp.json()

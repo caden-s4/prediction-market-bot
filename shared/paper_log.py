@@ -233,6 +233,7 @@ class PaperTradeLog:
         # Compute per-exit stats.
         wins = 0
         losses = 0
+        drawdowns = 0
         total_pnl = 0.0
         pnl_list: List[float] = []
         gap_list:  List[float] = []
@@ -253,6 +254,8 @@ class PaperTradeLog:
 
             if pnl > 0:
                 wins += 1
+            elif pnl == 0:
+                drawdowns += 1
             else:
                 losses += 1
 
@@ -280,7 +283,7 @@ class PaperTradeLog:
         n_exits = len(exits)
         win_rate = wins / n_exits if n_exits > 0 else 0.0
 
-        # Open positions = entries this day with no matching exit.
+        # Open positions = entries this day with no matching exit (unfilled orders).
         exited_mids = {ex.get("market_id") for ex in exits}
         open_today  = sum(1 for e in entries if e["market_id"] not in exited_mids)
 
@@ -289,9 +292,11 @@ class PaperTradeLog:
             "total_entries":      len(entries),
             "exits":              n_exits,
             "open_positions":     open_today,
+            "unfilled_orders":    open_today,
             "cap_blocked":        len(cap_blocked),
             "wins":               wins,
             "losses":             losses,
+            "drawdowns":          drawdowns,
             "win_rate":           round(win_rate, 3),
             "total_pnl":          round(total_pnl, 4),
             "avg_pnl_per_trade":  round(total_pnl / n_exits, 4) if n_exits > 0 else 0.0,

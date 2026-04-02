@@ -50,7 +50,7 @@ _LATE_GAME_PROB_THRESHOLD = 0.85
 # Categories and tags that identify sports markets
 _SPORTS_CATEGORIES = {"sports", "sport"}
 _SPORTS_TAGS = {
-    "sports", "nfl", "nba", "ncaab", "ncaa", "basketball", "football",
+    "sports", "nfl", "nba", "ncaab", "ncaaw", "ncaa", "basketball", "football",
     "baseball", "hockey", "mls", "soccer",
 }
 
@@ -88,7 +88,7 @@ class SportsLiveSource(DataSource):
         # Kalshi sports ticker prefixes
         mid = market.market_id.upper()
         return any(mid.startswith(p) for p in (
-            "KXNBA", "KXNFL", "KXNCAAMBGAME",
+            "KXNBA", "KXNFL", "KXNCAAMBGAME", "KXNCAAWBGAME",
         ))
 
     def fetch(self, market: Market) -> Optional[GroundTruthResult]:
@@ -195,6 +195,8 @@ class SportsLiveSource(DataSource):
             return "nfl"
         if "nba" in text or "basketball" in text:
             return "nba"
+        if "ncaaw" in text or "kxncaawbgame" in text or "women" in text:
+            return "ncaaw"
         if "ncaab" in text or "college basketball" in text or "ncaa basketball" in text or "kxncaambgame" in text:
             return "ncaab"
         return None
@@ -205,9 +207,6 @@ class SportsLiveSource(DataSource):
         away_canonical = match["away_team"].lower()
 
         snapshots = list(get_active_snapshots())
-        if snapshots:
-            logger.info(f"[DEBUG] _find_game_snapshot: searching for home={home_canonical} away={away_canonical}, first snapshot: home={snapshots[0].home_team} away={snapshots[0].away_team} sport={snapshots[0].sport}")
-
         best = None
         best_score = 0
         for snap in snapshots:
@@ -232,7 +231,7 @@ class SportsLiveSource(DataSource):
                 best_score = score
                 best = snap
 
-        if best and best_score >= 2:
+        if best and best_score >= 4:
             return best
         return None
 
@@ -241,11 +240,16 @@ class SportsLiveSource(DataSource):
         Convert home-team probability to market-facing YES probability.
 
         The market may be asking about the home OR away team winning.
+
+        IMPORTANT: match["home_team"] is set by match_market() which always
+        assigns the YES team as home_team — it does not know the real home/away
+        ordering.  We must compare market_team against the ESPN snapshot's
+        actual home_team, not the matcher's guess.
         """
         market_team = match["market_team"].lower()
-        snap_home = snapshot.home_team.lower()
+        snap_home = snapshot.home_team.lower()  # real home team from ESPN
 
-        # Is the market asking about the home team?
+        # Is the market asking about the actual ESPN home team?
         market_is_home = (
             market_team in snap_home
             or snap_home in market_team

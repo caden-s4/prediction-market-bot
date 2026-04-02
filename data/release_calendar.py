@@ -270,6 +270,7 @@ class FREDReleaseCalendar:
                         "realtime_end": "9999-12-31",
                     },
                     timeout=_TIMEOUT,
+                    proxies={},
                 )
                 resp.raise_for_status()
                 release_dates = resp.json().get("release_dates", [])
@@ -528,6 +529,7 @@ class FREDReleaseCalendar:
                     "limit": 1,
                 },
                 timeout=_TIMEOUT,
+                proxies={},
             )
             resp.raise_for_status()
             observations = resp.json().get("observations", [])

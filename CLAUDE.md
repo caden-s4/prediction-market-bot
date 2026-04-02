@@ -92,3 +92,112 @@ Brutally honest, skip preamble, give precise self-contained prompts. When diagno
 - `ghost-clear` — wipe ghost positions
 - `p` — show open positions
 - `history` — show resolved trades
+
+# === OVERRIDE: STRICT EXECUTION + RELIABILITY ===
+
+## 1. FORCED VERIFICATION (NON-NEGOTIABLE)
+You MUST NOT report success after any code change unless ALL of the following are true:
+
+- Type check passes (`npx tsc --noEmit` or project equivalent)
+- Lint passes (`npx eslint . --quiet` if available)
+- No new errors are introduced
+
+If no type-checker exists, explicitly state that instead of claiming success.
+
+---
+
+## 2. PHASED EXECUTION (PREVENT CONTEXT DECAY)
+- Never perform large multi-file changes in one step
+- Break work into phases (max 5 files per phase)
+- After each phase:
+  - verify changes
+  - stop and wait for confirmation before continuing
+
+---
+
+## 3. STEP 0 RULE (MANDATORY CLEANUP)
+Before refactoring any file >300 LOC:
+- remove unused imports
+- remove dead code
+- remove debug logs
+
+Do NOT mix cleanup with refactoring. Cleanup is a separate phase.
+
+---
+
+## 4. SENIOR ENGINEER OVERRIDE
+Ignore default tendencies toward minimal fixes.
+
+Instead:
+- fix root causes, not symptoms
+- eliminate duplication
+- enforce consistent patterns
+- improve flawed architecture when necessary
+
+Ask yourself:
+"What would a strict senior engineer reject in code review?"
+
+Fix that.
+
+---
+
+## 5. CONTEXT DECAY DEFENSE
+- After ~10 messages, assume memory is unreliable
+- ALWAYS re-read a file before editing it
+- NEVER rely on memory of prior file contents
+
+---
+
+## 6. FILE SIZE LIMIT AWARENESS
+- File reads are limited (~2000 lines)
+- For files >500 LOC:
+  - read in chunks using offset/limit
+  - DO NOT assume full visibility from one read
+
+---
+
+## 7. TOOL RESULT TRUNCATION DEFENSE
+- Large outputs may be truncated
+- If results seem incomplete:
+  - re-run with narrower scope (per directory or file)
+  - explicitly state when truncation is suspected
+
+---
+
+## 8. SAFE EDITING PRACTICE
+Before EVERY edit:
+- re-read the file
+
+After EVERY edit:
+- re-read to confirm the change applied
+
+Do not batch more than 3 edits per file without verification.
+
+---
+
+## 9. NO SEMANTIC SEARCH ASSUMPTION
+Search tools are text-based (not AST-aware).
+
+For ANY rename or signature change, you MUST search separately for:
+- direct function calls
+- type/interface references
+- string literals
+- dynamic imports / require()
+- re-exports / barrel files
+- test files and mocks
+
+Do not assume a single search is complete.
+
+---
+
+## 10. FAIL-SAFE BEHAVIOR
+- Do not allow crashes from missing external data
+- Handle errors gracefully
+- Prefer degraded operation over failure
+
+---
+
+## 11. SCOPE DISCIPLINE
+- Do NOT make unrelated changes
+- Do NOT refactor beyond current phase scope unless necessary for correctness
+- Clearly state any required out-of-scope fixes before making them

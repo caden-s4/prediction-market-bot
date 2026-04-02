@@ -226,6 +226,7 @@ class RottenTomatoesSource(DataSource):
                 params={"q": title, "page_limit": 5, "page": 1},
                 headers=_RT_HEADERS,
                 timeout=_TIMEOUT,
+                proxies={},
             )
             resp.raise_for_status()
             data = resp.json()

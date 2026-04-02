@@ -36,11 +36,12 @@ _ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 _FETCH_TTL = 15       # seconds between real ESPN requests
 _REQUEST_TIMEOUT = 3  # seconds — hard cap per HTTP call
 
-# ESPN sport paths for the three supported leagues
+# ESPN sport paths for the supported leagues
 SPORT_PATHS: Dict[str, str] = {
     "nba":   "basketball/nba",
     "nfl":   "americanfootball/nfl",
     "ncaab": "basketball/mens-college-basketball",
+    "ncaaw": "basketball/womens-college-basketball",
 }
 
 
@@ -166,7 +167,7 @@ def _fetch_sport(sport: str) -> List[dict]:
 
     url = f"{_ESPN_BASE}/{path}/scoreboard"
     try:
-        resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
+        resp = requests.get(url, timeout=_REQUEST_TIMEOUT, proxies={})
         resp.raise_for_status()
         events = resp.json().get("events", [])
         elapsed_ms = (time.monotonic() - t0) * 1000

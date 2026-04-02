@@ -51,7 +51,7 @@ class GFSClient(BaseWeatherClient):
             "timezone": "UTC",
         }
 
-        resp = requests.get(self._BASE_URL, params=params, timeout=15)
+        resp = requests.get(self._BASE_URL, params=params, timeout=15, proxies={})
         resp.raise_for_status()
         data = resp.json()
 

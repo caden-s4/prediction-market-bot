@@ -37,7 +37,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -108,6 +108,7 @@ class BacktestRunner:
         max_hold_minutes: float = 60.0,     # max minutes before flat exit
         fee_polymarket: float = 0.02,
         fee_kalshi: float = 0.07,
+        arb_pair_ids: Optional[List[Tuple[str, str]]] = None,
     ) -> None:
         self._engine = signal_engine
         self._risk = risk_manager
@@ -115,6 +116,9 @@ class BacktestRunner:
         self._hold_to_resolution = hold_to_resolution
         self._max_hold_minutes = max_hold_minutes
         self._fees = {"polymarket": fee_polymarket, "kalshi": fee_kalshi}
+        # List of (poly_market_id, kalshi_market_id) pairs known from market
+        # discovery; both sides must appear in the recordings to fire arb signals.
+        self._arb_pair_ids: List[Tuple[str, str]] = arb_pair_ids or []
 
     # ── Main entry point ───────────────────────────────────────────────────────
 
@@ -130,10 +134,16 @@ class BacktestRunner:
             logger.warning("BacktestRunner: no recording files provided")
             return BacktestReport(stats={"n_trades": 0})
 
+        # Clear any live-session registrations so replay books start fresh.
+        self._engine.clear_registrations()
+
         # Reconstruct in-memory books for replay
         replay_books: dict[str, LiveOrderBook] = {}
         trades: list[dict] = []
         open_positions: dict[str, dict] = {}   # market_id → entry info
+
+        # Track which arb pairs have already been registered to avoid duplicates.
+        _registered_arb_pairs: set[tuple[str, str]] = set()
 
         all_records = self._load_records(recording_files)
         logger.info("BacktestRunner: replaying %d book snapshots", len(all_records))
@@ -147,7 +157,27 @@ class BacktestRunner:
 
             key = f"{platform}:{market_id}"
             if key not in replay_books:
-                replay_books[key] = LiveOrderBook(market_id, platform)
+                book = LiveOrderBook(market_id, platform)
+                replay_books[key] = book
+                # Connect the new book so single-book detectors (e.g. imbalance)
+                # evaluate it on every subsequent call to evaluate_all().
+                self._engine.register_book(book)
+                # Check whether this new book completes a cross-exchange arb pair
+                # and register the pair as soon as both sides are available.
+                for poly_mid, kalshi_mid in self._arb_pair_ids:
+                    pair_key = (poly_mid, kalshi_mid)
+                    if pair_key in _registered_arb_pairs:
+                        continue
+                    poly_replay_key = f"polymarket:{poly_mid}"
+                    kalshi_replay_key = f"kalshi:{kalshi_mid}"
+                    if poly_replay_key in replay_books and kalshi_replay_key in replay_books:
+                        self._engine.register_arb_pair(
+                            poly_book=replay_books[poly_replay_key],
+                            kalshi_book=replay_books[kalshi_replay_key],
+                            poly_market_id=poly_mid,
+                            kalshi_market_id=kalshi_mid,
+                        )
+                        _registered_arb_pairs.add(pair_key)
 
             book = replay_books[key]
             book.apply_snapshot(
@@ -173,7 +203,7 @@ class BacktestRunner:
                     if held_minutes >= self._max_hold_minutes:
                         exit_price = _simulated_fill_price(sig_book, sig.direction)
                         pnl = self._compute_pnl(pos, exit_price, sig.platform)
-                        bankroll += pnl
+                        bankroll += pos["size_usd"] + pnl  # return principal + net profit
                         pos["exit_price"] = exit_price
                         pos["exit_ts"] = ts_str
                         pos["pnl_usd"] = pnl
@@ -215,12 +245,13 @@ class BacktestRunner:
             else:
                 exit_price = pos["entry_price"]
             pnl = self._compute_pnl(pos, exit_price, pos["platform"])
-            bankroll += pnl
+            bankroll += pos["size_usd"] + pnl  # return principal + net profit
             pos["exit_price"] = exit_price
             pos["exit_ts"] = "end_of_replay"
             pos["pnl_usd"] = pnl
             pos["hold_minutes"] = None
             trades.append(pos.copy())
+            self._risk.record_close(market_id, pnl)
 
         return self._build_report(trades, self._initial_bankroll, bankroll)
 

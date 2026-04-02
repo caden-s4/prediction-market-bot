@@ -13,8 +13,10 @@ Shared infrastructure:
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -33,6 +35,9 @@ from shared.fee_cache import FeeCache
 from utils.storage import StateStore
 
 logger = logging.getLogger(__name__)
+
+_GHOST_STATE_FILE = "ghost_state.json"
+_GHOST_DEFAULT_BANKROLL = 500.0
 
 
 class BotCoordinator:
@@ -122,6 +127,17 @@ class BotCoordinator:
             max_daily_loss_usd=config.monitoring.max_daily_loss_usd,
         )
 
+        # ── Ghost mode: restore persisted virtual bankroll ────────────────
+        # In dry-run mode the live account balance is irrelevant — always
+        # restore from ghost_state.json so P&L compounds across restarts.
+        # If no file exists (first run or after ghost-reset) use the
+        # configured default ($500).
+        if bc.dry_run:
+            persisted_br = self._load_ghost_state()
+            ghost_start = persisted_br if persisted_br is not None else _GHOST_DEFAULT_BANKROLL
+            self._bankroll.set_total(ghost_start)
+            starting_bankroll = ghost_start   # keep sanity-check logic consistent
+
         # ── Startup sanity checks ─────────────────────────────────────────
         _MIN_VIABLE_BANKROLL = 50.0
         _RECOMMENDED_BANKROLL = 200.0
@@ -166,7 +182,12 @@ class BotCoordinator:
 
         # ── Monitoring ────────────────────────────────────────────────────
         self._event_db = EventDB()
-        self._alerts = AlertManager(config.monitoring)
+        self._alerts = AlertManager(
+            telegram_token=config.monitoring.telegram_token,
+            telegram_chat_id=config.monitoring.telegram_chat_id,
+            discord_webhook_url=config.monitoring.discord_webhook_url,
+            daily_drawdown_pct=config.monitoring.daily_drawdown_alert_pct,
+        )
 
         # ── FRED release calendar ─────────────────────────────────────────
         # Track upcoming BLS/BEA data releases and manage pre/hold/hunt windows.
@@ -193,6 +214,7 @@ class BotCoordinator:
             dynamic_exit_enabled=bc.dynamic_exit_enabled,
             calendar=self._calendar,
             force_test=force_test,
+            min_confidence=bc.min_confidence_threshold,
         )
 
         self._cycle_count: int = 0
@@ -267,9 +289,8 @@ class BotCoordinator:
         """
         Override the trading bankroll with a virtual amount.
 
-        Only valid in dry-run mode — useful for simulating realistic
-        signal flow when the real account balance is below the $1 trade floor.
-        Persists for the session but does not write to .env or state on disk.
+        Only valid in dry-run mode.  Persists to ghost_state.json so the
+        value survives restarts.
         """
         if not self._cfg.bot.dry_run:
             raise RuntimeError(
@@ -280,10 +301,31 @@ class BotCoordinator:
             raise ValueError(f"Virtual bankroll must be positive, got {amount_usd}")
         self._bankroll.set_total(amount_usd)
         self._platform_balances["virtual_usd"] = amount_usd
+        self._save_ghost_state()
         logger.info(
-            "BotCoordinator: virtual bankroll set to $%.2f (dry-run session only)",
-            amount_usd,
+            "BotCoordinator: virtual bankroll set to $%.2f (persisted to %s)",
+            amount_usd, _GHOST_STATE_FILE,
         )
+
+    def ghost_reset(self) -> int:
+        """
+        Full ghost-mode reset: clear all simulated positions and reset the
+        virtual bankroll to the configured default ($500).
+
+        Returns the number of positions cleared.  Writes a fresh
+        ghost_state.json so the reset survives the next restart.
+        """
+        if not self._cfg.bot.dry_run:
+            raise RuntimeError("ghost_reset() is only available in dry-run mode.")
+        n = self._resolution.ghost_clear_positions()
+        default = _GHOST_DEFAULT_BANKROLL
+        self._bankroll.reset_virtual(default)
+        self._save_ghost_state()
+        logger.info(
+            "Ghost mode: reset complete — bankroll=$%.2f, %d position(s) cleared",
+            default, n,
+        )
+        return n
 
     # ── Internal ──────────────────────────────────────────────────────────────
 
@@ -331,6 +373,7 @@ class BotCoordinator:
             resp = requests.get(
                 "http://worldtimeapi.org/api/timezone/Etc/UTC",
                 timeout=5,
+                proxies={},
             )
             resp.raise_for_status()
             server_dt_str = resp.json().get("datetime", "")
@@ -358,8 +401,46 @@ class BotCoordinator:
 
     def _persist_state(self) -> None:
         summary = self._bankroll.summary()
-        self._state.set("bankroll", summary["total_usd"])
-        self._state.set("bankroll_summary", summary)
-        if self._platform_balances:
-            self._state.set("platform_balances", self._platform_balances)
+        if self._cfg.bot.dry_run:
+            self._save_ghost_state()
+        else:
+            self._state.set("bankroll", summary["total_usd"])
+            self._state.set("bankroll_summary", summary)
+            if self._platform_balances:
+                self._state.set("platform_balances", self._platform_balances)
         logger.debug("BotCoordinator: state persisted %s", summary)
+
+    def _save_ghost_state(self) -> None:
+        """Write current virtual bankroll to ghost_state.json."""
+        try:
+            summary = self._bankroll.summary()
+            payload = {
+                "saved_at": datetime.now(timezone.utc).isoformat(),
+                "total_usd": summary["total_usd"],
+                "realized_pnl_usd": summary["realized_pnl_usd"],
+            }
+            Path(_GHOST_STATE_FILE).write_text(
+                json.dumps(payload, indent=2), encoding="utf-8"
+            )
+        except Exception as exc:
+            logger.warning("BotCoordinator: failed to save %s: %s", _GHOST_STATE_FILE, exc)
+
+    def _load_ghost_state(self) -> Optional[float]:
+        """Load virtual bankroll from ghost_state.json. Returns total_usd or None."""
+        path = Path(_GHOST_STATE_FILE)
+        if not path.exists():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            total = float(data["total_usd"])
+            logger.info(
+                "Ghost mode: restored bankroll $%.2f from %s (saved_at=%s)",
+                total, _GHOST_STATE_FILE, data.get("saved_at", "?"),
+            )
+            return total
+        except Exception as exc:
+            logger.warning(
+                "BotCoordinator: failed to load %s (starting fresh): %s",
+                _GHOST_STATE_FILE, exc,
+            )
+            return None

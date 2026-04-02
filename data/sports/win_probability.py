@@ -240,6 +240,6 @@ def compute_win_probability(sport: str, state: object) -> float:
         return nfl_win_probability(state)  # type: ignore[arg-type]
     if sport == "nba":
         return nba_win_probability(state)  # type: ignore[arg-type]
-    if sport == "ncaab":
+    if sport in ("ncaab", "ncaaw"):
         return ncaab_win_probability(state)  # type: ignore[arg-type]
     raise ValueError(f"Unknown sport: {sport!r}")

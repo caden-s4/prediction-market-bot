@@ -49,17 +49,23 @@ because it happens off-thread.
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import logging
 import queue
 import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from .live_game_monitor import CompletedGame, get_newly_confirmed_finals
 
 logger = logging.getLogger(__name__)
+
+# Persistence file for the dispatched set — survives restarts
+_DISPATCHED_FILE = "dispatched_finals.json"
 
 # Gap threshold — do not fire if market is already within 3¢ of resolution
 _RESOLUTION_THRESHOLD = 0.03
@@ -74,6 +80,12 @@ _thread_pool = concurrent.futures.ThreadPoolExecutor(
 
 # Thread-safe queue of ready signals
 _signal_queue: queue.Queue = queue.Queue()
+
+# Thread-safe queue of (market_id, correct_prob) for ghost position exits.
+# Populated synchronously in check_for_resolution_lags() whenever a confirmed
+# final is matched to a Kalshi market — before the background thread fires.
+# Drained each cycle by the executor via drain_ghost_exits().
+_ghost_exit_queue: queue.Queue = queue.Queue()
 
 # Set of game_ids we've already dispatched to avoid duplicates
 _dispatched: set = set()
@@ -109,6 +121,47 @@ class ResolutionSignal:
     timestamp: float = field(default_factory=time.time)
 
 
+# ── Dispatched-set persistence ────────────────────────────────────────────────
+
+def _load_dispatched() -> None:
+    """Load previously dispatched game IDs from disk into _dispatched."""
+    path = Path(_DISPATCHED_FILE)
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        ids: list = data.get("dispatched", [])
+        with _dispatched_lock:
+            _dispatched.update(ids)
+        logger.info(
+            "ResolutionDetector: loaded %d previously dispatched game ID(s) from %s",
+            len(ids), _DISPATCHED_FILE,
+        )
+    except Exception as exc:
+        logger.warning(
+            "ResolutionDetector: failed to load %s (starting fresh): %s",
+            _DISPATCHED_FILE, exc,
+        )
+
+
+def _save_dispatched() -> None:
+    """Persist the current dispatched set to disk."""
+    try:
+        with _dispatched_lock:
+            ids = list(_dispatched)
+        payload = {
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "dispatched": ids,
+        }
+        Path(_DISPATCHED_FILE).write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
+    except Exception as exc:
+        logger.warning(
+            "ResolutionDetector: failed to save %s: %s", _DISPATCHED_FILE, exc
+        )
+
+
 # ── Initialization ────────────────────────────────────────────────────────────
 
 def initialize(
@@ -134,6 +187,7 @@ def initialize(
     global _market_id_resolver, _market_price_fetcher
     _market_id_resolver = market_id_resolver
     _market_price_fetcher = market_price_fetcher
+    _load_dispatched()
     logger.info("ResolutionDetector: initialized")
 
 
@@ -168,6 +222,8 @@ def check_for_resolution_lags() -> List[ResolutionSignal]:
                 if completed.game_id in _dispatched:
                     continue
                 _dispatched.add(completed.game_id)
+            # Persist outside the lock so file I/O doesn't block other threads.
+            _save_dispatched()
 
             market_id = _market_id_resolver(
                 completed.home_team, completed.away_team, completed.sport
@@ -185,6 +241,16 @@ def check_for_resolution_lags() -> List[ResolutionSignal]:
                 completed.sport.upper(), completed.home_team, completed.away_team,
                 completed.winner, market_id,
             )
+            # Push immediately (on main thread) so the executor can exit any open
+            # ghost positions this same cycle — before the background price check.
+            _correct_prob = 1.0 if completed.winner == "home" else 0.0
+            logger.info(
+                "ResolutionDetector: queuing ghost exit for %s — home_score=%d away_score=%d "
+                "winner=%s settlement_value=%.1f (YES=home)",
+                market_id, completed.home_score, completed.away_score, completed.winner, _correct_prob,
+            )
+            _ghost_exit_queue.put((market_id, _correct_prob))
+
             _thread_pool.submit(
                 _background_lag_check,
                 completed,
@@ -199,6 +265,23 @@ def check_for_resolution_lags() -> List[ResolutionSignal]:
     elapsed = (time.monotonic() - t0) * 1000
     _cycle_elapsed_ms += elapsed
     return ready
+
+
+def drain_ghost_exits() -> List[tuple]:
+    """
+    Return and drain all pending (market_id, correct_prob) ghost exit entries.
+
+    Call once per cycle, immediately after check_for_resolution_lags().
+    Each entry represents a game that just went CONFIRMED FINAL; the executor
+    should close any open ghost positions on that market at correct_prob.
+    """
+    exits = []
+    try:
+        while True:
+            exits.append(_ghost_exit_queue.get_nowait())
+    except queue.Empty:
+        pass
+    return exits
 
 
 # ── Background thread ─────────────────────────────────────────────────────────
@@ -335,9 +418,15 @@ def reset_session() -> None:
     global _cycle_elapsed_ms
     with _dispatched_lock:
         _dispatched.clear()
+    _save_dispatched()
     try:
         while True:
             _signal_queue.get_nowait()
+    except queue.Empty:
+        pass
+    try:
+        while True:
+            _ghost_exit_queue.get_nowait()
     except queue.Empty:
         pass
     with _histogram_lock:

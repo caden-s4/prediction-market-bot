@@ -87,6 +87,24 @@ class Bankroll:
             self._total_usd = amount_usd
         logger.info("Bankroll: total overridden to $%.2f", amount_usd)
 
+    def reset_virtual(self, amount_usd: float) -> None:
+        """
+        Full blank-slate reset — wipes all reservations, P&L, and exposure
+        tracking, then sets the total to amount_usd.
+
+        Only for ghost/dry-run resets.  Live mode should never call this.
+        """
+        with self._lock:
+            self._total_usd = amount_usd
+            self._reserved_usd = 0.0
+            self._reservations.clear()
+            self._realized_pnl_usd = 0.0
+            self._daily_pnl_usd = 0.0
+            self._day_start = time.time()
+            self._game_exposure.clear()
+            self._sport_exposure.clear()
+        logger.info("Bankroll: reset to $%.2f (blank slate)", amount_usd)
+
     def is_halted(self) -> bool:
         """True if the daily loss limit has been breached."""
         with self._lock:

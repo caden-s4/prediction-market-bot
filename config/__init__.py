@@ -123,6 +123,7 @@ class BotConfig:
     # by a confidence × distance-from-threshold lookup table instead of the fixed
     # 80% floor.  Set DYNAMIC_EXIT_ENABLED=false to instantly revert to 80%.
     dynamic_exit_enabled: bool                  # default True
+    min_confidence_threshold: float             # Both confidence dimensions must meet this (default 0.80)
 
     @classmethod
     def from_env(cls) -> "BotConfig":
@@ -140,6 +141,7 @@ class BotConfig:
             resolution_scan_interval_seconds=int(float(_get("RESOLUTION_SCAN_INTERVAL_SECONDS", "300"))),
             financial_hard_stop_threshold=float(_get("FINANCIAL_HARD_STOP_THRESHOLD", "0.20")),
             dynamic_exit_enabled=_get("DYNAMIC_EXIT_ENABLED", "true").lower() != "false",
+            min_confidence_threshold=float(_get("MIN_CONFIDENCE_THRESHOLD", "0.80")),
         )
 
 

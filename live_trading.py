@@ -174,8 +174,8 @@ def make_signal_callback(risk_manager, execution_engine, event_db, alert_manager
             _halt_alerted = False  # reset after midnight roll
 
         for signal in signals:
-            # Log every signal (fired or not)
-            event_db.log_signal(signal, fired=True)
+            # Signal already recorded by SignalEngine._log_signal(); here we
+            # only alert, risk-check, and execute (i.e. "acted upon" path).
             alert_manager.alert_signal(
                 signal_type=signal.signal_type.value,
                 market_id=signal.market_id,
@@ -192,7 +192,12 @@ def make_signal_callback(risk_manager, execution_engine, event_db, alert_manager
                 )
                 continue
 
-            # Execute
+            # Execute — log at INFO to distinguish "acted upon" from "detected"
+            logger.info(
+                "Signal APPROVED: %s %s edge=%.3f platform=%s",
+                signal.signal_type.value, signal.market_id,
+                signal.edge_estimate, signal.platform,
+            )
             success = execution_engine.execute(signal, decision)
             if success:
                 risk_manager.record_open(
@@ -363,17 +368,16 @@ async def run_live(cfg: AppConfig, dry_run: bool, scan_interval: int) -> None:
     # ── Risk manager ───────────────────────────────────────────────────────
     risk_manager = RiskManager(
         bankroll_usd=cfg.bot.bankroll_usd,
-        kelly_fraction=cfg.bot.kelly_fraction,
-        max_position_fraction=cfg.bot.max_position_fraction,
-        max_total_exposure=cfg.bot.max_total_exposure,
-        min_edge_threshold=cfg.bot.min_edge_threshold,
+        kelly_fraction=cfg.bot.resolution_kelly_fraction,
+        max_position_fraction=cfg.bot.resolution_max_position_fraction,
+        min_edge_threshold=cfg.bot.resolution_min_gap,
         max_daily_loss_usd=cfg.monitoring.max_daily_loss_usd,
     )
 
     # ── Signal engine ──────────────────────────────────────────────────────
     signal_engine = SignalEngine(
         cross_exchange=CrossExchangeSignal(
-            min_spread=cfg.bot.min_edge_threshold,
+            min_spread=cfg.bot.resolution_min_gap,
         ),
         book_imbalance=BookImbalanceSignal(
             bullish_threshold=0.65,
@@ -476,6 +480,36 @@ async def run_live(cfg: AppConfig, dry_run: bool, scan_interval: int) -> None:
         tasks.append(asyncio.create_task(kalshi_adapter.run(), name="kalshi_ws"))
     if poly_adapter:
         tasks.append(asyncio.create_task(poly_adapter.run(), name="poly_ws"))
+
+    # ── Periodic signal evaluation loop ──────────────────────────────────
+    async def signal_eval_loop(engine: "SignalEngine", interval: float = 5.0):
+        """Evaluate all signals on a fixed interval.
+
+        Simpler and safer than event-driven evaluation — debouncing is
+        automatic via the interval.  A single evaluation failure is logged
+        but never kills the loop.
+        """
+        cycle = 0
+        while True:
+            await asyncio.sleep(interval)
+            cycle += 1
+            try:
+                fired = engine.evaluate_all()
+                if fired:
+                    logger.info(
+                        "Signal eval cycle %d: %d signal(s) fired",
+                        cycle, len(fired),
+                    )
+                else:
+                    logger.debug("Signal eval cycle %d: no signals", cycle)
+            except Exception:
+                logger.exception("Signal eval cycle %d failed", cycle)
+
+    tasks.append(
+        asyncio.create_task(
+            signal_eval_loop(signal_engine), name="signal_eval",
+        )
+    )
 
     try:
         await asyncio.gather(*tasks)

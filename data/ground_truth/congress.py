@@ -103,7 +103,7 @@ class CongressSource(DataSource):
                 f"/{bill_ref['type']}/{bill_ref['number']}"
             )
             try:
-                resp = requests.get(url, params={"format": "json"}, timeout=_TIMEOUT)
+                resp = requests.get(url, params={"format": "json"}, timeout=_TIMEOUT, proxies={})
                 if resp.status_code == 404:
                     continue
                 resp.raise_for_status()
@@ -178,6 +178,7 @@ class CongressSource(DataSource):
                     "limit": 3,
                 },
                 timeout=_TIMEOUT,
+                proxies={},
             )
             resp.raise_for_status()
             results = resp.json().get("bills", [])

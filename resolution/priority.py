@@ -52,9 +52,21 @@ _W_VOLUME     = 0.25
 _W_BRACKET    = 0.30
 _W_STALENESS  = 0.25
 
-# Map Kalshi series prefix → Yahoo Finance symbol used by FinancialDataSource
+# Map Kalshi series prefix → Yahoo Finance symbol used by FinancialDataSource.
+# Only include series where the financial source can actually fetch a live price.
+# KXAAAGASW (AAA gas) has no Yahoo Finance mapping and is intentionally omitted.
 _SERIES_TO_SYMBOL: Dict[str, str] = {
-    "KXNASDAQ100U": "NQ=F",
+    "KXNASDAQ100U": "NQ=F",   # Nasdaq 100 (up-bracket variant)
+    "KXNASDAQ100":  "NQ=F",   # Nasdaq 100
+    "KXINX":        "ES=F",   # S&P 500 (^INX index → ES=F futures price)
+    "KXWTI":        "CL=F",   # WTI crude oil (daily brackets)
+    "KXWTIW":       "CL=F",   # WTI crude oil (weekly brackets)
+    "KXBRENTD":     "CL=F",   # Brent crude daily (proxy: CL=F WTI, ~$5-10 spread)
+    "KXTNOTEW":     "^TNX",   # 10-year Treasury yield
+    "KXGOLDD":      "GC=F",   # Gold daily brackets
+    "KXGOLDW":      "GC=F",   # Gold futures
+    "KXSILVERD":    "SI=F",   # Silver daily brackets
+    "KXSILVERW":    "SI=F",   # Silver futures
 }
 
 # Price staleness threshold: skip bracket scoring if price data is older than this

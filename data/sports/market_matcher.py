@@ -46,11 +46,13 @@ _skip_set: set = set()
 #     yes suffix : DET     (the team whose win resolves YES)
 # The regex captures (series, team_concat, yes_code).
 _GAME_MARKET_RE = re.compile(
-    r"^(KXNBAGAME|KXNCAAMBGAME)-\d{2}[A-Z]{3}\d{2}([A-Z]{4,8})-([A-Z]{2,4})$"
+    r"^(KXNBAGAME|KXNCAAMBGAME|KXNFLGAME|KXNCAAWBGAME)-\d{2}[A-Z]{3}\d{2}([A-Z]{4,8})-([A-Z]{2,4})$"
 )
 _GAME_SERIES_SPORT: Dict[str, str] = {
     "KXNBAGAME": "nba",
     "KXNCAAMBGAME": "ncaab",
+    "KXNFLGAME": "nfl",
+    "KXNCAAWBGAME": "ncaaw",
 }
 
 
@@ -334,6 +336,9 @@ NCAAB_ALIASES: Dict[str, str] = {
     "hawkeyes": "Iowa Hawkeyes",
     "illinois": "Illinois Fighting Illini",
     "illini": "Illinois Fighting Illini",
+    "illinois state": "Illinois State Redbirds",
+    "illinois st": "Illinois State Redbirds",
+    "ilst": "Illinois State Redbirds",      # Kalshi ticker code for Illinois State
     "penn state": "Penn State Nittany Lions",
     "psu": "Penn State Nittany Lions",
     "maryland": "Maryland Terrapins",
@@ -363,6 +368,7 @@ NCAAB_ALIASES: Dict[str, str] = {
     "cougars": "Houston Cougars",
     "memphis": "Memphis Tigers",
     "tennessee": "Tennessee Volunteers",
+    "tenn": "Tennessee Volunteers",
     "vols": "Tennessee Volunteers",
     "arkansas": "Arkansas Razorbacks",
     "razorbacks": "Arkansas Razorbacks",
@@ -386,6 +392,7 @@ NCAAB_ALIASES: Dict[str, str] = {
     "nc state": "NC State Wolfpack",
     "wolfpack": "NC State Wolfpack",
     "wake forest": "Wake Forest Demon Deacons",
+    "wake": "Wake Forest Demon Deacons",    # Kalshi ticker code for Wake Forest
     "syracuse": "Syracuse Orange",
     "notre dame": "Notre Dame Fighting Irish",
     "nd": "Notre Dame Fighting Irish",
@@ -426,6 +433,216 @@ NCAAB_ALIASES: Dict[str, str] = {
     "oral roberts": "Oral Roberts Golden Eagles",
     "eastern washington": "Eastern Washington Eagles",
     "drake": "Drake Bulldogs",
+    # Kalshi short codes used in KXNCAAMBGAME market IDs (fast-path aliases)
+    "ncst": "NC State Wolfpack",
+    "ttu": "Texas Tech Red Raiders",
+    "ala": "Alabama Crimson Tide",
+    "mich": "Michigan Wolverines",
+    "minn": "Minnesota Golden Gophers",
+    "miss": "Ole Miss Rebels",
+    "syr": "Syracuse Orange",
+    "ill": "Illinois Fighting Illini",
+    "van": "Vanderbilt Commodores",
+    "ore": "Oregon Ducks",
+    "okla": "Oklahoma Sooners",
+    "fla": "Florida Gators",
+    "pur": "Purdue Boilermakers",
+    "ku": "Kansas Jayhawks",
+    "sju": "St. John's Red Storm",
+    "mia": "Miami (FL) Hurricanes",
+    "conn": "Connecticut Huskies",
+    "usu": "Utah State Aggies",
+    "ariz": "Arizona Wildcats",
+}
+
+# NCAA Women's Basketball aliases — Kalshi ticker codes and common names
+# ESPN displayName for women's teams matches the school name (e.g. "North Carolina Tar Heels")
+# Exceptions: Tennessee women = "Tennessee Lady Vols", Georgia women = "Georgia Lady Bulldogs"
+NCAAW_ALIASES: Dict[str, str] = {
+    # ACC
+    "unc": "North Carolina Tar Heels",
+    "north carolina": "North Carolina Tar Heels",
+    "tar heels": "North Carolina Tar Heels",
+    "md": "Maryland Terrapins",
+    "maryland": "Maryland Terrapins",
+    "terps": "Maryland Terrapins",
+    "duke": "Duke Blue Devils",
+    "blue devils": "Duke Blue Devils",
+    "nc state": "NC State Wolfpack",
+    "wolfpack": "NC State Wolfpack",
+    "virginia tech": "Virginia Tech Hokies",
+    "vt": "Virginia Tech Hokies",
+    "hokies": "Virginia Tech Hokies",
+    "virginia": "Virginia Cavaliers",
+    "uva": "Virginia Cavaliers",
+    "cavaliers": "Virginia Cavaliers",
+    "florida state": "Florida State Seminoles",
+    "fsu": "Florida State Seminoles",
+    "seminoles": "Florida State Seminoles",
+    "louisville": "Louisville Cardinals",
+    "pittsburgh": "Pittsburgh Panthers",
+    "pitt": "Pittsburgh Panthers",
+    "miami fl": "Miami (FL) Hurricanes",
+    "hurricanes": "Miami (FL) Hurricanes",
+    "boston college": "Boston College Eagles",
+    "bc": "Boston College Eagles",
+    "wake forest": "Wake Forest Demon Deacons",
+    "wake": "Wake Forest Demon Deacons",
+    "georgia tech": "Georgia Tech Yellow Jackets",
+    "notre dame": "Notre Dame Fighting Irish",
+    "nd": "Notre Dame Fighting Irish",
+    "fighting irish": "Notre Dame Fighting Irish",
+    "syracuse": "Syracuse Orange",
+    # SEC
+    "south carolina": "South Carolina Gamecocks",
+    "sc": "South Carolina Gamecocks",
+    "scrc": "South Carolina Gamecocks",
+    "gamecocks": "South Carolina Gamecocks",
+    "tennessee": "Tennessee Lady Vols",
+    "tenn": "Tennessee Lady Vols",
+    "lady vols": "Tennessee Lady Vols",
+    "lsu": "LSU Tigers",
+    "texas am": "Texas A&M Aggies",
+    "tamu": "Texas A&M Aggies",
+    "aggies": "Texas A&M Aggies",
+    "georgia": "Georgia Lady Bulldogs",
+    "ga": "Georgia Lady Bulldogs",
+    "lady bulldogs": "Georgia Lady Bulldogs",
+    "florida": "Florida Gators",
+    "gators": "Florida Gators",
+    "alabama": "Alabama Crimson Tide",
+    "crimson tide": "Alabama Crimson Tide",
+    "kentucky": "Kentucky Wildcats",
+    "uk": "Kentucky Wildcats",
+    "arkansas": "Arkansas Razorbacks",
+    "razorbacks": "Arkansas Razorbacks",
+    "mississippi state": "Mississippi State Bulldogs",
+    "miss st": "Mississippi State Bulldogs",
+    "ole miss": "Ole Miss Rebels",
+    "vanderbilt": "Vanderbilt Commodores",
+    "auburn": "Auburn Tigers",
+    "missouri": "Missouri Tigers",
+    "miz": "Missouri Tigers",
+    # Big 12
+    "texas": "Texas Longhorns",
+    "tex": "Texas Longhorns",
+    "longhorns": "Texas Longhorns",
+    "baylor": "Baylor Bears",
+    "bears": "Baylor Bears",
+    "kansas": "Kansas Jayhawks",
+    "ku": "Kansas Jayhawks",
+    "jayhawks": "Kansas Jayhawks",
+    "kansas state": "Kansas State Wildcats",
+    "ksu": "Kansas State Wildcats",
+    "k-state": "Kansas State Wildcats",
+    "oklahoma": "Oklahoma Sooners",
+    "ou": "Oklahoma Sooners",
+    "sooners": "Oklahoma Sooners",
+    "oklahoma state": "Oklahoma State Cowgirls",
+    "okst": "Oklahoma State Cowgirls",
+    "iowa state": "Iowa State Cyclones",
+    "isu": "Iowa State Cyclones",
+    "cyclones": "Iowa State Cyclones",
+    "west virginia": "West Virginia Mountaineers",
+    "wvu": "West Virginia Mountaineers",
+    "tcu": "TCU Horned Frogs",
+    "texas tech": "Texas Tech Lady Raiders",
+    "ttu": "Texas Tech Lady Raiders",
+    "colorado": "Colorado Buffaloes",
+    "colo": "Colorado Buffaloes",
+    "buffaloes": "Colorado Buffaloes",
+    "arizona": "Arizona Wildcats",
+    "arizona state": "Arizona State Sun Devils",
+    "asu": "Arizona State Sun Devils",
+    "utah": "Utah Utes",
+    # Big Ten
+    "iowa": "Iowa Hawkeyes",
+    "hawkeyes": "Iowa Hawkeyes",
+    "ohio state": "Ohio State Buckeyes",
+    "osu": "Ohio State Buckeyes",
+    "buckeyes": "Ohio State Buckeyes",
+    "michigan": "Michigan Wolverines",
+    "wolverines": "Michigan Wolverines",
+    "michigan state": "Michigan State Spartans",
+    "msu": "Michigan State Spartans",
+    "spartans": "Michigan State Spartans",
+    "indiana": "Indiana Hoosiers",
+    "hoosiers": "Indiana Hoosiers",
+    "purdue": "Purdue Boilermakers",
+    "boilermakers": "Purdue Boilermakers",
+    "minnesota": "Minnesota Golden Gophers",
+    "gophers": "Minnesota Golden Gophers",
+    "penn state": "Penn State Nittany Lions",
+    "psu": "Penn State Nittany Lions",
+    "illinois": "Illinois Fighting Illini",
+    "illini": "Illinois Fighting Illini",
+    "wisconsin": "Wisconsin Badgers",
+    "badgers": "Wisconsin Badgers",
+    "nebraska": "Nebraska Cornhuskers",
+    "rutgers": "Rutgers Scarlet Knights",
+    "northwestern": "Northwestern Wildcats",
+    # Pac-12 / independents
+    "stanford": "Stanford Cardinal",
+    "stan": "Stanford Cardinal",
+    "cardinal": "Stanford Cardinal",
+    "ucla": "UCLA Bruins",
+    "bruins": "UCLA Bruins",
+    "usc": "USC Trojans",
+    "trojans": "USC Trojans",
+    "oregon": "Oregon Ducks",
+    "ducks": "Oregon Ducks",
+    "washington": "Washington Huskies",
+    "wash": "Washington Huskies",
+    # Big East / American
+    "connecticut": "Connecticut Huskies",
+    "uconn": "Connecticut Huskies",
+    "conn": "Connecticut Huskies",
+    "huskies": "Connecticut Huskies",
+    "villanova": "Villanova Wildcats",
+    "nova": "Villanova Wildcats",
+    "marquette": "Marquette Golden Eagles",
+    "creighton": "Creighton Bluejays",
+    "seton hall": "Seton Hall Pirates",
+    "georgetown": "Georgetown Hoyas",
+    "depaul": "DePaul Blue Demons",
+    "providence": "Providence Friars",
+    "st johns": "St. John's Red Storm",
+    "st john's": "St. John's Red Storm",
+    "butler": "Butler Bulldogs",
+    "xavier": "Xavier Musketeers",
+    "houston": "Houston Cougars",
+    "cougars": "Houston Cougars",
+    "memphis": "Memphis Tigers",
+    "cincinnati": "Cincinnati Bearcats",
+    "ucf": "UCF Knights",
+    "south florida": "South Florida Bulls",
+    # Common Kalshi code overrides (2-letter codes that differ from NCAAB)
+    "sc": "South Carolina Gamecocks",   # override generic "sc" for women's
+    # Kalshi short codes used in KXNCAAWBGAME market IDs that differ from
+    # the full-name aliases above.  Without these the fast path in match_market
+    # falls through to title extraction, which can fail for mid-major schools.
+    "ncst": "NC State Wolfpack",
+    "mich": "Michigan Wolverines",
+    "minn": "Minnesota Golden Gophers",
+    "miss": "Ole Miss Rebels",          # MISSMINN = Ole Miss vs Minnesota
+    "okla": "Oklahoma Sooners",
+    "ore": "Oregon Ducks",
+    "ala": "Alabama Crimson Tide",
+    "ill": "Illinois Fighting Illini",
+    "van": "Vanderbilt Commodores",
+    "syr": "Syracuse Orange",
+    "scar": "South Carolina Gamecocks",
+    # Mid-majors / newer programs appearing in women's tournament
+    "pfw": "Purdue Fort Wayne Mastodons",
+    "south alabama": "South Alabama Jaguars",
+    "usa": "South Alabama Jaguars",
+    "fgcu": "Florida Gulf Coast Eagles",
+    "florida gulf coast": "Florida Gulf Coast Eagles",
+    "purdue fort wayne": "Purdue Fort Wayne Mastodons",
+    "southern indiana": "Southern Indiana Screaming Eagles",
+    "usi": "Southern Indiana Screaming Eagles",
+    "george washington": "George Washington Colonials",
+    "gw": "George Washington Colonials",
 }
 
 # Canonical name set for fuzzy matching (populated at module load)
@@ -438,6 +655,8 @@ def _build_canonical_index() -> None:
         (NBA_ALIASES, "nba"),
         (NFL_ALIASES, "nfl"),
         (NCAAB_ALIASES, "ncaab"),
+        # Note: NCAAW not added here — many teams share names with NCAAB.
+        # Sport resolution for ncaaw relies on sport_hint from the market ID prefix.
     ):
         for canonical in alias_dict.values():
             _ALL_CANONICAL[canonical.lower()] = sport
@@ -463,6 +682,8 @@ def _alias_lookup(token: str, sport: Optional[str] = None) -> Optional[str]:
         alias_dicts.append(NFL_ALIASES)
     if sport in (None, "ncaab"):
         alias_dicts.append(NCAAB_ALIASES)
+    if sport in (None, "ncaaw"):
+        alias_dicts.append(NCAAW_ALIASES)
 
     for d in alias_dicts:
         if token in d:
@@ -577,14 +798,16 @@ def match_market(market_id: str, title: str, sport_hint: Optional[str] = None) -
         if cached is None:
             return None
         home_team, away_team, market_team, direction = cached
-        # Determine sport from market_team
-        sport = _sport_of_team(market_team)
+        # Prefer sport_hint (derived from market ID prefix, always accurate).
+        # Fall back to _sport_of_team for NBA/NFL/NCAAB; ncaaw teams share
+        # names with ncaab so sport_hint is the only reliable source for them.
+        sport = sport_hint or _sport_of_team(market_team) or "nba"
         return {
             "home_team": home_team,
             "away_team": away_team,
             "market_team": market_team,
             "direction": direction,
-            "sport": sport or sport_hint or "nba",
+            "sport": sport,
         }
 
     # ── Fast path: parse team abbreviations directly from the market ID ──────
@@ -666,7 +889,7 @@ def match_market(market_id: str, title: str, sport_hint: Optional[str] = None) -
     home_team = team1
     away_team = team2 or team1  # single-team market: home==away for matching
 
-    sport = _sport_of_team(market_team) or sport_hint or "nba"
+    sport = sport_hint or _sport_of_team(market_team) or "nba"
 
     result_tuple = (home_team, away_team, market_team, direction)
     _match_cache[market_id] = result_tuple

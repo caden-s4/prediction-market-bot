@@ -377,7 +377,7 @@ class EconomicDataSource(DataSource):
 
         url = f"{_FRED_BASE}?id={series_id}"
         try:
-            resp = requests.get(url, timeout=_TIMEOUT)
+            resp = requests.get(url, timeout=_TIMEOUT, proxies={})
             resp.raise_for_status()
             lines = resp.text.strip().split("\n")
             # Lines: header + data rows (DATE,VALUE)
@@ -592,6 +592,7 @@ class EconomicDataSource(DataSource):
                     "include_release_dates_with_no_data": "false",
                 },
                 timeout=_TIMEOUT,
+                proxies={},
             )
             resp.raise_for_status()
             release_dates = resp.json().get("release_dates", [])

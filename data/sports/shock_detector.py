@@ -77,7 +77,7 @@ def _seconds_remaining(sport: str, state: object) -> float:
         s2: NBAState = state  # type: ignore[assignment]
         elapsed2 = (s2.quarter - 1) * 720 + (720 - s2.clock)
         return max(0.0, 2880 - elapsed2)
-    if sport == "ncaab":
+    if sport in ("ncaab", "ncaaw"):
         s3: NBAState = state  # type: ignore[assignment]
         elapsed3 = (s3.quarter - 1) * 1200 + (1200 - s3.clock)
         return max(0.0, 2400 - elapsed3)
@@ -90,7 +90,7 @@ def _in_final_period(sport: str, state: object) -> bool:
         return (state.quarter >= 4)  # type: ignore[attr-defined]
     if sport == "nba":
         return (state.quarter >= 4)  # type: ignore[attr-defined]
-    if sport == "ncaab":
+    if sport in ("ncaab", "ncaaw"):
         return (state.quarter >= 2)  # 2 halves; H2 is final
     return False
 

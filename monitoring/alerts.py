@@ -242,6 +242,7 @@ class AlertManager:
                 url,
                 json={"chat_id": self._tg_chat, "text": text, "parse_mode": ""},
                 timeout=10,
+                proxies={},
             )
             if not resp.ok:
                 logger.warning(
@@ -256,6 +257,7 @@ class AlertManager:
                 self._discord_url,
                 json={"content": text},
                 timeout=10,
+                proxies={},
             )
             if not resp.ok:
                 logger.warning(
