@@ -304,7 +304,15 @@ class PolymarketClient(BaseMarketClient):
                 params={"token_id": market_id},
                 timeout=10,
             )
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except requests.exceptions.HTTPError as http_exc:
+                if http_exc.response is not None and http_exc.response.status_code == 404:
+                    raise  # propagate 404 so caller can perm-skip the token
+                logger.error("HTTP order book failed for %s: %s", market_id, http_exc)
+                return OrderBook(
+                    market_id=market_id, platform=self.PLATFORM, yes_bids=[], yes_asks=[]
+                )
             data = resp.json()
 
             # Validate the order book timestamp when the API returns one.
@@ -345,6 +353,12 @@ class PolymarketClient(BaseMarketClient):
                 yes_bids=bids,
                 yes_asks=asks,
             )
+        except requests.exceptions.HTTPError as exc:
+            # 404 was already re-raised from the inner handler — propagate it so
+            # the caller can perm-skip this token instead of retrying indefinitely.
+            # Other HTTPError codes (500, 429, etc.) were already handled above
+            # and returned an empty OrderBook, so reaching here means the 404 path.
+            raise
         except Exception as exc:
             logger.error("HTTP order book failed for %s: %s", market_id, exc)
             return OrderBook(

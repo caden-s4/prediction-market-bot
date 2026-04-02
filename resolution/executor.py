@@ -26,6 +26,8 @@ import os
 import random
 import re
 import time
+
+import requests
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace as dc_replace
@@ -611,6 +613,10 @@ class ResolutionBot:
         # the market is perm-skipped this session.  A 30-minute orderbook cooldown is
         # also set on each hard stop so the same market cannot be re-entered immediately.
         self._hard_stop_count: Dict[str, int] = {}
+        # Polymarket token IDs that returned 404 from the CLOB orderbook API.
+        # These tokens are stale or invalid — no cooldown retry, permanent for
+        # the session.  Checked in _try_execute() before calling _get_live_book().
+        self._orderbook_perm_skipped: set = set()
         # Post-exit re-entry cooldowns.  Set in _exit_position() for both the
         # specific market and its series prefix.  Checked in _try_execute() before
         # sizing to prevent compounding spirals where repeated wins on the same
@@ -2093,6 +2099,10 @@ class ResolutionBot:
         base_mid = mid.rsplit("-", 1)[0] if mid.count("-") > 2 else mid
         if base_mid in self._unfilled_timeout_perm_skipped:
             return None
+        # Skip Polymarket tokens whose orderbook returned 404 (stale/invalid).
+        # No retry — perm-skip is set by _get_live_book on first 404 encounter.
+        if mid in self._orderbook_perm_skipped:
+            return None
         if _is_in_orderbook_cooldown(mid):
             if self._force_test:
                 logger.info(
@@ -3468,6 +3478,10 @@ class ResolutionBot:
         Fetch the live order book.  Returns None if the book is empty
         (mid_price is None) or if the fetch fails — both are treated as
         'unverifiable price, skip the trade'.
+
+        Polymarket 404: the token is stale or delisted.  The market_id is added
+        to _orderbook_perm_skipped so _try_execute() short-circuits on all
+        subsequent cycles without issuing another API call.
         """
         try:
             client = self._poly if market.platform == "polymarket" else self._kalshi
@@ -3484,6 +3498,19 @@ class ResolutionBot:
                 ob.best_yes_ask, ob.best_yes_bid,
                 len(ob.yes_asks) if ob.yes_asks else 0,
                 len(ob.yes_bids) if ob.yes_bids else 0,
+            )
+            return None
+        except requests.exceptions.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                self._orderbook_perm_skipped.add(market.market_id)
+                logger.warning(
+                    "ResolutionBot: perm-skipping %s — orderbook 404 (stale/invalid token)",
+                    market.market_id,
+                )
+                return None
+            logger.info(
+                "ResolutionBot: _get_live_book %s → HTTP error: %s",
+                market.market_id, exc,
             )
             return None
         except Exception as exc:
