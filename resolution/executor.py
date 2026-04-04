@@ -32,7 +32,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace as dc_replace
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 try:
     from zoneinfo import ZoneInfo as _ZoneInfo
@@ -252,7 +252,7 @@ def _check_minimum_ev(
 # Tracks the last time each market_id had a get_market() call for price refresh.
 # Markets that are genuinely at 0.50 live would otherwise be refreshed every
 # cycle.  Skip if refreshed within the last 120 seconds.
-_price_refresh_cache: Dict[str, float] = {}   # market_id → monotonic time of last refresh
+_price_refresh_cache: Dict[str, Tuple[float, float]] = {}   # market_id → (monotonic_ts, refreshed_price)
 _PRICE_REFRESH_TTL_S: float = 120.0
 
 
@@ -1487,8 +1487,12 @@ class ResolutionBot:
                 if _is_financial_bracket_market(m.market_id) and _is_us_market_hours()
                 else _PRICE_REFRESH_TTL_S
             )
-            if (_now_mono - _price_refresh_cache.get(m.market_id, 0.0)) < _market_ttl:
-                # Recently refreshed within TTL — accept cached price.
+            _cached_entry = _price_refresh_cache.get(m.market_id)
+            if _cached_entry is not None and (_now_mono - _cached_entry[0]) < _market_ttl:
+                # Recently refreshed within TTL — apply the cached price to this Market object
+                # (scanner may have created a fresh Market with yes_price=0.50 this cycle).
+                m.yes_price = _cached_entry[1]
+                m.no_price = round(1.0 - _cached_entry[1], 4)
                 m.price_refresh_success = True
                 continue
             _to_refresh.append(m.market_id)
@@ -1519,14 +1523,14 @@ class ResolutionBot:
                     mid, fresh = _fut.result()
                     m = _markets_by_id.get(mid)
                     if fresh is not None:
-                        # Only cache successful refreshes — failed refreshes must
-                        # NOT update the cache, otherwise subsequent cycles skip
-                        # the market thinking it was refreshed while it still has
-                        # a stale scanner price.
-                        _price_refresh_cache[mid] = time.monotonic()
                         if m is not None:
                             new_price = getattr(fresh, "yes_price", None)
                             if new_price is not None:
+                                # Only cache successful refreshes with the actual price — failed
+                                # refreshes or missing prices must NOT update the cache, otherwise
+                                # subsequent cycles skip the market with a stale 0.50 price still
+                                # stored in the object.
+                                _price_refresh_cache[mid] = (time.monotonic(), new_price)
                                 old_price = m.yes_price
                                 m.yes_price = new_price
                                 m.no_price = round(1.0 - new_price, 4)
@@ -1620,7 +1624,8 @@ class ResolutionBot:
             # Scoped to these two categories to avoid per-cycle get_market()
             # calls for politics/entertainment/etc. that don't move frequently.
             _now_mono = time.monotonic()
-            _last_refresh = _price_refresh_cache.get(market.market_id, 0.0)
+            _cached_gt_entry = _price_refresh_cache.get(market.market_id)
+            _last_refresh = _cached_gt_entry[0] if _cached_gt_entry is not None else 0.0
             # Financial brackets use a shorter TTL during live market hours
             # because NQ/ES can move 50+ points in 2 minutes.
             _refresh_ttl = (
@@ -1636,10 +1641,12 @@ class ResolutionBot:
             ):
                 try:
                     fresh = self._kalshi.get_market(market.market_id)
-                    _price_refresh_cache[market.market_id] = time.monotonic()
                     if fresh is not None:
                         new_price = getattr(fresh, "yes_price", None)
                         if new_price is not None:
+                            # Store (timestamp, price) so cache hits next cycle can apply
+                            # the refreshed price to newly-constructed Market objects.
+                            _price_refresh_cache[market.market_id] = (time.monotonic(), new_price)
                             old_price = market.yes_price
                             market.yes_price = new_price
                             market.no_price = round(1.0 - new_price, 4)
