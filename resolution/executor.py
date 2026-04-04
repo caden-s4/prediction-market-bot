@@ -3159,9 +3159,22 @@ class ResolutionBot:
                     DecayAction.STOP_LOSS:     "stop_loss",
                     DecayAction.APPROACH_EXIT: "resolution",
                 }.get(decision.action, "unknown")
+                # For APPROACH_EXIT (resolution), use settlement price when GT is
+                # decisive — clamped extremes mean outcome is known, so market price
+                # would understate the true P&L.  All other exits use live market price.
+                if decision.action == DecayAction.APPROACH_EXIT:
+                    gt = decision.position.ground_truth_prob
+                    if gt is not None and gt <= 0.02:
+                        _exit_price = 0.0
+                    elif gt is not None and gt >= 0.98:
+                        _exit_price = 1.0
+                    else:
+                        _exit_price = decision.position.current_price  # GT inconclusive
+                else:
+                    _exit_price = decision.position.current_price
                 self._exit_position(
                     mid, decision.current_gain_usd,
-                    current_price=decision.position.current_price,
+                    current_price=_exit_price,
                     capture=decision.capture_ratio,
                     dynamic_exit_threshold=decision.dynamic_exit_threshold,
                     exit_reason=_decay_reason,
