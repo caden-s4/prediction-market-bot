@@ -1,0 +1,594 @@
+"""
+data.markets.kalshi_ws -- Kalshi WebSocket orderbook client.
+
+Maintains a persistent WebSocket connection to the Kalshi streaming API,
+receiving orderbook snapshots and deltas to keep an in-memory book for
+each subscribed market.  All public methods are thread-safe: the WS
+receive loop runs in a daemon thread; the main bot thread reads via
+get_book() / get_book_age().
+
+Channel reference (Kalshi WS v2):
+  - orderbook_delta  -> orderbook_snapshot (initial) + orderbook_delta (incremental)
+  - ticker           -> ticker messages with yes_bid/yes_ask dollars
+
+Auth: same RSA-PSS/SHA-256 signing as the REST API.
+URL : wss://api.elections.kalshi.com/trade-api/ws/v2
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import logging
+import queue
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set
+
+from .base import OrderBook, PriceLevel
+
+logger = logging.getLogger(__name__)
+
+# ── Ticker cache entry ───────────────────────────────────────────────────────
+
+@dataclass
+class TickerSnapshot:
+    """Latest ticker data for a single market from the ticker channel."""
+    market_id: str
+    yes_bid: Optional[float] = None   # decimal [0-1]
+    yes_ask: Optional[float] = None   # decimal [0-1]
+    last_updated: float = 0.0         # time.time()
+
+
+# ── Book cache entry ─────────────────────────────────────────────────────────
+
+@dataclass
+class _BookEntry:
+    """Internal wrapper around an OrderBook with a timestamp."""
+    book: OrderBook
+    last_updated: float = field(default_factory=time.time)
+
+
+# ── WS command envelope ──────────────────────────────────────────────────────
+
+@dataclass
+class _WsCommand:
+    """Queued command to send over the WebSocket from the main thread."""
+    action: str         # "subscribe" | "unsubscribe"
+    channel: str        # "orderbook_delta" | "ticker"
+    tickers: List[str]
+
+
+# ── Main class ───────────────────────────────────────────────────────────────
+
+class KalshiWebSocket:
+    """
+    Realtime Kalshi orderbook client.
+
+    Usage::
+
+        ws = KalshiWebSocket(api_key, private_key_path)
+        ws.start()
+        ws.subscribe(["KXNASDAQ100U-26APR05-T24399.99"])
+        ...
+        book = ws.get_book("KXNASDAQ100U-26APR05-T24399.99")
+    """
+
+    # Reconnect back-off parameters.
+    _BACKOFF_BASE = 1.0
+    _BACKOFF_MAX = 30.0
+
+    def __init__(
+        self,
+        api_key: str,
+        private_key_path: str,
+        base_url: str = "wss://api.elections.kalshi.com/trade-api/ws/v2",
+    ) -> None:
+        self._api_key = api_key
+        self._private_key_path = private_key_path
+        self._base_url = base_url.rstrip("/")
+
+        # Thread-safe caches — written by the WS thread, read by the main thread.
+        self._lock = threading.Lock()
+        self._books: Dict[str, _BookEntry] = {}
+        self._tickers: Dict[str, TickerSnapshot] = {}
+
+        # Subscription state.
+        self._subscribed: Set[str] = set()
+        self._sub_lock = threading.Lock()
+
+        # Command queue (main thread -> WS thread).
+        self._cmd_queue: queue.Queue[_WsCommand] = queue.Queue()
+
+        # Background thread / event loop handles.
+        self._thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._started = False
+
+        # RSA private key (loaded lazily on first use).
+        self._private_key: Any = None
+
+    # ── Public API ───────────────────────────────────────────────────────────
+
+    def start(self) -> None:
+        """Launch the background WS thread.  Safe to call multiple times."""
+        if self._started:
+            return
+        self._started = True
+        self._thread = threading.Thread(
+            target=self._run_loop, name="kalshi-ws", daemon=True
+        )
+        self._thread.start()
+        logger.info("KalshiWebSocket background thread started")
+
+    def subscribe(self, market_tickers: list[str]) -> None:
+        """Subscribe to orderbook_delta + ticker channels for the given tickers."""
+        new_tickers: list[str] = []
+        with self._sub_lock:
+            for t in market_tickers:
+                if t not in self._subscribed:
+                    self._subscribed.add(t)
+                    new_tickers.append(t)
+        if not new_tickers:
+            return
+        self._cmd_queue.put(
+            _WsCommand("subscribe", "orderbook_delta", new_tickers)
+        )
+        self._cmd_queue.put(
+            _WsCommand("subscribe", "ticker", new_tickers)
+        )
+        logger.info("Queued subscribe for %d tickers", len(new_tickers))
+
+    def unsubscribe(self, market_tickers: list[str]) -> None:
+        """Unsubscribe from orderbook_delta + ticker channels."""
+        removed: list[str] = []
+        with self._sub_lock:
+            for t in market_tickers:
+                if t in self._subscribed:
+                    self._subscribed.discard(t)
+                    removed.append(t)
+        if not removed:
+            return
+        self._cmd_queue.put(
+            _WsCommand("unsubscribe", "orderbook_delta", removed)
+        )
+        self._cmd_queue.put(
+            _WsCommand("unsubscribe", "ticker", removed)
+        )
+        # Clean up cached data.
+        with self._lock:
+            for t in removed:
+                self._books.pop(t, None)
+                self._tickers.pop(t, None)
+        logger.info("Queued unsubscribe for %d tickers", len(removed))
+
+    def get_book(self, market_id: str) -> Optional[OrderBook]:
+        """Return the latest in-memory OrderBook, or None if unavailable."""
+        with self._lock:
+            entry = self._books.get(market_id)
+            return entry.book if entry else None
+
+    def get_book_age(self, market_id: str) -> Optional[float]:
+        """Seconds since the last update for *market_id*, or None if no data."""
+        with self._lock:
+            entry = self._books.get(market_id)
+            if entry is None:
+                return None
+            return time.time() - entry.last_updated
+
+    def get_ticker(self, market_id: str) -> Optional[TickerSnapshot]:
+        """Return the latest ticker snapshot, or None."""
+        with self._lock:
+            return self._tickers.get(market_id)
+
+    @property
+    def connected(self) -> bool:
+        """True if the background loop is alive (not necessarily connected)."""
+        return self._thread is not None and self._thread.is_alive()
+
+    # ── RSA signing (mirrors KalshiClient._sign) ────────────────────────────
+
+    def _load_private_key(self) -> Any:
+        """Load the RSA private key from *self._private_key_path*.
+
+        Accepts either:
+        - A PEM-encoded key string (with literal ``\\n`` or real newlines).
+        - A bare base64 body (no PEM headers); PKCS#8 headers are added.
+        """
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+        secret = self._private_key_path
+        secret = secret.replace("\\n", "\n")
+
+        if "BEGIN" in secret:
+            pem_bytes = secret.encode("utf-8")
+        else:
+            body = "\n".join(secret[i:i + 64] for i in range(0, len(secret), 64))
+            pem_bytes = (
+                "-----BEGIN PRIVATE KEY-----\n"
+                + body
+                + "\n-----END PRIVATE KEY-----\n"
+            ).encode("utf-8")
+
+        return load_pem_private_key(pem_bytes, password=None)
+
+    def _get_private_key(self) -> Any:
+        if self._private_key is None:
+            self._private_key = self._load_private_key()
+        return self._private_key
+
+    def _sign_ws(self) -> Dict[str, str]:
+        """Generate auth headers for the WebSocket handshake.
+
+        Message format: ``timestamp_ms + "GET" + "/trade-api/ws/v2"``
+        """
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        pk = self._get_private_key()
+        ts_ms = str(int(time.time() * 1000))
+        path = "/trade-api/ws/v2"
+        message = (ts_ms + "GET" + path).encode("utf-8")
+        signature = pk.sign(
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+        sig_b64 = base64.b64encode(signature).decode("utf-8")
+        return {
+            "KALSHI-ACCESS-KEY": self._api_key,
+            "KALSHI-ACCESS-TIMESTAMP": ts_ms,
+            "KALSHI-ACCESS-SIGNATURE": sig_b64,
+        }
+
+    # ── Background event loop ────────────────────────────────────────────────
+
+    def _run_loop(self) -> None:
+        """Entry point for the daemon thread — runs an asyncio event loop."""
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._ws_loop())
+        except Exception:
+            logger.exception("KalshiWebSocket event loop crashed")
+        finally:
+            self._loop.close()
+
+    async def _ws_loop(self) -> None:
+        """Outer loop: connect, run, reconnect with exponential back-off."""
+        import websockets
+        import websockets.exceptions
+
+        backoff = self._BACKOFF_BASE
+        while True:
+            try:
+                headers = self._sign_ws()
+                logger.info("Connecting to Kalshi WS at %s", self._base_url)
+                async with websockets.connect(
+                    self._base_url,
+                    additional_headers=headers,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=5,
+                ) as ws:
+                    logger.info("Kalshi WS connected")
+                    backoff = self._BACKOFF_BASE  # reset on success
+
+                    # Re-subscribe to all tickers after reconnect.
+                    await self._resubscribe_all(ws)
+
+                    # Run the receive + command pump loop.
+                    await self._run_connection(ws)
+
+            except websockets.exceptions.InvalidStatusCode as exc:
+                logger.warning(
+                    "Kalshi WS rejected connection (HTTP %s), retrying in %.0fs",
+                    exc.status_code, backoff,
+                )
+            except (
+                OSError,
+                websockets.exceptions.ConnectionClosed,
+                websockets.exceptions.WebSocketException,
+            ) as exc:
+                logger.warning(
+                    "Kalshi WS connection lost (%s), retrying in %.0fs",
+                    type(exc).__name__, backoff,
+                )
+            except Exception:
+                logger.exception(
+                    "Unexpected error in WS loop, retrying in %.0fs", backoff,
+                )
+
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, self._BACKOFF_MAX)
+
+    async def _resubscribe_all(self, ws: Any) -> None:
+        """Re-send subscribe commands for all tracked tickers after reconnect."""
+        with self._sub_lock:
+            tickers = list(self._subscribed)
+        if not tickers:
+            return
+        # Kalshi limits subscribe commands; batch in groups of 50.
+        for i in range(0, len(tickers), 50):
+            batch = tickers[i:i + 50]
+            await self._send_subscribe(ws, "orderbook_delta", batch)
+            await self._send_subscribe(ws, "ticker", batch)
+        logger.info("Re-subscribed to %d tickers after reconnect", len(tickers))
+
+    async def _run_connection(self, ws: Any) -> None:
+        """Pump incoming messages and outgoing commands concurrently."""
+        recv_task = asyncio.ensure_future(self._recv_loop(ws))
+        cmd_task = asyncio.ensure_future(self._cmd_pump(ws))
+        done, pending = await asyncio.wait(
+            [recv_task, cmd_task], return_when=asyncio.FIRST_COMPLETED
+        )
+        for t in pending:
+            t.cancel()
+        # Propagate any exception from the completed task.
+        for t in done:
+            t.result()
+
+    async def _recv_loop(self, ws: Any) -> None:
+        """Receive and dispatch messages from the WebSocket."""
+        async for raw in ws:
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError:
+                logger.warning("Kalshi WS: non-JSON message: %.200s", raw)
+                continue
+            self._process_message(data)
+
+    async def _cmd_pump(self, ws: Any) -> None:
+        """Drain the command queue and send subscribe/unsubscribe frames."""
+        loop = asyncio.get_event_loop()
+        while True:
+            # Non-blocking poll with a short sleep to yield to the recv loop.
+            try:
+                cmd: _WsCommand = await loop.run_in_executor(
+                    None, lambda: self._cmd_queue.get(timeout=0.25)
+                )
+            except queue.Empty:
+                continue
+
+            if cmd.action == "subscribe":
+                await self._send_subscribe(ws, cmd.channel, cmd.tickers)
+            elif cmd.action == "unsubscribe":
+                await self._send_unsubscribe(ws, cmd.channel, cmd.tickers)
+
+    # ── WS frame helpers ─────────────────────────────────────────────────────
+
+    async def _send_subscribe(
+        self, ws: Any, channel: str, tickers: List[str]
+    ) -> None:
+        msg = {
+            "id": int(time.time() * 1000),
+            "cmd": "subscribe",
+            "params": {
+                "channels": [channel],
+                "market_tickers": tickers,
+            },
+        }
+        await ws.send(json.dumps(msg))
+        logger.debug("WS subscribe %s: %s", channel, tickers)
+
+    async def _send_unsubscribe(
+        self, ws: Any, channel: str, tickers: List[str]
+    ) -> None:
+        msg = {
+            "id": int(time.time() * 1000),
+            "cmd": "unsubscribe",
+            "params": {
+                "channels": [channel],
+                "market_tickers": tickers,
+            },
+        }
+        await ws.send(json.dumps(msg))
+        logger.debug("WS unsubscribe %s: %s", channel, tickers)
+
+    # ── Message processing ───────────────────────────────────────────────────
+
+    def _process_message(self, data: dict) -> None:
+        """Route an incoming WS message to the appropriate handler."""
+        msg_type = data.get("type")
+        if msg_type == "orderbook_snapshot":
+            self._handle_snapshot(data)
+        elif msg_type == "orderbook_delta":
+            self._handle_delta(data)
+        elif msg_type == "ticker":
+            self._handle_ticker(data)
+        elif msg_type == "error":
+            code = data.get("code", "?")
+            message = data.get("msg", data.get("message", ""))
+            logger.warning("Kalshi WS error (code=%s): %s", code, message)
+        elif msg_type == "subscribed":
+            logger.debug("Kalshi WS subscribed ack: %s", data)
+        elif msg_type == "unsubscribed":
+            logger.debug("Kalshi WS unsubscribed ack: %s", data)
+        else:
+            logger.debug("Kalshi WS unknown msg type=%s: %.300s", msg_type, data)
+
+    def _handle_snapshot(self, data: dict) -> None:
+        """Replace the full order book for a market from a snapshot message.
+
+        Kalshi snapshot format::
+
+            {
+                "type": "orderbook_snapshot",
+                "market_ticker": "TICKER",
+                "yes": [[price_cents, size], ...],
+                "no":  [[price_cents, size], ...],
+                "seq": 123
+            }
+
+        ``yes`` = YES bid levels (what buyers of YES will pay).
+        ``no``  = NO bid levels  (equivalent to YES asks at 100 - price).
+        """
+        market_id = data.get("market_ticker", "")
+        if not market_id:
+            return
+
+        yes_bids = self._parse_levels(data.get("yes") or [])
+        yes_bids.sort(key=lambda lv: -lv.price)
+
+        # NO bids at price p => YES asks at (100-p)/100
+        no_bids_raw = data.get("no") or []
+        yes_asks = [
+            PriceLevel(price=(100.0 - lvl[0]) / 100.0, size=float(lvl[1]))
+            for lvl in no_bids_raw
+            if len(lvl) >= 2
+        ]
+        yes_asks.sort(key=lambda lv: lv.price)
+
+        book = OrderBook(
+            market_id=market_id,
+            platform="kalshi",
+            yes_bids=yes_bids,
+            yes_asks=yes_asks,
+            timestamp=datetime.now(timezone.utc),
+        )
+        with self._lock:
+            self._books[market_id] = _BookEntry(book=book)
+
+        logger.debug(
+            "WS snapshot %s: %d bids, %d asks",
+            market_id, len(yes_bids), len(yes_asks),
+        )
+
+    def _handle_delta(self, data: dict) -> None:
+        """Apply an incremental update to an existing order book.
+
+        Kalshi delta format::
+
+            {
+                "type": "orderbook_delta",
+                "market_ticker": "TICKER",
+                "price": 65,          # cents
+                "delta": 100,         # signed size change (+ or -)
+                "side": "yes" | "no",
+                "seq": 124
+            }
+
+        A delta with size landing at 0 means the level should be removed.
+        """
+        market_id = data.get("market_ticker", "")
+        if not market_id:
+            return
+
+        price_cents = data.get("price")
+        delta_size = data.get("delta")
+        side = data.get("side", "")
+
+        if price_cents is None or delta_size is None:
+            logger.debug("WS delta missing price/delta for %s: %s", market_id, data)
+            return
+
+        price_cents = float(price_cents)
+        delta_size = float(delta_size)
+
+        with self._lock:
+            entry = self._books.get(market_id)
+            if entry is None:
+                # No snapshot yet; cannot apply delta — skip silently.
+                return
+
+            book = entry.book
+            now = datetime.now(timezone.utc)
+
+            if side == "yes":
+                # Delta on the YES side affects bids.
+                price_dec = price_cents / 100.0
+                book.yes_bids = self._apply_delta_to_levels(
+                    book.yes_bids, price_dec, delta_size, descending=True
+                )
+            elif side == "no":
+                # NO bid delta at price_cents => YES ask at (100 - price_cents).
+                ask_price_dec = (100.0 - price_cents) / 100.0
+                book.yes_asks = self._apply_delta_to_levels(
+                    book.yes_asks, ask_price_dec, delta_size, descending=False
+                )
+
+            book.timestamp = now
+            entry.last_updated = time.time()
+
+    def _handle_ticker(self, data: dict) -> None:
+        """Update the ticker cache from a ticker channel message.
+
+        Kalshi ticker format::
+
+            {
+                "type": "ticker",
+                "market_ticker": "TICKER",
+                "yes_bid": 65,   # cents (dollars field name varies)
+                "yes_ask": 67,
+                ...
+            }
+        """
+        market_id = data.get("market_ticker", "")
+        if not market_id:
+            return
+
+        # The API uses cents; normalise to [0-1].
+        yes_bid_raw = data.get("yes_bid")
+        yes_ask_raw = data.get("yes_ask")
+        snap = TickerSnapshot(
+            market_id=market_id,
+            yes_bid=float(yes_bid_raw) / 100.0 if yes_bid_raw is not None else None,
+            yes_ask=float(yes_ask_raw) / 100.0 if yes_ask_raw is not None else None,
+            last_updated=time.time(),
+        )
+        with self._lock:
+            self._tickers[market_id] = snap
+
+    # ── Level helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_levels(raw: list) -> List[PriceLevel]:
+        """Parse ``[[price_cents, size], ...]`` into PriceLevel list."""
+        levels: List[PriceLevel] = []
+        for entry in raw:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            try:
+                levels.append(
+                    PriceLevel(price=float(entry[0]) / 100.0, size=float(entry[1]))
+                )
+            except (TypeError, ValueError):
+                continue
+        return levels
+
+    @staticmethod
+    def _apply_delta_to_levels(
+        levels: List[PriceLevel],
+        price: float,
+        delta: float,
+        descending: bool,
+    ) -> List[PriceLevel]:
+        """Apply a signed size delta to a list of PriceLevels.
+
+        If the resulting size is <= 0 the level is removed.
+        If the price doesn't exist yet a new level is inserted.
+        Returns a freshly sorted list.
+        """
+        found = False
+        new_levels: List[PriceLevel] = []
+        for lv in levels:
+            if abs(lv.price - price) < 1e-9:
+                found = True
+                new_size = lv.size + delta
+                if new_size > 0:
+                    new_levels.append(PriceLevel(price=lv.price, size=new_size))
+                # else: level removed (size <= 0)
+            else:
+                new_levels.append(lv)
+
+        if not found and delta > 0:
+            new_levels.append(PriceLevel(price=price, size=delta))
+
+        new_levels.sort(key=lambda lv: lv.price, reverse=descending)
+        return new_levels
