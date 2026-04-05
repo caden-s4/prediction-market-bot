@@ -315,10 +315,13 @@ class KalshiWebSocket:
         if not tickers:
             return
         # Kalshi limits subscribe commands; batch in groups of 50.
+        batch_num = 0
         for i in range(0, len(tickers), 50):
             batch = tickers[i:i + 50]
-            await self._send_subscribe(ws, "orderbook_delta", batch)
-            await self._send_subscribe(ws, "ticker", batch)
+            batch_num += 1
+            await self._send_subscribe(ws, "orderbook_delta", batch, batch_num)
+            batch_num += 1
+            await self._send_subscribe(ws, "ticker", batch, batch_num)
         logger.info("Re-subscribed to %d tickers after reconnect", len(tickers))
 
     async def _run_connection(self, ws: Any) -> None:
@@ -346,25 +349,31 @@ class KalshiWebSocket:
 
     async def _cmd_pump(self, ws: Any) -> None:
         """Drain the command queue and send subscribe/unsubscribe frames."""
-        loop = asyncio.get_event_loop()
+        batch_num = 0
         while True:
-            # Non-blocking poll with a short sleep to yield to the recv loop.
-            try:
-                cmd: _WsCommand = await loop.run_in_executor(
-                    None, lambda: self._cmd_queue.get(timeout=0.25)
-                )
-            except queue.Empty:
-                continue
+            # Yield to the recv loop, then drain all pending commands.
+            await asyncio.sleep(0.05)
+            while True:
+                try:
+                    cmd: _WsCommand = self._cmd_queue.get_nowait()
+                except queue.Empty:
+                    break
 
-            if cmd.action == "subscribe":
-                await self._send_subscribe(ws, cmd.channel, cmd.tickers)
-            elif cmd.action == "unsubscribe":
-                await self._send_unsubscribe(ws, cmd.channel, cmd.tickers)
+                if cmd.action == "subscribe":
+                    # Batch at 50 — same limit as _resubscribe_all.
+                    for i in range(0, len(cmd.tickers), 50):
+                        batch = cmd.tickers[i:i + 50]
+                        batch_num += 1
+                        await self._send_subscribe(ws, cmd.channel, batch, batch_num)
+                elif cmd.action == "unsubscribe":
+                    for i in range(0, len(cmd.tickers), 50):
+                        batch = cmd.tickers[i:i + 50]
+                        await self._send_unsubscribe(ws, cmd.channel, batch)
 
     # ── WS frame helpers ─────────────────────────────────────────────────────
 
     async def _send_subscribe(
-        self, ws: Any, channel: str, tickers: List[str]
+        self, ws: Any, channel: str, tickers: List[str], batch_num: int = 0
     ) -> None:
         msg = {
             "id": int(time.time() * 1000),
@@ -375,7 +384,10 @@ class KalshiWebSocket:
             },
         }
         await ws.send(json.dumps(msg))
-        logger.debug("WS subscribe %s: %s", channel, tickers)
+        logger.info(
+            "Sent subscribe for %d tickers (batch %d) channel=%s",
+            len(tickers), batch_num, channel,
+        )
 
     async def _send_unsubscribe(
         self, ws: Any, channel: str, tickers: List[str]
@@ -456,7 +468,7 @@ class KalshiWebSocket:
             self._books[market_id] = _BookEntry(book=book)
 
         logger.debug(
-            "WS snapshot %s: %d bids, %d asks",
+            "Received orderbook_snapshot for %s (%d bids, %d asks)",
             market_id, len(yes_bids), len(yes_asks),
         )
 
