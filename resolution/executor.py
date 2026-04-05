@@ -87,6 +87,15 @@ _EXIT_COOLDOWN_SECONDS = 1800     # 30 minutes
 # before the decay monitor even runs.  Overridable via FINANCIAL_HARD_STOP_THRESHOLD env var.
 FINANCIAL_HARD_STOP_THRESHOLD = 0.20
 
+# Spread gate for _get_current_price().
+# When both YES ask and YES bid are present but the spread is wider than this
+# threshold, the mid-price is meaningless (e.g. bid=0.006, ask=0.997 → mid=0.50).
+# Returning None causes all downstream consumers (hard stop, decay monitor,
+# stale drift check) to skip gracefully rather than act on a garbage price.
+# 0.85 is the widest spread where the mid still carries directional signal:
+# bid=0.10 / ask=0.95 → spread=0.85, mid=0.525 (marginal but usable).
+ILLIQUID_SPREAD_THRESHOLD = 0.85
+
 # Source-name prefixes that identify a financial ground-truth source.
 _FINANCIAL_SOURCE_PREFIXES = ("Yahoo Finance/", "Twelve Data/", "Alpha Vantage/")
 
@@ -3075,6 +3084,19 @@ class ResolutionBot:
             # entry_price = YES BID at order placement (Kalshi stores NO orders
             # using the YES price field).  current_price = YES mid from order book.
             if rec.action == "buy_yes":
+                # Adverse move for buy_yes = YES price fell below entry.
+                # BUT: for deep-ITM YES entries (entry_YES ≈ 0.997), the YES mid
+                # on an illiquid book (bid=0.003, ask=0.997) collapses to 0.50 —
+                # a mid-price artefact that is NOT a real adverse move.
+                # Guard: skip the hard-stop check when entry is deep ITM AND
+                # current mid is near 0.50 (the illiquid sentinel value).
+                # (The spread gate in _get_current_price should prevent this from
+                # ever firing with a spread >0.85, but keep the guard as defence-
+                # in-depth for narrower illiquid spreads that still produce a
+                # misleading mid.)
+                if rec.entry_price > 0.90 and 0.40 <= current_price <= 0.60:
+                    self._hard_stop_count.pop(mid, None)
+                    continue
                 move = rec.entry_price - current_price
             else:
                 # Adverse move for buy_no = YES price rose above entry.
@@ -3546,6 +3568,21 @@ class ResolutionBot:
             if not client:
                 return None
             ob = client.get_order_book(market.market_id)
+            # Spread gate: when both sides are present but the book is illiquid
+            # (e.g. bid=0.006, ask=0.997), the arithmetic mid (~0.50) is a noise
+            # artefact, not a real price signal.  Return None so all downstream
+            # consumers (hard stop, decay monitor, stale drift) skip gracefully.
+            ask = ob.best_yes_ask
+            bid = ob.best_yes_bid
+            if ask is not None and bid is not None:
+                spread = ask - bid
+                if spread > ILLIQUID_SPREAD_THRESHOLD:
+                    logger.debug(
+                        "ResolutionBot: _get_current_price %s — illiquid spread %.3f "
+                        "(bid=%.3f ask=%.3f) > threshold %.2f, suppressing mid_price",
+                        market.market_id, spread, bid, ask, ILLIQUID_SPREAD_THRESHOLD,
+                    )
+                    return None
             return ob.mid_price
         except Exception:
             return None
