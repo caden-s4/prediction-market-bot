@@ -39,6 +39,7 @@ try:
 except ImportError:
     from backports.zoneinfo import ZoneInfo as _ZoneInfo  # type: ignore[no-redef]
 
+from data.markets.kalshi_ws import KalshiWebSocket
 from data.ground_truth.base import GroundTruthResult, SourceType
 from data.ground_truth.economic_fred import FREDEconomicSource
 from data.ground_truth.financial import FinancialDataSource, _PRICE_CACHE as _FINANCIAL_PRICE_CACHE
@@ -455,8 +456,10 @@ class ResolutionBot:
         calendar: Optional[FREDReleaseCalendar] = None,
         force_test: bool = False,
         min_confidence: float = 0.80,
+        kalshi_ws: Optional[KalshiWebSocket] = None,
     ) -> None:
         self._kalshi = kalshi_client
+        self._kalshi_ws = kalshi_ws
         self._poly = poly_client
         self._fee_cache = fee_cache
         self._bankroll = bankroll
@@ -1412,6 +1415,14 @@ class ResolutionBot:
                 "skipping GT evaluation and prefetch"
             )
             return []
+
+        # ── Subscribe WS orderbook for Kalshi candidates ─────────────────
+        if self._kalshi_ws is not None:
+            kalshi_tickers = [
+                m.market_id for m in candidates if m.platform == "kalshi"
+            ]
+            if kalshi_tickers:
+                self._kalshi_ws.subscribe(kalshi_tickers)
 
         # Coverage diagnostic counters — reset to 0 on every call; these are
         # per-cycle (per-batch) counts, never cumulative across cycles.
@@ -3521,10 +3532,30 @@ class ResolutionBot:
         (mid_price is None) or if the fetch fails — both are treated as
         'unverifiable price, skip the trade'.
 
+        Checks the WS orderbook cache first for Kalshi markets (< 30s staleness).
+        Falls back to REST if the WS book is missing or stale.
+
         Polymarket 404: the token is stale or delisted.  The market_id is added
         to _orderbook_perm_skipped so _try_execute() short-circuits on all
         subsequent cycles without issuing another API call.
         """
+        # ── WS cache fast path (Kalshi only) ─────────────────────────────
+        if self._kalshi_ws is not None and market.platform == "kalshi":
+            ws_book = self._kalshi_ws.get_book(market.market_id)
+            if ws_book is not None and ws_book.mid_price is not None:
+                age = self._kalshi_ws.get_book_age(market.market_id)
+                if age is not None and age < 30.0:
+                    logger.debug(
+                        "WS book hit for %s (age=%.1fs)", market.market_id, age
+                    )
+                    return ws_book
+                else:
+                    logger.debug(
+                        "WS book stale for %s (age=%.1fs), falling back to REST",
+                        market.market_id, age or -1,
+                    )
+
+        # ── REST fallback ─────────────────────────────────────────────────
         try:
             client = self._poly if market.platform == "polymarket" else self._kalshi
             if not client:
@@ -3563,6 +3594,28 @@ class ResolutionBot:
             return None
 
     def _get_current_price(self, market: Market) -> Optional[float]:
+        # ── WS cache fast path (Kalshi only) ─────────────────────────────
+        if self._kalshi_ws is not None and market.platform == "kalshi":
+            ws_book = self._kalshi_ws.get_book(market.market_id)
+            if ws_book is not None and ws_book.mid_price is not None:
+                age = self._kalshi_ws.get_book_age(market.market_id)
+                if age is not None and age < 30.0:
+                    # Apply the same spread gate as the REST path.
+                    ask = ws_book.best_yes_ask
+                    bid = ws_book.best_yes_bid
+                    if ask is not None and bid is not None:
+                        spread = ask - bid
+                        if spread > ILLIQUID_SPREAD_THRESHOLD:
+                            logger.debug(
+                                "ResolutionBot: _get_current_price %s — WS illiquid spread %.3f "
+                                "(bid=%.3f ask=%.3f) > threshold %.2f, suppressing",
+                                market.market_id, spread, bid, ask,
+                                ILLIQUID_SPREAD_THRESHOLD,
+                            )
+                            return None
+                    return ws_book.mid_price
+
+        # ── REST fallback ─────────────────────────────────────────────────
         try:
             client = self._poly if market.platform == "polymarket" else self._kalshi
             if not client:

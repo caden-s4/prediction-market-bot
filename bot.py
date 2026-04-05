@@ -24,6 +24,7 @@ import requests
 from config import AppConfig
 from data.ground_truth.economic_fred import FRED_SERIES
 from data.markets.kalshi import KalshiClient
+from data.markets.kalshi_ws import KalshiWebSocket
 from data.markets.polymarket import PolymarketClient
 from data.release_calendar import FREDReleaseCalendar
 from monitoring.alerts import AlertManager
@@ -56,6 +57,7 @@ class BotCoordinator:
 
         # ── Platform clients ──────────────────────────────────────────────
         self._kalshi: Optional[KalshiClient] = None
+        self._kalshi_ws: Optional[KalshiWebSocket] = None
         self._poly: Optional[PolymarketClient] = None
 
         if config.kalshi.enabled:
@@ -64,7 +66,12 @@ class BotCoordinator:
                 api_secret=config.kalshi.api_secret,
                 base_url=config.kalshi.base_url,
             )
-            logger.info("Kalshi client: ENABLED (%s)", config.kalshi.env)
+            self._kalshi_ws = KalshiWebSocket(
+                api_key=config.kalshi.api_key,
+                api_secret=config.kalshi.api_secret,
+            )
+            self._kalshi_ws.start()
+            logger.info("Kalshi client: ENABLED (%s) + WS orderbook", config.kalshi.env)
         else:
             logger.info("Kalshi client: DISABLED")
 
@@ -215,6 +222,7 @@ class BotCoordinator:
             calendar=self._calendar,
             force_test=force_test,
             min_confidence=bc.min_confidence_threshold,
+            kalshi_ws=self._kalshi_ws,
         )
 
         self._cycle_count: int = 0

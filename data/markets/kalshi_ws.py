@@ -70,7 +70,7 @@ class KalshiWebSocket:
 
     Usage::
 
-        ws = KalshiWebSocket(api_key, private_key_path)
+        ws = KalshiWebSocket(api_key, api_secret)
         ws.start()
         ws.subscribe(["KXNASDAQ100U-26APR05-T24399.99"])
         ...
@@ -84,11 +84,11 @@ class KalshiWebSocket:
     def __init__(
         self,
         api_key: str,
-        private_key_path: str,
+        api_secret: str,
         base_url: str = "wss://api.elections.kalshi.com/trade-api/ws/v2",
     ) -> None:
         self._api_key = api_key
-        self._private_key_path = private_key_path
+        self._api_secret = api_secret
         self._base_url = base_url.rstrip("/")
 
         # Thread-safe caches — written by the WS thread, read by the main thread.
@@ -192,7 +192,7 @@ class KalshiWebSocket:
     # ── RSA signing (mirrors KalshiClient._sign) ────────────────────────────
 
     def _load_private_key(self) -> Any:
-        """Load the RSA private key from *self._private_key_path*.
+        """Load the RSA private key from *self._api_secret*.
 
         Accepts either:
         - A PEM-encoded key string (with literal ``\\n`` or real newlines).
@@ -200,7 +200,7 @@ class KalshiWebSocket:
         """
         from cryptography.hazmat.primitives.serialization import load_pem_private_key
 
-        secret = self._private_key_path
+        secret = self._api_secret
         secret = secret.replace("\\n", "\n")
 
         if "BEGIN" in secret:
