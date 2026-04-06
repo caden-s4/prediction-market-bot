@@ -111,6 +111,10 @@ class KalshiWebSocket:
         # RSA private key (loaded lazily on first use).
         self._private_key: Any = None
 
+        # Monotonically increasing message ID counter (thread-safe).
+        self._msg_id: int = 0
+        self._id_lock = threading.Lock()
+
     # ── Public API ───────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -125,7 +129,7 @@ class KalshiWebSocket:
         logger.info("KalshiWebSocket background thread started")
 
     def subscribe(self, market_tickers: list[str]) -> None:
-        """Subscribe to orderbook_delta + ticker channels for the given tickers."""
+        """Subscribe to the orderbook_delta channel for the given tickers."""
         new_tickers: list[str] = []
         with self._sub_lock:
             for t in market_tickers:
@@ -137,13 +141,10 @@ class KalshiWebSocket:
         self._cmd_queue.put(
             _WsCommand("subscribe", "orderbook_delta", new_tickers)
         )
-        self._cmd_queue.put(
-            _WsCommand("subscribe", "ticker", new_tickers)
-        )
-        logger.info("Queued subscribe for %d tickers", len(new_tickers))
+        logger.info("Queued subscribe for %d tickers (already_had=%d)", len(new_tickers), len(self._subscribed) - len(new_tickers))
 
     def unsubscribe(self, market_tickers: list[str]) -> None:
-        """Unsubscribe from orderbook_delta + ticker channels."""
+        """Unsubscribe from the orderbook_delta channel."""
         removed: list[str] = []
         with self._sub_lock:
             for t in market_tickers:
@@ -154,9 +155,6 @@ class KalshiWebSocket:
             return
         self._cmd_queue.put(
             _WsCommand("unsubscribe", "orderbook_delta", removed)
-        )
-        self._cmd_queue.put(
-            _WsCommand("unsubscribe", "ticker", removed)
         )
         # Clean up cached data.
         with self._lock:
@@ -188,6 +186,12 @@ class KalshiWebSocket:
     def connected(self) -> bool:
         """True if the background loop is alive (not necessarily connected)."""
         return self._thread is not None and self._thread.is_alive()
+
+    def _next_id(self) -> int:
+        """Return the next unique message ID (thread-safe)."""
+        with self._id_lock:
+            self._msg_id += 1
+            return self._msg_id
 
     # ── RSA signing (mirrors KalshiClient._sign) ────────────────────────────
 
@@ -309,19 +313,14 @@ class KalshiWebSocket:
             backoff = min(backoff * 2, self._BACKOFF_MAX)
 
     async def _resubscribe_all(self, ws: Any) -> None:
-        """Re-send subscribe commands for all tracked tickers after reconnect."""
+        """Re-send one subscribe per ticker for all tracked markets after reconnect."""
         with self._sub_lock:
             tickers = list(self._subscribed)
         if not tickers:
             return
-        # Kalshi limits subscribe commands; batch in groups of 50.
-        batch_num = 0
-        for i in range(0, len(tickers), 50):
-            batch = tickers[i:i + 50]
-            batch_num += 1
-            await self._send_subscribe(ws, "orderbook_delta", batch, batch_num)
-            batch_num += 1
-            await self._send_subscribe(ws, "ticker", batch, batch_num)
+        for ticker in tickers:
+            await self._send_subscribe(ws, ticker)
+            await asyncio.sleep(0.01)
         logger.info("Re-subscribed to %d tickers after reconnect", len(tickers))
 
     async def _run_connection(self, ws: Any) -> None:
@@ -345,11 +344,16 @@ class KalshiWebSocket:
             except json.JSONDecodeError:
                 logger.warning("Kalshi WS: non-JSON message: %.200s", raw)
                 continue
+            msg_type = data.get("type")
+            logger.debug(
+                "WS recv type=%s market=%s",
+                msg_type,
+                data.get("msg", {}).get("market_ticker", data.get("market_ticker", "?")),
+            )
             self._process_message(data)
 
     async def _cmd_pump(self, ws: Any) -> None:
         """Drain the command queue and send subscribe/unsubscribe frames."""
-        batch_num = 0
         while True:
             # Yield to the recv loop, then drain all pending commands.
             await asyncio.sleep(0.05)
@@ -360,48 +364,41 @@ class KalshiWebSocket:
                     break
 
                 if cmd.action == "subscribe":
-                    # Batch at 50 — same limit as _resubscribe_all.
-                    for i in range(0, len(cmd.tickers), 50):
-                        batch = cmd.tickers[i:i + 50]
-                        batch_num += 1
-                        await self._send_subscribe(ws, cmd.channel, batch, batch_num)
+                    for ticker in cmd.tickers:
+                        await self._send_subscribe(ws, ticker)
+                        await asyncio.sleep(0.01)
                 elif cmd.action == "unsubscribe":
-                    for i in range(0, len(cmd.tickers), 50):
-                        batch = cmd.tickers[i:i + 50]
-                        await self._send_unsubscribe(ws, cmd.channel, batch)
+                    for ticker in cmd.tickers:
+                        await self._send_unsubscribe(ws, ticker)
+                        await asyncio.sleep(0.01)
 
     # ── WS frame helpers ─────────────────────────────────────────────────────
 
-    async def _send_subscribe(
-        self, ws: Any, channel: str, tickers: List[str], batch_num: int = 0
-    ) -> None:
+    async def _send_subscribe(self, ws: Any, ticker: str) -> None:
+        """Send a single subscribe frame for *ticker* on the orderbook_delta channel."""
         msg = {
-            "id": int(time.time() * 1000),
+            "id": self._next_id(),
             "cmd": "subscribe",
             "params": {
-                "channels": [channel],
-                "market_tickers": tickers,
+                "channels": ["orderbook_delta"],
+                "market_ticker": ticker,
             },
         }
         await ws.send(json.dumps(msg))
-        logger.info(
-            "Sent subscribe for %d tickers (batch %d) channel=%s",
-            len(tickers), batch_num, channel,
-        )
+        logger.debug("WS subscribe sent: %s", ticker)
 
-    async def _send_unsubscribe(
-        self, ws: Any, channel: str, tickers: List[str]
-    ) -> None:
+    async def _send_unsubscribe(self, ws: Any, ticker: str) -> None:
+        """Send a single unsubscribe frame for *ticker* on the orderbook_delta channel."""
         msg = {
-            "id": int(time.time() * 1000),
+            "id": self._next_id(),
             "cmd": "unsubscribe",
             "params": {
-                "channels": [channel],
-                "market_tickers": tickers,
+                "channels": ["orderbook_delta"],
+                "market_ticker": ticker,
             },
         }
         await ws.send(json.dumps(msg))
-        logger.debug("WS unsubscribe %s: %s", channel, tickers)
+        logger.debug("WS unsubscribe sent: %s", ticker)
 
     # ── Message processing ───────────────────────────────────────────────────
 
@@ -418,12 +415,21 @@ class KalshiWebSocket:
             code = data.get("code", "?")
             message = data.get("msg", data.get("message", ""))
             logger.warning("Kalshi WS error (code=%s): %s", code, message)
+        elif msg_type == "ok":
+            # Server ack for each per-ticker subscribe command.  The msg.market_tickers
+            # field lists all currently subscribed tickers (cumulative).  Log at DEBUG
+            # only — this fires hundreds of times per cycle and is noisy at INFO.
+            n = len(data.get("msg", {}).get("market_tickers") or [])
+            logger.debug("WS ok id=%s sid=%s seq=%s subscribed_total=%d",
+                         data.get("id"), data.get("sid"), data.get("seq"), n)
         elif msg_type == "subscribed":
-            logger.debug("Kalshi WS subscribed ack: %s", data)
+            sid = data.get("msg", {}).get("sid", data.get("sid", "?"))
+            channel = data.get("msg", {}).get("channel", "?")
+            logger.info("WS session subscribed: channel=%s sid=%s", channel, sid)
         elif msg_type == "unsubscribed":
-            logger.debug("Kalshi WS unsubscribed ack: %s", data)
+            logger.info("WS unsubscribed ack: %s", data.get("msg", data))
         else:
-            logger.debug("Kalshi WS unknown msg type=%s: %.300s", msg_type, data)
+            logger.warning("WS unknown msg type=%s raw: %.200s", msg_type, data)
 
     def _handle_snapshot(self, data: dict) -> None:
         """Replace the full order book for a market from a snapshot message.
@@ -467,7 +473,7 @@ class KalshiWebSocket:
         with self._lock:
             self._books[market_id] = _BookEntry(book=book)
 
-        logger.debug(
+        logger.info(
             "Received orderbook_snapshot for %s (%d bids, %d asks)",
             market_id, len(yes_bids), len(yes_asks),
         )
