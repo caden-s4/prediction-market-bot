@@ -11,7 +11,7 @@ Entry fields:
 
 Exit fields:
   event, ts, market_id, exit_price, pnl, pnl_pct,
-  exit_reason, hold_duration_minutes
+  exit_reason, hold_duration_minutes, exit_was_decisive_gt
 """
 
 from __future__ import annotations
@@ -118,6 +118,7 @@ class PaperTradeLog:
         exit_reason: str,
         hold_duration_minutes: float,
         exit_time: Optional[float] = None,
+        exit_was_decisive_gt: bool = False,
     ) -> None:
         """Append an exit event to the log."""
         ts = (
@@ -134,6 +135,7 @@ class PaperTradeLog:
             "pnl_pct": round(pnl_pct, 4),
             "exit_reason": exit_reason,
             "hold_duration_minutes": round(hold_duration_minutes, 1),
+            "exit_was_decisive_gt": exit_was_decisive_gt,
         }
         self._append(record)
 

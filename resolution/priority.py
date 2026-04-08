@@ -479,7 +479,7 @@ class PriorityScorer:
         if self._financial_source is None:
             return None
         try:
-            price, _ = self._financial_source._fetch_price(symbol)
+            price, _, _ = self._financial_source._fetch_price(symbol)
             if price is None:
                 return None
             # Read the timestamp stored by _fetch_price so staleness calculations
@@ -487,7 +487,7 @@ class PriorityScorer:
             from data.ground_truth.financial import _PRICE_CACHE  # noqa: PLC0415
             cached = _PRICE_CACHE.get(symbol)
             if cached:
-                fetched_at, _, _ = cached
+                fetched_at, _, _, _ = cached
                 return (price, fetched_at)
             # Fallback: use current monotonic time (price was just fetched)
             return (price, time.monotonic())

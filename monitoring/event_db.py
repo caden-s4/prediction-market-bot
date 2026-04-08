@@ -20,7 +20,8 @@ fills
 
 pnl
     id, ts, market_id, platform, entry_price, exit_price,
-    size_usd, pnl_usd, holding_seconds, entry_fee_usd, exit_fee_usd
+    size_usd, pnl_usd, holding_seconds, entry_fee_usd, exit_fee_usd,
+    exit_was_decisive_gt
 
 summary_snapshots
     id, ts, bankroll, total_exposure, open_positions,
@@ -105,17 +106,18 @@ class EventDB:
                 );
 
                 CREATE TABLE IF NOT EXISTS pnl (
-                    id               INTEGER PRIMARY KEY AUTOINCREMENT,
-                    ts               TEXT    NOT NULL,
-                    market_id        TEXT,
-                    platform         TEXT,
-                    entry_price      REAL,
-                    exit_price       REAL,
-                    size_usd         REAL,
-                    pnl_usd          REAL,
-                    holding_seconds  REAL,
-                    entry_fee_usd    REAL    DEFAULT 0.0,
-                    exit_fee_usd     REAL    DEFAULT 0.0
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts                    TEXT    NOT NULL,
+                    market_id             TEXT,
+                    platform              TEXT,
+                    entry_price           REAL,
+                    exit_price            REAL,
+                    size_usd              REAL,
+                    pnl_usd               REAL,
+                    holding_seconds       REAL,
+                    entry_fee_usd         REAL    DEFAULT 0.0,
+                    exit_fee_usd          REAL    DEFAULT 0.0,
+                    exit_was_decisive_gt  INTEGER DEFAULT 0
                 );
 
                 CREATE TABLE IF NOT EXISTS order_book_snapshots (
@@ -146,6 +148,13 @@ class EventDB:
                 CREATE INDEX IF NOT EXISTS idx_ob_snapshots_ts  ON order_book_snapshots(ts);
                 CREATE INDEX IF NOT EXISTS idx_ob_snapshots_mkt ON order_book_snapshots(market_id);
             """)
+            # Migration: add exit_was_decisive_gt to existing pnl tables.
+            try:
+                conn.execute(
+                    "ALTER TABLE pnl ADD COLUMN exit_was_decisive_gt INTEGER DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(str(self._db_path), timeout=10)
@@ -260,19 +269,22 @@ class EventDB:
         holding_seconds: float,
         entry_fee_usd: float = 0.0,
         exit_fee_usd: float = 0.0,
+        exit_was_decisive_gt: bool = False,
     ) -> None:
         """Log a closed trade's P&L."""
         with self._conn() as conn:
             conn.execute(
                 """INSERT INTO pnl
                    (ts, market_id, platform, entry_price, exit_price,
-                    size_usd, pnl_usd, holding_seconds, entry_fee_usd, exit_fee_usd)
-                   VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    size_usd, pnl_usd, holding_seconds, entry_fee_usd, exit_fee_usd,
+                    exit_was_decisive_gt)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     self._now(), market_id, platform,
                     entry_price, exit_price,
                     size_usd, pnl_usd, holding_seconds,
                     entry_fee_usd, exit_fee_usd,
+                    int(exit_was_decisive_gt),
                 ),
             )
         logger.info(

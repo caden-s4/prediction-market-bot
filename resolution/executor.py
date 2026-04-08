@@ -327,7 +327,7 @@ class ResolvedPosition:
     action: str          # "buy_yes" | "buy_no"
     size_usd: float      # dollars wagered (cost basis)
     entry_price: float   # YES price at entry
-    exit_price: float    # YES price at exit (or 1.0/0.0 at market resolution)
+    exit_price: float    # YES price at exit (always live market price; see exit_was_decisive_gt for settlement semantics)
     num_contracts: float # contracts held = size_usd / entry_price (YES) or / (1-entry_price) (NO)
     pnl: float           # realized P&L in dollars
     capture: float       # pnl / theoretical_max  (positive = with the signal)
@@ -336,6 +336,7 @@ class ResolvedPosition:
     resolved_at: datetime
     entered_at: Optional[datetime] = None      # when the trade was opened
     dynamic_exit_threshold: Optional[float] = None  # capture threshold that triggered exit
+    exit_was_decisive_gt: bool = False  # True when GT was both decisive (≤0.02 or ≥0.98) AND fresh at exit
 
 
 def _series_root(market_id: str) -> Optional[str]:
@@ -1732,7 +1733,7 @@ class ResolutionBot:
                 if _otm_symbol is not None:
                     _otm_cache_entry = _FINANCIAL_PRICE_CACHE.get(_otm_symbol)
                     if _otm_cache_entry is not None:
-                        _otm_current_price = _otm_cache_entry[1]  # (fetched_at, price, source)
+                        _otm_current_price = _otm_cache_entry[1]  # (fetched_at, price, source, quote_ts)
                         if _otm_current_price is not None and _otm_current_price > 0:
                             _otm_strike = _parse_strike(market.market_id)
                             if _otm_strike is not None:
@@ -3170,6 +3171,9 @@ class ResolutionBot:
             current_price = self._get_current_price(rec.market)
             if current_price is None:
                 continue
+            _gt_published_at = None
+            if rec.signal and rec.signal.ground_truth_result:
+                _gt_published_at = rec.signal.ground_truth_result.data_published_at
             open_positions.append(OpenResolutionPosition(
                 market_id=rec.market_id,
                 platform=rec.platform,
@@ -3181,6 +3185,7 @@ class ResolutionBot:
                 source_confidence=rec.source_confidence,
                 action=rec.action,
                 distance_pct=rec.distance_pct,
+                ground_truth_published_at=_gt_published_at,
             ))
 
         decisions = self._decay.evaluate(open_positions)
@@ -3199,25 +3204,18 @@ class ResolutionBot:
                     DecayAction.STOP_LOSS:     "stop_loss",
                     DecayAction.APPROACH_EXIT: "resolution",
                 }.get(decision.action, "unknown")
-                # For APPROACH_EXIT (resolution), use settlement price when GT is
-                # decisive — clamped extremes mean outcome is known, so market price
-                # would understate the true P&L.  All other exits use live market price.
-                if decision.action == DecayAction.APPROACH_EXIT:
-                    gt = decision.position.ground_truth_prob
-                    if gt is not None and gt <= 0.02:
-                        _exit_price = 0.0
-                    elif gt is not None and gt >= 0.98:
-                        _exit_price = 1.0
-                    else:
-                        _exit_price = decision.position.current_price  # GT inconclusive
-                else:
-                    _exit_price = decision.position.current_price
+                # exit_price always reflects the live market price at the moment
+                # of exit.  Settlement-prediction semantics are tracked separately
+                # via exit_was_decisive_gt to keep records auditable even when GT
+                # is stale or wrong.
+                _exit_price = decision.position.current_price
                 self._exit_position(
                     mid, decision.current_gain_usd,
                     current_price=_exit_price,
                     capture=decision.capture_ratio,
                     dynamic_exit_threshold=decision.dynamic_exit_threshold,
                     exit_reason=_decay_reason,
+                    exit_was_decisive_gt=decision.decisive_gt,
                 )
                 exits += 1
         return exits
@@ -3287,6 +3285,7 @@ class ResolutionBot:
         capture: Optional[float] = None,
         dynamic_exit_threshold: Optional[float] = None,
         exit_reason: str = "unknown",
+        exit_was_decisive_gt: bool = False,
     ) -> None:
         rec = self._positions.pop(market_id, None)
         if not rec:
@@ -3366,6 +3365,7 @@ class ResolutionBot:
             resolved_at=datetime.utcnow(),
             entered_at=datetime.utcfromtimestamp(rec.entry_time),
             dynamic_exit_threshold=dynamic_exit_threshold,
+            exit_was_decisive_gt=exit_was_decisive_gt,
         ))
 
         if self._paper_log is not None:
@@ -3379,6 +3379,7 @@ class ResolutionBot:
                 pnl_pct=_pnl_pct,
                 exit_reason=exit_reason,
                 hold_duration_minutes=_hold_min,
+                exit_was_decisive_gt=exit_was_decisive_gt,
             )
 
         self._save_positions()

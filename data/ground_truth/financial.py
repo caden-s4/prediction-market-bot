@@ -26,7 +26,7 @@ import logging
 import os
 import re
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Dict, Optional, Tuple
 
 import requests
@@ -429,7 +429,7 @@ class FinancialDataSource(DataSource):
                 )
                 return None
 
-            current_price, price_source = self._fetch_price(symbol)
+            current_price, price_source, quote_timestamp = self._fetch_price(symbol)
             if current_price is None:
                 return None
 
@@ -623,6 +623,7 @@ class FinancialDataSource(DataSource):
                     f"(spatial={spatial_conf:.2f} time={time_conf:.2f} floor={time_floor:.2f})"
                     + (" [ROLLOVER_RISK: size will be reduced to 25%]" if near_rollover else "")
                 ),
+                data_published_at=quote_timestamp,
             )
 
         except Exception as exc:
@@ -704,11 +705,16 @@ class FinancialDataSource(DataSource):
                 return _INSTRUMENT_MAP[kw]
         return "", ""
 
-    def _fetch_price(self, symbol: str) -> Tuple[Optional[float], str]:
+    def _fetch_price(
+        self, symbol: str
+    ) -> Tuple[Optional[float], str, Optional[datetime]]:
         """
-        Return (current market price, source_key) with a 60-second module-level cache.
+        Return (current market price, source_key, quote_timestamp) with a
+        60-second module-level cache.
 
         source_key is one of: "twelve_data" | "alpha_vantage" | "yahoo".
+        quote_timestamp is the data source's own timestamp for the quote
+        (regularMarketTime for Yahoo, datetime for Twelve Data), or None.
 
         Source priority:
           1. Twelve Data  (if TWELVEDATA_API_KEY is set and symbol is mapped)
@@ -722,7 +728,7 @@ class FinancialDataSource(DataSource):
         now = time.monotonic()
         cached = _PRICE_CACHE.get(symbol)
         if cached:
-            fetched_at, price, source_key = cached
+            fetched_at, price, source_key, quote_ts = cached
             ttl = _CACHE_TTL if price is not None else _FAILURE_CACHE_TTL
             if now - fetched_at < ttl:
                 if price is None:
@@ -731,36 +737,43 @@ class FinancialDataSource(DataSource):
                         "%.0fs ago, retry in %.0fs)",
                         symbol, now - fetched_at, ttl - (now - fetched_at),
                     )
-                return price, source_key
+                return price, source_key, quote_ts
 
-        td_price = self._fetch_price_twelve_data(symbol)
+        quote_ts: Optional[datetime] = None
+        td_price, td_ts = self._fetch_price_twelve_data(symbol)
         if td_price is not None:
-            price, source_key = td_price, "twelve_data"
+            price, source_key, quote_ts = td_price, "twelve_data", td_ts
         else:
-            av_price = self._fetch_price_alpha_vantage(symbol)
+            av_price, av_ts = self._fetch_price_alpha_vantage(symbol)
             if av_price is not None:
-                price, source_key = av_price, "alpha_vantage"
+                price, source_key, quote_ts = av_price, "alpha_vantage", av_ts
             else:
-                price, source_key = self._fetch_price_yahoo(symbol), "yahoo"
+                yh_price, yh_ts = self._fetch_price_yahoo(symbol)
+                price, source_key, quote_ts = yh_price, "yahoo", yh_ts
 
         if price is not None:
-            _PRICE_CACHE[symbol] = (time.monotonic(), price, source_key)
+            _PRICE_CACHE[symbol] = (time.monotonic(), price, source_key, quote_ts)
             logger.debug(
                 "FinancialSource: %s price=%.4f (source=%s)", symbol, price, source_key
             )
         else:
             # Cache the failure so subsequent markets referencing the same instrument
             # this cycle skip all API calls immediately instead of re-hitting timeouts.
-            _PRICE_CACHE[symbol] = (time.monotonic(), None, "")
+            _PRICE_CACHE[symbol] = (time.monotonic(), None, "", None)
             logger.debug(
                 "FinancialSource: %s — all APIs failed; caching miss for %ds",
                 symbol, _FAILURE_CACHE_TTL,
             )
-        return price, source_key
+        return price, source_key, quote_ts
 
-    def _fetch_price_twelve_data(self, yahoo_symbol: str) -> Optional[float]:
+    def _fetch_price_twelve_data(
+        self, yahoo_symbol: str
+    ) -> Tuple[Optional[float], Optional[datetime]]:
         """
         Fetch price from Twelve Data /quote endpoint (requires TWELVEDATA_API_KEY).
+
+        Returns (price, quote_timestamp).  The `datetime` field in the response
+        is parsed as the quote timestamp.
 
         /quote returns the latest close price plus open/high/low/volume so we
         can confirm the symbol resolved correctly.  The `close` field is used
@@ -771,10 +784,10 @@ class FinancialDataSource(DataSource):
         60-second symbol cache that limits us to one call per symbol per minute.
         """
         if not _TWELVE_DATA_KEY:
-            return None
+            return None, None
         td_symbol = _TD_SYMBOL_MAP.get(yahoo_symbol)
         if not td_symbol:
-            return None
+            return None, None
         # Skip symbols known to be blocked on the free tier — avoids WARNING spam
         # every cycle.  Falls through to Yahoo Finance silently.
         if td_symbol in _TD_FREE_TIER_BLOCKED:
@@ -783,7 +796,7 @@ class FinancialDataSource(DataSource):
                 "falling back to Yahoo",
                 yahoo_symbol, td_symbol,
             )
-            return None
+            return None, None
         try:
             resp = requests.get(
                 f"{_TD_BASE}/quote",
@@ -794,10 +807,24 @@ class FinancialDataSource(DataSource):
             )
             resp.raise_for_status()
             data = resp.json()
-            # /quote returns {"close": "19823.99", "symbol": "NDX", ...}
+            # /quote returns {"close": "19823.99", "symbol": "NDX", "datetime": "2026-04-08", ...}
             close = data.get("close")
             if close is not None:
-                return float(close)
+                quote_ts: Optional[datetime] = None
+                dt_str = data.get("datetime")
+                if dt_str:
+                    try:
+                        # Twelve Data returns "YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS"
+                        if len(dt_str) > 10:
+                            quote_ts = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        else:
+                            quote_ts = datetime.strptime(dt_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        logger.debug(
+                            "FinancialSource: TwelveData datetime unparseable for %s: %r",
+                            td_symbol, dt_str,
+                        )
+                return float(close), quote_ts
             # Twelve Data returns {"code": 4xx, "message": "..."} on auth/limit errors
             logger.warning(
                 "FinancialSource: TwelveData unexpected /quote response for %s: %s",
@@ -808,21 +835,26 @@ class FinancialDataSource(DataSource):
                 "FinancialSource: TwelveData fetch failed for %s (%s): %s",
                 yahoo_symbol, td_symbol, exc,
             )
-        return None
+        return None, None
 
-    def _fetch_price_alpha_vantage(self, yahoo_symbol: str) -> Optional[float]:
+    def _fetch_price_alpha_vantage(
+        self, yahoo_symbol: str
+    ) -> Tuple[Optional[float], Optional[datetime]]:
         """
         Fetch price from Alpha Vantage API (requires ALPHA_VANTAGE_KEY env var).
+
+        Returns (price, quote_timestamp).  Alpha Vantage provides timestamps in
+        the response; parsed as UTC.
 
         Free tier: 5 calls/minute, 500/day.  Only covers forex and some indices
         on the free plan — futures require a paid subscription so they fall
         through to Yahoo Finance automatically.
         """
         if not _ALPHA_VANTAGE_KEY:
-            return None
+            return None, None
         av_symbol = _AV_SYMBOL_MAP.get(yahoo_symbol)
         if not av_symbol:
-            return None
+            return None, None
 
         try:
             # Forex symbols are encoded as "FROM:TO" in our map
@@ -840,13 +872,17 @@ class FinancialDataSource(DataSource):
                     proxies={},
                 )
                 resp.raise_for_status()
-                rate = (
-                    resp.json()
-                    .get("Realtime Currency Exchange Rate", {})
-                    .get("5. Exchange Rate")
-                )
+                exchange_data = resp.json().get("Realtime Currency Exchange Rate", {})
+                rate = exchange_data.get("5. Exchange Rate")
                 if rate:
-                    return float(rate)
+                    quote_ts: Optional[datetime] = None
+                    ts_str = exchange_data.get("6. Last Refreshed")
+                    if ts_str:
+                        try:
+                            quote_ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                        except ValueError:
+                            pass
+                    return float(rate), quote_ts
             else:
                 # Equity indices / yields via GLOBAL_QUOTE
                 resp = requests.get(
@@ -860,19 +896,32 @@ class FinancialDataSource(DataSource):
                     proxies={},
                 )
                 resp.raise_for_status()
-                price = resp.json().get("Global Quote", {}).get("05. price")
+                quote_data = resp.json().get("Global Quote", {})
+                price = quote_data.get("05. price")
                 if price:
-                    return float(price)
+                    quote_ts_gq: Optional[datetime] = None
+                    ts_str = quote_data.get("07. latest trading day")
+                    if ts_str:
+                        try:
+                            quote_ts_gq = datetime.strptime(ts_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                        except ValueError:
+                            pass
+                    return float(price), quote_ts_gq
         except Exception as exc:
             logger.warning(
                 "FinancialSource: AlphaVantage fetch failed for %s (%s): %s",
                 yahoo_symbol, av_symbol, exc,
             )
-        return None
+        return None, None
 
-    def _fetch_price_yahoo(self, symbol: str) -> Optional[float]:
+    def _fetch_price_yahoo(
+        self, symbol: str
+    ) -> Tuple[Optional[float], Optional[datetime]]:
         """
         Fetch price from Yahoo Finance (unofficial but broadly reliable fallback).
+
+        Returns (price, quote_timestamp) where quote_timestamp is the
+        regularMarketTime converted to a UTC datetime, or None if unavailable.
 
         Retries once with a 1-second backoff — Yahoo occasionally rate-limits
         burst requests, and a single retry recovers most transient failures.
@@ -891,13 +940,30 @@ class FinancialDataSource(DataSource):
                 )
                 resp.raise_for_status()
                 meta = resp.json()["chart"]["result"][0]["meta"]
-                return float(meta["regularMarketPrice"])
+                price = float(meta["regularMarketPrice"])
+                quote_ts: Optional[datetime] = None
+                rmt = meta.get("regularMarketTime")
+                if rmt is not None:
+                    try:
+                        quote_ts = datetime.fromtimestamp(int(rmt), tz=timezone.utc)
+                    except (ValueError, OSError):
+                        logger.debug(
+                            "FinancialSource: Yahoo regularMarketTime unparseable "
+                            "for %s: %r", symbol, rmt,
+                        )
+                else:
+                    logger.debug(
+                        "FinancialSource: Yahoo response for %s missing "
+                        "regularMarketTime — data_published_at will be None",
+                        symbol,
+                    )
+                return price, quote_ts
             except Exception as exc:
                 logger.warning(
                     "FinancialSource: Yahoo fetch failed for %s (attempt %d/2): %s",
                     symbol, attempt + 1, exc,
                 )
-        return None
+        return None, None
 
     def _extract_threshold_and_direction(
         self, question: str, market_id: str

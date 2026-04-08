@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
@@ -64,6 +65,7 @@ STOP_LOSS_RATIO = 0.50             # exit if position moved 50%+ against us
 STOP_LOSS_MIN_HOURS = 4.0          # only apply stop-loss if > 4h to resolution
 APPROACH_THRESHOLD_HOURS = 0.25    # < 15 min to resolution = "approaching"
 HIGH_CONFIDENCE_HOLD_THRESHOLD = 0.90  # hold through resolution only if this confident
+GT_FRESHNESS_SECONDS = 60              # max age of GT data to be considered fresh for decisive-exit logic
 
 # Time-based escalation: if a position is 30%+ adverse AND resolution is
 # approaching fast (< 45 min), escalate to an urgent stop-loss exit regardless
@@ -137,6 +139,7 @@ class OpenResolutionPosition:
     source_confidence: float     # confidence score at entry
     action: str                  # "buy_yes" | "buy_no"
     distance_pct: float = 0.0   # underlying price distance from resolution threshold (%)
+    ground_truth_published_at: Optional[datetime] = None  # when GT data was published (for staleness check)
 
 
 @dataclass
@@ -148,6 +151,7 @@ class DecayDecision:
     current_gain_usd: float
     reason: str
     dynamic_exit_threshold: float = EARLY_EXIT_CAPTURE_RATIO  # threshold that triggered (or was checked)
+    decisive_gt: bool = False  # True only when GT is both decisive (≤0.02 or ≥0.98) AND fresh
 
 
 class DecayMonitor:
@@ -268,6 +272,28 @@ class DecayMonitor:
                     f"<15min to resolution. Source confidence={pos.source_confidence:.2f} "
                     f"< {HIGH_CONFIDENCE_HOLD_THRESHOLD} – exiting to avoid oracle dispute."
                 )
+
+            # Determine whether GT is both decisive AND fresh enough to trust.
+            _gt = pos.ground_truth_prob
+            _gt_extreme = _gt is not None and (_gt <= 0.02 or _gt >= 0.98)
+            _gt_fresh = False
+            if pos.ground_truth_published_at is not None:
+                _gt_age = (datetime.now(timezone.utc) - pos.ground_truth_published_at).total_seconds()
+                _gt_fresh = _gt_age <= GT_FRESHNESS_SECONDS
+            else:
+                _gt_age = float("inf")
+
+            _decisive = _gt_extreme and _gt_fresh
+
+            if action == DecayAction.APPROACH_EXIT and _gt_extreme and not _gt_fresh:
+                logger.warning(
+                    "GT_STALE_AT_EXIT market=%s gt_age=%.0fs gt_prob=%.4f "
+                    "exit_price=%.4f",
+                    pos.market_id, _gt_age,
+                    _gt if _gt is not None else 0.0,
+                    pos.current_price,
+                )
+
             return DecayDecision(
                 position=pos,
                 action=action,
@@ -275,6 +301,7 @@ class DecayMonitor:
                 current_gain_usd=current_gain,
                 dynamic_exit_threshold=exit_thresh,
                 reason=reason,
+                decisive_gt=_decisive,
             )
 
         # ── Default: hold ─────────────────────────────────────────────────
