@@ -87,7 +87,10 @@ class BotCoordinator:
             mode_label = "public/read-only" if config.polymarket.public_mode else "authenticated"
             logger.info("Polymarket client: ENABLED (%s)", mode_label)
         else:
-            logger.info("Polymarket client: DISABLED")
+            logger.info(
+                "Polymarket: DISABLED (POLYMARKET_ENABLED=false) "
+                "— set to true and provide credentials to enable"
+            )
 
         if not self._kalshi and not self._poly:
             raise RuntimeError(

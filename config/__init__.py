@@ -75,7 +75,7 @@ class PolymarketConfig:
 
     @classmethod
     def from_env(cls) -> "PolymarketConfig":
-        enabled = _get("POLYMARKET_ENABLED", "true").lower() != "false"
+        enabled = _get("POLYMARKET_ENABLED", "false").lower() != "false"
         public_mode = _get("POLYMARKET_PUBLIC_MODE", "false").lower() != "false"
         need_creds = enabled and not public_mode
         return cls(
