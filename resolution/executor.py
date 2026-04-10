@@ -179,7 +179,9 @@ MIN_EV = 0.02
 # gate.  In ghost-trade (dry_run) mode, cross-platform signals are allowed
 # through at the lower ghost gate so pair-matching accuracy can be validated
 # before real money is committed.
-CONFIDENCE_GATE_LIVE                = 0.80
+# Mirrors MIN_CONFIDENCE_THRESHOLD env var. Used in log messages only —
+# actual gate is set via ConfidenceScorer(threshold=...) in __init__.
+CONFIDENCE_GATE_LIVE                = 0.65
 CONFIDENCE_GATE_GHOST_CROSS_PLATFORM = 0.50
 
 # Time-adjusted entry gap uses a tiered curve (see _minimum_gap_for_entry).

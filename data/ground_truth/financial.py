@@ -355,15 +355,26 @@ class FinancialDataSource(DataSource):
             "TWELVEDATA_API_KEY present=%s",
             td_alias, td_canonical,
         )
-        if _TWELVE_DATA_KEY:
-            provider = "twelve_data"
-        elif _ALPHA_VANTAGE_KEY:
+        # key_active: reflects whether Twelve Data will actually serve data for
+        # the bot's primary instruments (indices, commodities, yields).  All of
+        # these map to symbols in _TD_FREE_TIER_BLOCKED on the basic plan, so
+        # every fetch falls through to Yahoo Finance regardless of key presence.
+        # Forex/NG/YM are theoretically unblocked but the bot has no active
+        # Kalshi bracket markets for them currently.
+        # Set key_active=True when upgrading to a paid Twelve Data plan.
+        key_active = False  # all primary bot symbols blocked by free-tier list
+        if _ALPHA_VANTAGE_KEY:
             provider = "alpha_vantage"
+        elif _TWELVE_DATA_KEY:
+            # Key present but all primary bot symbols (indices, commodities,
+            # yields) are in _TD_FREE_TIER_BLOCKED.  Every fetch falls through
+            # to Yahoo Finance.  Code path preserved for plan upgrade.
+            provider = "yahoo (twelve_data dormant — free tier blocks all bot symbols; upgrade plan to activate)"
         else:
             provider = "yahoo (fallback — set TWELVEDATA_API_KEY or TWELVE_API_KEY for higher confidence)"
         logger.info(
             "FinancialDataSource: active provider=%s  key_active=%s",
-            provider, bool(_TWELVE_DATA_KEY),
+            provider, key_active,
         )
         if _SIMULATE_PRO_DATA and not _TWELVE_DATA_KEY:
             logger.warning(
