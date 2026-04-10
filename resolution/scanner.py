@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
@@ -50,6 +51,14 @@ RESOLUTION_WINDOW_HOURS = 720
 
 # Minimum order book depth (total $ on best bid + ask) to consider a market
 MIN_DEPTH_USD = 50.0
+
+# Parallelism for refresh_markets(): one worker per market handles the
+# get_market() + get_order_book() pair.  Kalshi's REST client has 429 retry
+# with exponential backoff (see data/markets/kalshi.py), but at 8 workers the
+# order-book endpoint produced ~16 429 warnings per cycle.  4 workers is the
+# empirically safe value — still an order of magnitude faster than sequential,
+# without triggering the rate limiter.
+TIER_REFRESH_MAX_WORKERS = 4
 
 
 class ResolutionScanner:
@@ -158,20 +167,22 @@ class ResolutionScanner:
         slightly stale prices here only affect the initial gap-detection pass.
 
         Returns a list the same length as ``markets``.
+
+        Per-market refreshes run in parallel via a ThreadPoolExecutor so a
+        large tier batch (hundreds of markets × 2 API calls each) doesn't
+        dominate cycle time.  Input ordering is preserved in the output.
         """
-        refreshed: List[Market] = []
-        for market in markets:
+        if not markets:
+            return []
+
+        def _refresh_one(market: Market) -> Market:
             client = self._kalshi if market.platform == "kalshi" else self._poly
             if client is None:
-                refreshed.append(market)
-                continue
+                return market
             try:
                 fresh = client.get_market(market.market_id)
                 if fresh is None:
-                    refreshed.append(market)
-                    continue
-
-                # Overlay live order book mid_price to correct stale yes_price.
+                    return market
                 try:
                     ob = client.get_order_book(market.market_id)
                     if ob is not None and ob.mid_price is not None:
@@ -179,14 +190,40 @@ class ResolutionScanner:
                 except Exception:
                     # Order book fetch failed; keep fresh.yes_price from get_market().
                     pass
-
-                refreshed.append(fresh)
+                return fresh
             except Exception as exc:
                 logger.debug(
                     "ResolutionScanner: refresh failed for %s/%s: %s",
                     market.platform, market.market_id, exc,
                 )
-                refreshed.append(market)
+                return market
+
+        # Fast path: single market or single-worker config → sequential with
+        # the historical stagger (keeps behaviour identical when parallelism
+        # is disabled for debugging).
+        if TIER_REFRESH_MAX_WORKERS <= 1 or len(markets) == 1:
+            return [_refresh_one(m) for m in markets]
+
+        # Parallel path: preserve input ordering by indexing futures.
+        refreshed: List[Market] = [markets[0]] * len(markets)  # placeholder
+        workers = min(TIER_REFRESH_MAX_WORKERS, len(markets))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_idx = {
+                pool.submit(_refresh_one, m): i for i, m in enumerate(markets)
+            }
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    refreshed[idx] = future.result()
+                except Exception as exc:
+                    # Belt-and-suspenders: _refresh_one catches its own errors,
+                    # but if the worker itself raises, fall back to the original
+                    # market object so the batch length and ordering stay intact.
+                    logger.debug(
+                        "ResolutionScanner: refresh worker crashed for %s/%s: %s",
+                        markets[idx].platform, markets[idx].market_id, exc,
+                    )
+                    refreshed[idx] = markets[idx]
         return refreshed
 
     # ── Internal ──────────────────────────────────────────────────────────────

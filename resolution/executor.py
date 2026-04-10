@@ -120,6 +120,14 @@ DISCOVERY_INTERVAL = 900   # seconds
 TIER_REQUEST_STAGGER_S = 0.15    # base sleep between per-market calls
 TIER_STAGGER_JITTER_S  = 0.10    # max random addition to stagger
 
+# Hard per-cycle batch caps.  Regardless of how the batch-size math shakes
+# out (e.g. scan_interval > TIER_N_INTERVAL collapsing cycles_per_interval
+# to 1), no single cycle will attempt to refresh more than this many markets
+# in a given tier.  Keeps a misconfigured interval from blowing up cycle time.
+TIER_1_MAX_BATCH_SIZE = 50
+TIER_2_MAX_BATCH_SIZE = 150
+TIER_3_MAX_BATCH_SIZE = 30
+
 # ── Other constants ────────────────────────────────────────────────────────────
 
 # Do not enter new positions during the first 60 seconds after startup.
@@ -727,6 +735,8 @@ class ResolutionBot:
 
         self._kalshi_backend_down = False   # reset circuit breaker each cycle
         cycle_start = time.monotonic()
+        self._cycle_start_monotonic = cycle_start  # stash for sub-methods
+        logger.info("[CYCLE_TIMING] phase=cycle_total event=start elapsed_since_cycle_start=0.0s")
         now_mono = time.monotonic()
         summary: dict = {
             "markets_scanned": 0,
@@ -798,14 +808,20 @@ class ResolutionBot:
         # ── Discovery scan (every DISCOVERY_INTERVAL) ──────────────────────
         # Full platform fetch: finds new markets and seeds/refreshes the registry.
         if now_mono - self._last_discovery_at >= DISCOVERY_INTERVAL:
+            logger.info("[CYCLE_TIMING] phase=discovery_scan event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
             self._run_discovery()
             self._last_discovery_at = time.monotonic()
+            logger.info("[CYCLE_TIMING] phase=discovery_scan event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
+        else:
+            logger.info("[CYCLE_TIMING] phase=discovery_scan event=skipped elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
 
         # Promote markets that have crossed tier boundaries since last cycle.
+        logger.info("[CYCLE_TIMING] phase=tier_promotions event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
         self._registry.evict_expired()
         promoted = self._registry.promote_due()
         if promoted:
             logger.info("TierRegistry: %d market(s) promoted to a higher tier", promoted)
+        logger.info("[CYCLE_TIMING] phase=tier_promotions event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
 
         # Prune no-source skip dicts against current registry to prevent
         # unbounded growth from resolved/evicted markets accumulating over long sessions.
@@ -816,18 +832,31 @@ class ResolutionBot:
         self._no_source_perm_skipped &= live_ids
 
         # Sync Polymarket WebSocket subscriptions with current Tier 1 set.
+        logger.info("[CYCLE_TIMING] phase=ws_subscribe_drain event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
         t1_ids = {e.market_id for e in self._registry.get_tier(1)}
         self._ws.sync_subscriptions(t1_ids)
+        logger.info("[CYCLE_TIMING] phase=ws_subscribe_drain event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
 
         # ── Tier 1: refresh all active-watch markets (every cycle) ─────────
         # Sort by priority_score so the highest-priority markets are evaluated
         # first within the cycle.  Scores are preserved through the refresh so
         # the ordering persists until the next discovery re-scores the batch.
+        logger.info("[CYCLE_TIMING] phase=tier_ingestion event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
         t1_entries = sorted(
             self._registry.get_tier(1),
             key=lambda e: getattr(e.market, "priority_score", 0.0),
             reverse=True,
         )
+        # Hard cap (safety): T1 should always fit under this, but if some
+        # mis-tiering ever promoted a huge pool to T1 we don't want a single
+        # cycle to try refreshing all of it.  Highest-priority entries win.
+        if len(t1_entries) > TIER_1_MAX_BATCH_SIZE:
+            logger.warning(
+                "ResolutionBot: T1 pool %d exceeds TIER_1_MAX_BATCH_SIZE=%d; "
+                "capping this cycle's T1 refresh",
+                len(t1_entries), TIER_1_MAX_BATCH_SIZE,
+            )
+            t1_entries = t1_entries[:TIER_1_MAX_BATCH_SIZE]
         if t1_entries:
             # Snapshot priority scores before refresh (refresh returns new Market
             # objects that don't carry the dynamic attribute).
@@ -838,7 +867,9 @@ class ResolutionBot:
             # Pull any order-book updates from the WebSocket first (free, fast).
             ws_prices = self._ws.get_pending_updates()
             t1_raw = [e.market for e in t1_entries]
+            logger.info("[CYCLE_TIMING] phase=tier_ingestion_t1_refresh event=start elapsed_since_cycle_start=%.1fs t1_count=%d", time.monotonic() - cycle_start, len(t1_raw))
             t1_markets = self._scanner.refresh_markets(t1_raw)
+            logger.info("[CYCLE_TIMING] phase=tier_ingestion_t1_refresh event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
             for m in t1_markets:
                 # Restore priority score so sort order persists across refreshes.
                 if not hasattr(m, "priority_score"):
@@ -858,7 +889,9 @@ class ResolutionBot:
             t2_priority = {
                 m.market_id: getattr(m, "priority_score", 0.0) for m in t2_batch_raw
             }
+            logger.info("[CYCLE_TIMING] phase=tier_ingestion_t2_refresh event=start elapsed_since_cycle_start=%.1fs t2_count=%d", time.monotonic() - cycle_start, len(t2_batch_raw))
             t2_markets = self._scanner.refresh_markets(t2_batch_raw)
+            logger.info("[CYCLE_TIMING] phase=tier_ingestion_t2_refresh event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
             for m in t2_markets:
                 if not hasattr(m, "priority_score"):
                     m.priority_score = t2_priority.get(m.market_id, 0.0)
@@ -873,7 +906,9 @@ class ResolutionBot:
             t3_priority = {
                 m.market_id: getattr(m, "priority_score", 0.0) for m in t3_batch_raw
             }
+            logger.info("[CYCLE_TIMING] phase=tier_ingestion_t3_refresh event=start elapsed_since_cycle_start=%.1fs t3_count=%d", time.monotonic() - cycle_start, len(t3_batch_raw))
             t3_markets = self._scanner.refresh_markets(t3_batch_raw)
+            logger.info("[CYCLE_TIMING] phase=tier_ingestion_t3_refresh event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
             for m in t3_markets:
                 if not hasattr(m, "priority_score"):
                     m.priority_score = t3_priority.get(m.market_id, 0.0)
@@ -884,6 +919,7 @@ class ResolutionBot:
         # every cycle instead of only during discovery.  The T3 batch is already
         # a small rotating slice (TIER_3_INTERVAL=1800s ÷ cycle), so the added
         # API load per cycle is modest.
+        logger.info("[CYCLE_TIMING] phase=tier_ingestion event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
         active_markets = t1_markets + t2_markets + (t3_markets if t3_batch_raw else [])
         summary["markets_scanned"] = len(active_markets)
         summary["t1_scanned"]      = len(t1_markets)
@@ -1072,6 +1108,7 @@ class ResolutionBot:
             )
 
         # ── Information signals (GT fetch for active markets) ───────────────
+        logger.info("[CYCLE_TIMING] phase=gt_fetch_loop event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
         try:
             info_signals = self._fetch_info_signals(active_markets)
         except Exception:
@@ -1080,6 +1117,7 @@ class ResolutionBot:
                 "returning empty signals for this cycle"
             )
             info_signals = []
+        logger.info("[CYCLE_TIMING] phase=gt_fetch_loop event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
 
         # Urgent-promote markets with detected info gaps.
         for sig in info_signals:
@@ -1144,6 +1182,7 @@ class ResolutionBot:
                     )
 
         # ── Confidence gate pre-screen (for display/logging only) ───────────
+        logger.info("[CYCLE_TIMING] phase=signal_eval event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
         display_signals: List[GapSignal] = []
         confidence_blocked = 0
         cooldown_blocked = 0
@@ -1197,8 +1236,10 @@ class ResolutionBot:
             if detail is not None:
                 summary["trades_fired"] += 1
                 summary["trade_details"].append(detail)
+        logger.info("[CYCLE_TIMING] phase=signal_eval event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
 
         # ── Monitor open positions ───────────────────────────────────────────
+        logger.info("[CYCLE_TIMING] phase=cycle_summary_write event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
         exits = self._monitor_positions()
         summary["exits_triggered"] = exits
 
@@ -1228,6 +1269,8 @@ class ResolutionBot:
             _day = self._paper_log.get_daily_summary()
             if _day["total_entries"] > 0:
                 _print_paper_summary(_day)
+        logger.info("[CYCLE_TIMING] phase=cycle_summary_write event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
+        logger.info("[CYCLE_TIMING] phase=cycle_total event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
 
         return summary
 
@@ -1245,8 +1288,11 @@ class ResolutionBot:
         so they never consume T1 slots or reach the GT routing loop.
         """
         logger.info("ResolutionBot: running discovery scan (full platform fetch)")
+        _cs = getattr(self, "_cycle_start_monotonic", time.monotonic())
         try:
+            logger.info("[CYCLE_TIMING] phase=polymarket_scan event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - _cs)
             markets = self._scanner.scan()
+            logger.info("[CYCLE_TIMING] phase=polymarket_scan event=end elapsed_since_cycle_start=%.1fs total_markets=%d", time.monotonic() - _cs, len(markets))
 
             # Filter novelty markets before registry ingest.
             clean_markets = []
@@ -1299,9 +1345,13 @@ class ResolutionBot:
                     # discovery cycle after TTL expiry without force-clearing.
                     # Explicitly nulling _last_built would bypass the TTL guard
                     # and defeat the fix in needs_rebuild().
+                    logger.info("[CYCLE_TIMING] phase=cross_platform_rebuild event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - _cs)
                     self._gap_detector.run_cross_platform_scan(
                         kalshi_markets, poly_markets
                     )
+                    logger.info("[CYCLE_TIMING] phase=cross_platform_rebuild event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - _cs)
+                else:
+                    logger.info("[CYCLE_TIMING] phase=cross_platform_rebuild event=skipped elapsed_since_cycle_start=%.1fs", time.monotonic() - _cs)
             except Exception as xp_exc:
                 logger.warning(
                     "ResolutionBot: cross-platform pair rebuild failed: %s", xp_exc
@@ -1334,14 +1384,25 @@ class ResolutionBot:
             return []
 
         interval = TIER_2_INTERVAL if tier == 2 else TIER_3_INTERVAL
+        max_batch = TIER_2_MAX_BATCH_SIZE if tier == 2 else TIER_3_MAX_BATCH_SIZE
         # How many markets to process per cycle to cover the full tier within
         # one tier interval.  Use the actual configured scan interval (e.g. 60s
         # from main.py) rather than TIER_1_INTERVAL (15s); if we used 15s here
         # but cycles only fire every 60s, we'd cover 4× fewer markets per cycle
         # and need 4× as long to sweep the full T2/T3 pool.
-        cycle_s = max(1, self._scan_interval)
-        cycles_per_interval = max(1, interval // cycle_s)
+        #
+        # Previously `interval // cycle_s` with an integer floor of 1 had the
+        # effect of forcing cycles_per_interval = 1 whenever scan_interval >
+        # interval (e.g. main.py scan_interval=300 vs TIER_2_INTERVAL=150),
+        # which made batch_size = len(entries) and caused a full sweep every
+        # cycle.  Float division is cosmetic given the max(1.0, ...) floor —
+        # the real fix is the hard `max_batch` cap below, which guarantees no
+        # single cycle refreshes more than TIER_N_MAX_BATCH_SIZE markets
+        # regardless of config.
+        cycle_s = max(1.0, float(self._scan_interval))
+        cycles_per_interval = max(1.0, interval / cycle_s)
         batch_size = max(1, math.ceil(len(entries) / cycles_per_interval))
+        batch_size = min(batch_size, max_batch)
 
         cursor = self._tier_cursors.get(tier, 0) % len(entries)
         end = cursor + batch_size
@@ -1444,12 +1505,15 @@ class ResolutionBot:
             return []
 
         # ── Subscribe WS orderbook for Kalshi candidates ─────────────────
+        _cs = getattr(self, "_cycle_start_monotonic", time.monotonic())
+        logger.info("[CYCLE_TIMING] phase=ws_subscribe_drain event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - _cs)
         if self._kalshi_ws is not None:
             kalshi_tickers = [
                 m.market_id for m in candidates if m.platform == "kalshi"
             ]
             if kalshi_tickers:
                 self._kalshi_ws.subscribe(kalshi_tickers)
+        logger.info("[CYCLE_TIMING] phase=ws_subscribe_drain event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - _cs)
 
         # Coverage diagnostic counters — reset to 0 on every call; these are
         # per-cycle (per-batch) counts, never cumulative across cycles.
@@ -1502,6 +1566,7 @@ class ResolutionBot:
         # Performance: use the module-level TTL cache to skip markets refreshed
         # recently, then fan out remaining calls across 8 threads to avoid the
         # 200+ serial HTTP calls that previously took 60–90s per cycle.
+        logger.info("[CYCLE_TIMING] phase=pre_gt_price_refresh event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - _cs)
         _now_mono = time.monotonic()
         _markets_by_id: Dict[str, object] = {m.market_id: m for m in candidates}
         _to_refresh: List[str] = []
@@ -1600,6 +1665,7 @@ class ResolutionBot:
                 "ResolutionBot: pre-GT price refresh done — %d ok, %d failed, %.1fs",
                 _refresh_ok, _refresh_fail, time.monotonic() - _t_refresh_start,
             )
+        logger.info("[CYCLE_TIMING] phase=pre_gt_price_refresh event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - _cs)
         # ─────────────────────────────────────────────────────────────────────
 
         # ── Uniform-50 illiquid filter (NOW uses refreshed prices) ───────────
@@ -1654,10 +1720,13 @@ class ResolutionBot:
         # return instantly instead of blocking on HTTP.  Reduces cycle time from
         # ~28s (sequential) to ~7s (parallel: 4 symbols × 7s → 1 × 7s + overhead).
         _all_financial_symbols = [s for s in _SERIES_TO_SYMBOL.values() if s is not None]
+        logger.info("[CYCLE_TIMING] phase=financial_prefetch event=start elapsed_since_cycle_start=%.1fs symbols=%d", time.monotonic() - _cs, len(_all_financial_symbols))
         if _all_financial_symbols:
             self._ground_truth.prefetch_financial_prices(_all_financial_symbols)
+        logger.info("[CYCLE_TIMING] phase=financial_prefetch event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - _cs)
         # ─────────────────────────────────────────────────────────────────────
 
+        logger.info("[CYCLE_TIMING] phase=gt_fetch_loop_inner event=start elapsed_since_cycle_start=%.1fs candidates=%d", time.monotonic() - _cs, total)
         for i, market in enumerate(candidates, 1):
             if i % 25 == 0 or i == total:
                 logger.info(
@@ -1982,6 +2051,8 @@ class ResolutionBot:
             else:
                 n_gap_too_small += 1
                 gt_evaluated.add(market.market_id)
+
+        logger.info("[CYCLE_TIMING] phase=gt_fetch_loop_inner event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - _cs)
 
         # Emit a single summary line so operators can distinguish
         # "no data sources cover these markets" from "markets are efficiently priced".
