@@ -204,6 +204,14 @@ MAX_SERIES_EXPOSURE_FRACTION_GHOST = 0.50
 # For BUY YES: cost = entry_price.  For BUY NO: cost = 1 - entry_price.
 MIN_EFFECTIVE_ENTRY_PRICE = 0.05   # 5 cents
 
+# Hard floor on YES price for entry, regardless of side. Defense-in-depth
+# against extreme-price entries where:
+#   - Orderbook depth in ghost mode is unrealistic
+#   - Kelly contract counts explode at extreme prices
+#   - Stale GT data has the largest impact in absolute terms
+# This is a backstop, not a substitute for correct EV / fee modeling.
+MIN_ENTRY_YES_PRICE = 0.02
+MAX_ENTRY_YES_PRICE = 0.98
 
 
 def _minimum_gap_for_entry(hours_remaining: float) -> float:
@@ -237,24 +245,40 @@ def _check_minimum_ev(
     """
     Compute absolute expected value per contract and check against MIN_EV.
 
-    For BUY YES at YES price p with ground-truth probability g:
-        EV = g*(1-p) - (1-g)*p  =  g - p
+    market_price is always the YES price (0–1).
 
-    For BUY NO at YES price p with ground-truth probability g:
-        EV = (1-g)*(1-p) - g*p  =  (1-g) - p
+    BUY YES: buying YES at yes_price p per contract.
+        YES wins with probability g; payout = 1.0 per contract.
+        EV = g * 1.0 - p  =  g - p
+        ⟹  ev = gt_prob - market_price
+
+    BUY NO: buying NO at cost (1 - yes_price) per contract.
+        NO wins with probability (1 - g); payout = 1.0 per contract.
+        EV = (1-g) * 1.0 - (1 - p)  =  p - g
+        ⟹  ev = market_price - gt_prob
+        NOTE: market_price here is the YES price, NOT the cost of NO.
+              The old formula used (1-g) - p which treated the YES price
+              as if it were the NO cost — that was wrong and let every
+              cheap-YES / large-NO-edge trade through with fake +EV.
 
     EV is dollars of edge per contract, independent of position size.
 
     Returns (passes_gate, ev).
 
     Validation examples:
-      Gas BUY YES at 0.99, gt=0.00 → EV = 0.00-0.99 = -0.99 → BLOCKED ✓
-      S&P BUY NO at 0.095, gt=0.00 → EV = 1.00-0.095 = 0.905 → PASS  ✓
+      BUY YES  gt=0.99, yes=0.50   → EV = 0.99-0.50  = +0.49  → PASS  ✓
+      BUY YES  gt=0.99, yes=0.9991 → EV = 0.99-0.9991 = -0.009 → BLOCK ✓
+      BUY NO   gt=0.05, yes=0.0002 → EV = 0.0002-0.05 = -0.050 → BLOCK ✓
+      BUY NO   gt=0.05, yes=0.50   → EV = 0.50-0.05   = +0.45  → PASS  ✓
+      BUY NO   gt=0.95, yes=0.99   → EV = 0.99-0.95   = +0.04  → PASS  ✓
     """
     if action == "buy_yes":
+        # Buying YES at yes_price; wins with probability gt_prob.
         ev = gt_prob - market_price
     else:  # buy_no
-        ev = (1.0 - gt_prob) - market_price
+        # Buying NO at cost (1 - yes_price); wins with probability (1 - gt_prob).
+        # EV = (1 - gt_prob) * 1.0 - (1 - market_price)  =  market_price - gt_prob
+        ev = market_price - gt_prob
     return ev >= MIN_EV, ev
 
 
@@ -2438,6 +2462,28 @@ class ResolutionBot:
             )
             signal.target_price = live_price
             signal.effective_gap = live_effective_gap
+            # EV recheck: now that the price has been updated to the live price,
+            # re-run the MIN_EV gate.  The original EV check (below) ran against
+            # the stale scanner price — it may have passed only because the stale
+            # price created a phantom gap.  This catches e.g. BUY YES entries
+            # that looked cheap at the scanner price but are now at 0.99 live.
+            _stale_gt_prob = (
+                gt.ground_truth_prob
+                if gt and gt.ground_truth_prob is not None
+                else signal.reference_price
+            )
+            _stale_ev_passes, _stale_ev = _check_minimum_ev(
+                live_price, _stale_gt_prob, signal.action
+            )
+            if not _stale_ev_passes:
+                logger.info(
+                    "ResolutionBot: SKIP %s stale_price_ev_recheck_failed "
+                    "ev=%.4f threshold=%.2f "
+                    "(action=%s live_price=%.4f gt_prob=%.4f)",
+                    mid, _stale_ev, MIN_EV,
+                    signal.action, live_price, _stale_gt_prob,
+                )
+                return None
 
         # Fee check: re-verify with live fee (fee may have changed since gap detection).
         # Do NOT subtract fee from signal.effective_gap — the gap detector already
@@ -2683,6 +2729,22 @@ class ResolutionBot:
                 "leverage at extreme price",
                 mid, _eff_cost, MIN_EFFECTIVE_ENTRY_PRICE,
                 signal.action, limit_price,
+            )
+            return None
+
+        # ── Hard YES-price floor / ceiling (defense-in-depth) ────────────────
+        # Blocks entries at extreme YES prices regardless of side.  The
+        # MIN_EFFECTIVE_ENTRY_PRICE check above only covers the cheap-side cost
+        # floor (BUY YES cheap or BUY NO expensive).  This gate covers the
+        # opposite extreme: BUY YES at 0.99, BUY NO at 0.01.
+        # Applies to limit_price (live YES price after orderbook fetch).
+        if limit_price < MIN_ENTRY_YES_PRICE or limit_price > MAX_ENTRY_YES_PRICE:
+            logger.info(
+                "ResolutionBot: SKIP %s extreme_entry_price "
+                "limit_price=%.4f action=%s "
+                "floor=[%.2f,%.2f]",
+                mid, limit_price, signal.action,
+                MIN_ENTRY_YES_PRICE, MAX_ENTRY_YES_PRICE,
             )
             return None
 

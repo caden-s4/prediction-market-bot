@@ -328,7 +328,7 @@ def parse_signal_funnel(lines):
     actionable = 0
     blocked = 0
     block_reasons: Counter = Counter()
-    no_source = no_prob = perm_skip = illiq = deep_otm = 0
+    no_source = no_prob = perm_skip = illiq = deep_otm = extreme_entry_price = stale_ev_recheck = 0
 
     blocked_re = re.compile(r"\[SIGNAL\] BLOCKED")
     # Try to extract a reason token after "reason=" or classify from content
@@ -368,16 +368,22 @@ def parse_signal_funnel(lines):
             illiq += 1
         if "deep_otm" in ll or "deep otm" in ll:
             deep_otm += 1
+        if "extreme_entry_price" in ll:
+            extreme_entry_price += 1
+        if "stale_price_ev_recheck_failed" in ll:
+            stale_ev_recheck += 1
 
     return {
-        "actionable":    actionable,
-        "blocked":       blocked,
-        "block_reasons": block_reasons,
-        "no_source":     no_source,
-        "no_prob":       no_prob,
-        "perm_skip":     perm_skip,
-        "illiq":         illiq,
-        "deep_otm":      deep_otm,
+        "actionable":          actionable,
+        "blocked":             blocked,
+        "block_reasons":       block_reasons,
+        "no_source":           no_source,
+        "no_prob":             no_prob,
+        "perm_skip":           perm_skip,
+        "illiq":               illiq,
+        "deep_otm":            deep_otm,
+        "extreme_entry_price": extreme_entry_price,
+        "stale_ev_recheck":    stale_ev_recheck,
     }
 
 
@@ -668,8 +674,10 @@ def build_report(start: datetime, end: datetime, auto_commit_msg: str | None) ->
     w(f"  no_source:       {funnel['no_source']}")
     w(f"  no_prob:         {funnel['no_prob']}")
     w(f"  perm_skipped:    {funnel['perm_skip']}")
-    w(f"  illiquid_series: {funnel['illiq']}")
-    w(f"  deep_otm:        {funnel['deep_otm']}")
+    w(f"  illiquid_series:            {funnel['illiq']}")
+    w(f"  deep_otm:                   {funnel['deep_otm']}")
+    w(f"  extreme_entry_price:        {funnel['extreme_entry_price']}")
+    w(f"  stale_price_ev_recheck:     {funnel['stale_ev_recheck']}")
     w("")
 
     # ------------------------------------------------------------------ 6
