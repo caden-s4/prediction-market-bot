@@ -30,6 +30,7 @@ from data.release_calendar import FREDReleaseCalendar
 from monitoring.alerts import AlertManager
 from monitoring.event_db import EventDB
 from resolution.executor import ResolutionBot
+from resolution.gap_detector import SLIPPAGE_BUFFER
 from shared.bankroll import Bankroll
 from shared.exclusion_list import ExclusionList
 from shared.fee_cache import FeeCache
@@ -225,6 +226,7 @@ class BotCoordinator:
             calendar=self._calendar,
             force_test=force_test,
             min_confidence=bc.min_confidence_threshold,
+            min_gap=config.signal_test.min_gap_override or SLIPPAGE_BUFFER,
             kalshi_ws=self._kalshi_ws,
         )
 

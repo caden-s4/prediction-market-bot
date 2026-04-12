@@ -23,14 +23,12 @@ from scipy import stats
 
 from data.weather.aggregator import ConsensusForecast
 from pipeline.stage2_market import MarketAnalysis
+from shared.fee_cache import kalshi_fee_per_contract
 
 logger = logging.getLogger(__name__)
 
-# Transaction cost estimates per platform (as fraction of notional)
-_TX_COSTS = {
-    "polymarket": 0.02,   # ~2% fee on maker/taker
-    "kalshi": 0.07,       # Kalshi charges a fee on profit
-}
+# Polymarket transaction cost as fraction of notional (~2% maker/taker)
+_POLY_TX_COST = 0.02
 
 
 @dataclass
@@ -127,7 +125,10 @@ class Stage3Edge:
         variance = float(sigma ** 2)
 
         # ── Transaction cost deduction ─────────────────────────────────────
-        tx_cost = _TX_COSTS.get(platform, 0.03)
+        if platform == "kalshi":
+            tx_cost = kalshi_fee_per_contract(entry) * 2  # round-trip
+        else:
+            tx_cost = _POLY_TX_COST
         net_edge = bayesian_edge - tx_cost
 
         # ── Sharpe-equivalent ─────────────────────────────────────────────

@@ -30,15 +30,13 @@ import logging
 from typing import Optional
 
 from adapters.base import LiveOrderBook
+from shared.fee_cache import kalshi_fee_per_contract
 from .base import BaseSignal, Signal, SignalDirection, SignalType
 
 logger = logging.getLogger(__name__)
 
-# Conservative one-way fee estimates per platform
-_FEES: dict = {
-    "polymarket": 0.02,
-    "kalshi": 0.07,
-}
+# Polymarket one-way taker fee (~2% of notional)
+_POLY_FEE = 0.02
 
 
 class CrossExchangeSignal(BaseSignal):
@@ -98,16 +96,18 @@ class CrossExchangeSignal(BaseSignal):
         if None in (poly_ask, poly_bid, kalshi_ask, kalshi_bid):
             return None
 
-        poly_fee = _FEES["polymarket"]
-        kalshi_fee = _FEES["kalshi"]
+        poly_fee = _POLY_FEE
+        # Kalshi fee depends on trade price; use mid of each leg's relevant price
+        kalshi_fee_leg1 = kalshi_fee_per_contract(kalshi_bid)   # buying NO on Kalshi
+        kalshi_fee_leg2 = kalshi_fee_per_contract(kalshi_ask)   # buying YES on Kalshi
 
         # Leg 1: buy YES on Polymarket, sell YES (buy NO) on Kalshi
         # Net: kalshi_bid - poly_ask - fees
-        spread_poly_buy = kalshi_bid - poly_ask - poly_fee - kalshi_fee
+        spread_poly_buy = kalshi_bid - poly_ask - poly_fee - kalshi_fee_leg1
 
         # Leg 2: buy YES on Kalshi, sell YES (buy NO) on Polymarket
         # Net: poly_bid - kalshi_ask - fees
-        spread_kalshi_buy = poly_bid - kalshi_ask - kalshi_fee - poly_fee
+        spread_kalshi_buy = poly_bid - kalshi_ask - kalshi_fee_leg2 - poly_fee
 
         best_spread = max(spread_poly_buy, spread_kalshi_buy)
 

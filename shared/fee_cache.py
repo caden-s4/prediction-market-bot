@@ -7,20 +7,22 @@ actively rolling out fees to more markets, so a market that was free yesterday
 may have fees today.
 
 Refresh policy:
-  - Cache entries expire after FEE_CACHE_TTL_SECONDS (default 900 = 15 min)
-  - Always refresh before executing a trade regardless of cache age
-  - Store results in memory; persist to disk on shutdown so restarts are fast
+  - Polymarket entries cache for FEE_CACHE_TTL_SECONDS (default 900 = 15 min)
+  - Kalshi fees are computed directly from the official formula — no API call.
+    No caching needed; the formula is O(1) and deterministic for a given price.
 
-Fee endpoints:
+Fee logic:
   Polymarket : GET https://clob.polymarket.com/markets/{condition_id}
                field: "feeRateBps" (basis points, integer)
-  Kalshi     : included in market detail response; field: "fee_multiplier"
-               expressed as a decimal (e.g. 0.07 = 7%)
+  Kalshi     : Official formula: round_up(0.07 × C × P × (1-P)), min $0.01/contract
+               The Kalshi v2 /markets/{id} endpoint stopped returning fee_multiplier
+               in early 2026. We compute directly from price instead.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 import time
 from threading import RLock
 from typing import Dict, Optional, Tuple
@@ -29,22 +31,53 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-FEE_CACHE_TTL_SECONDS = 900   # 15 minutes
+FEE_CACHE_TTL_SECONDS = 900   # 15 minutes (Polymarket only)
 _POLY_CLOB = "https://clob.polymarket.com"
 _TIMEOUT = 8
+
+
+def kalshi_fee_per_contract(price: float) -> float:
+    """
+    Official Kalshi fee: round_up(0.07 × C × P × (1-P)) to nearest cent,
+    minimum $0.01 per contract.
+
+    Parameters
+    ----------
+    price : YES price (0.0 – 1.0)
+
+    Returns
+    -------
+    Fee in dollars for one $1 contract at the given price.
+
+    Examples
+    --------
+    kalshi_fee_per_contract(0.50) → 0.02   # round_up(0.0175)
+    kalshi_fee_per_contract(0.10) → 0.01   # round_up(0.0063)
+    kalshi_fee_per_contract(0.90) → 0.01   # round_up(0.0063)
+    kalshi_fee_per_contract(0.01) → 0.01   # minimum
+    """
+    if price <= 0.0 or price >= 1.0:
+        return 0.01  # minimum — extreme prices still incur minimum fee
+    raw = 0.07 * price * (1.0 - price)
+    return max(math.ceil(raw * 100) / 100.0, 0.01)
 
 
 class FeeCache:
     """
     Thread-safe in-memory cache for per-market taker fee rates.
 
-    Returns fees as a decimal fraction (e.g. 0.02 = 2%).
+    Returns fees as a per-contract dollar amount (same scale as probability
+    gap values, since contract value = $1).
+
+    Kalshi: computed directly via kalshi_fee_per_contract(price) — no API.
+    Polymarket: fetched from CLOB API, cached for FEE_CACHE_TTL_SECONDS.
     """
 
     def __init__(self, ttl: int = FEE_CACHE_TTL_SECONDS) -> None:
         self._ttl = ttl
         self._lock = RLock()
         # { (platform, market_id): (fee_decimal, fetched_at_timestamp) }
+        # Polymarket only — Kalshi is computed on the fly.
         self._cache: Dict[Tuple[str, str], Tuple[float, float]] = {}
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -53,24 +86,29 @@ class FeeCache:
         self,
         platform: str,
         market_id: str,
+        price: float = 0.5,
         force_refresh: bool = False,
     ) -> float:
         """
-        Return the taker fee rate as a decimal for (platform, market_id).
-        Fetches from the live endpoint if the cache entry is missing or stale.
+        Return the taker fee as a per-contract dollar amount for (platform, market_id).
 
         Parameters
         ----------
         platform      : "polymarket" or "kalshi"
         market_id     : platform-specific market identifier
-        force_refresh : bypass cache and always fetch live
+        price         : current YES price (required for Kalshi formula)
+        force_refresh : bypass Polymarket cache and always fetch live
 
         Returns
         -------
-        Taker fee as decimal fraction. 0.0 if the market has no taker fees.
+        Fee per $1 contract as a decimal (e.g. 0.02 = $0.02/contract).
         """
-        key = (platform, market_id)
+        if platform == "kalshi":
+            # Kalshi fee is deterministic from price — no API, no cache.
+            return kalshi_fee_per_contract(price)
 
+        # Polymarket: use cache
+        key = (platform, market_id)
         if not force_refresh:
             cached = self._get_cached(key)
             if cached is not None:
@@ -81,7 +119,7 @@ class FeeCache:
         return fee
 
     def invalidate(self, platform: str, market_id: str) -> None:
-        """Remove a market from the cache (e.g. after a fee surprise)."""
+        """Remove a Polymarket market from the cache (e.g. after a fee surprise)."""
         with self._lock:
             self._cache.pop((platform, market_id), None)
 
@@ -109,8 +147,6 @@ class FeeCache:
         try:
             if platform == "polymarket":
                 return self._fetch_polymarket(market_id)
-            elif platform == "kalshi":
-                return self._fetch_kalshi(market_id)
             else:
                 logger.warning("FeeCache: unknown platform '%s'", platform)
                 return 0.0
@@ -125,6 +161,7 @@ class FeeCache:
         """
         Fetch feeRateBps from Polymarket CLOB market endpoint.
         feeRateBps is in basis points (100 bps = 1%).
+        Returns fee as a per-contract dollar fraction (same scale as Kalshi).
         """
         url = f"{_POLY_CLOB}/markets/{market_id}"
         resp = requests.get(url, timeout=_TIMEOUT, proxies={})
@@ -133,33 +170,6 @@ class FeeCache:
         fee_bps = data.get("feeRateBps", 0)
         if fee_bps is None:
             fee_bps = 0
-        fee = int(fee_bps) / 10_000  # bps → decimal
+        fee = int(fee_bps) / 10_000  # bps → decimal fraction
         logger.debug("FeeCache: polymarket/%s feeRateBps=%s → %.4f", market_id, fee_bps, fee)
-        return fee
-
-    def _fetch_kalshi(self, market_id: str) -> float:
-        """
-        Kalshi includes fee_multiplier in market detail.
-        Expressed as decimal (0.07 = 7%).
-
-        NOTE: As of early 2026 the Kalshi v2 /markets/{id} endpoint no longer
-        returns fee_multiplier for most market types.  Kalshi charges fees as a
-        percentage of net winnings at settlement (not a per-order taker fee), so
-        the field is not needed to place orders.  We default to 0.0 when it is
-        absent — the gap threshold acts as the real safety margin.
-        """
-        url = f"https://api.elections.kalshi.com/trade-api/v2/markets/{market_id}"
-        resp = requests.get(url, timeout=_TIMEOUT, proxies={})
-        resp.raise_for_status()
-        data = resp.json()
-        market = data.get("market", data)
-        fee_multiplier = market.get("fee_multiplier")
-        if fee_multiplier is None:
-            logger.debug(
-                "FeeCache: kalshi/%s – fee_multiplier not in API response, using 0.0",
-                market_id,
-            )
-            return 0.0
-        fee = float(fee_multiplier)
-        logger.debug("FeeCache: kalshi/%s fee_multiplier=%.4f", market_id, fee)
         return fee

@@ -342,8 +342,8 @@ def parse_signal_funnel(lines):
             m = reason_key_re.search(line)
             if m:
                 block_reasons[m.group(1)] += 1
-            elif "min_gap=" in line:
-                block_reasons["gap_too_small"] += 1
+            elif "insufficient_edge" in line or "min_gap=" in line:
+                block_reasons["insufficient_edge"] += 1
             elif "illiquid" in line.lower():
                 block_reasons["illiquid_series"] += 1
             elif "deep_otm" in line.lower() or "deep otm" in line.lower():

@@ -57,7 +57,7 @@ from resolution.confidence import ConfidenceScorer
 from resolution.decay_monitor import (
     DecayAction, DecayMonitor, OpenResolutionPosition,
 )
-from resolution.gap_detector import GapDetector, GapSignal, MAX_MIN_GAP
+from resolution.gap_detector import GapDetector, GapSignal, SLIPPAGE_BUFFER
 from resolution.priority import PriorityScorer, _SERIES_TO_SYMBOL, _parse_strike
 from resolution.scanner import ResolutionScanner
 from resolution.tier_registry import TierRegistry
@@ -192,8 +192,6 @@ MIN_EV = 0.02
 CONFIDENCE_GATE_LIVE                = 0.65
 CONFIDENCE_GATE_GHOST_CROSS_PLATFORM = 0.50
 
-# Time-adjusted entry gap uses a tiered curve (see _minimum_gap_for_entry).
-
 # Per-series exposure cap: all markets sharing a root ticker (e.g. KXPAYROLLS)
 # are driven by the same underlying data point and are 100% correlated.  Without
 # a cap a single bad FRED observation can commit the entire bankroll across all
@@ -222,31 +220,6 @@ MIN_EFFECTIVE_ENTRY_PRICE = 0.05   # 5 cents
 # This is a backstop, not a substitute for correct EV / fee modeling.
 MIN_ENTRY_YES_PRICE = 0.02
 MAX_ENTRY_YES_PRICE = 0.98
-
-
-def _minimum_gap_for_entry(hours_remaining: float) -> float:
-    """
-    Minimum fee-adjusted gap required at this time horizon — tiered curve,
-    capped at MAX_MIN_GAP (shared with gap_detector.py) so long-dated signals
-    are never blocked by an unbounded requirement.
-
-    Steeper requirements further from resolution; cliff steps at tier
-    boundaries intentionally penalise long-horizon signals hard.
-
-      < 1h             0.04                      (4.0% floor)
-      1 – 4 h          0.04 + h × 0.015          (2h → 7.0%,  4h → 10.0%)
-      4 – 8 h          0.10 + h × 0.020          (4h → 18.0%, 8h → 26.0%)
-      > 8 h            0.25 + h × 0.030          (capped at MAX_MIN_GAP = 25.0%)
-    """
-    if hours_remaining < 1.0:
-        raw = 0.04
-    elif hours_remaining < 4.0:
-        raw = 0.04 + hours_remaining * 0.015
-    elif hours_remaining <= 8.0:
-        raw = 0.10 + hours_remaining * 0.020
-    else:
-        raw = 0.25 + hours_remaining * 0.030
-    return min(raw, MAX_MIN_GAP)
 
 
 def _check_minimum_ev(
@@ -491,6 +464,7 @@ class ResolutionBot:
         calendar: Optional[FREDReleaseCalendar] = None,
         force_test: bool = False,
         min_confidence: float = 0.80,
+        min_gap: float = SLIPPAGE_BUFFER,
         kalshi_ws: Optional[KalshiWebSocket] = None,
     ) -> None:
         self._kalshi = kalshi_client
@@ -537,7 +511,7 @@ class ResolutionBot:
             poly_window_hours=poly_window_hours,
             priority_scorer=_priority_scorer,
         )
-        self._gap_detector = GapDetector(fee_cache, force_test=force_test)
+        self._gap_detector = GapDetector(fee_cache, force_test=force_test, slippage_buffer=min_gap)
         self._confidence = ConfidenceScorer(threshold=min_confidence)
         self._decay = DecayMonitor(dynamic_exit_enabled=dynamic_exit_enabled)
 
@@ -1441,8 +1415,10 @@ class ResolutionBot:
         Kalshi price fetch (not the stale bulk-API price).  The signal bypasses
         the GT router — outcome is known with certainty.
         """
-        fee = self._fee_cache.get_taker_fee(market.platform, market.market_id)
-        effective_gap = max(0.0, sig.gap - fee)
+        fee = self._fee_cache.get_taker_fee(
+            market.platform, market.market_id, price=market.yes_price
+        )
+        effective_gap = max(0.0, sig.gap - fee * 2)
 
         gt = GroundTruthResult(
             ground_truth_prob=sig.correct_prob,
@@ -2388,13 +2364,13 @@ class ResolutionBot:
         # presidency markets before we can validate whether they're profitable.
         # Ghost trades are zero-risk; we want the track record.  Live execution
         # still enforces the full gate.
-        _min_gap = _minimum_gap_for_entry(market.hours_to_resolution)
+        _min_gap = self._gap_detector._slippage_buffer
 
-        # ── Hunt window aggressiveness: 30% min_gap reduction ──────────────
+        # ── Hunt window aggressiveness: 30% buffer reduction ──────────────
         # During the hunt window (T+45min to T+3h after FRED update), the
         # market is often still stale while FRED has the latest data.  This
         # creates a higher-quality signal window where smaller gaps are still
-        # profitable — so we reduce the min_gap by 30%.
+        # profitable — so we reduce the slippage buffer by 30%.
         _hunt_window: Optional[str] = None
         if self._calendar is not None and self._fred_src is not None:
             _fred_series = self._fred_src.get_series_for_market(market)
@@ -2403,7 +2379,7 @@ class ResolutionBot:
                 if _hunt_window == "hunt":
                     _min_gap *= 0.70  # 30% reduction
                     logger.debug(
-                        "GapDetector: %s in hunt window for %s, min_gap reduced to %.3f",
+                        "GapDetector: %s in hunt window for %s, buffer reduced to %.3f",
                         market.market_id, _fred_series, _min_gap,
                     )
 
@@ -2518,8 +2494,8 @@ class ResolutionBot:
                 else signal.reference_price
             )
             live_gap = abs(live_price - gt_prob)
-            live_effective_gap = live_gap - signal.taker_fee
-            if live_effective_gap < _minimum_gap_for_entry(market.hours_to_resolution):
+            live_effective_gap = live_gap - signal.taker_fee * 2
+            if live_effective_gap < self._gap_detector._slippage_buffer:
                 logger.info(
                     "ResolutionBot: SKIP %s – stale scanner %.3f → live %.3f "
                     "(drift=%.3f > threshold=%.3f), recalc gap %.3f below min",
@@ -2558,22 +2534,24 @@ class ResolutionBot:
                 )
                 return None
 
-        # Fee check: re-verify with live fee (fee may have changed since gap detection).
-        # Do NOT subtract fee from signal.effective_gap — the gap detector already
-        # subtracted it once.  Recompute fresh from current target price + current fee
-        # so we use one consistent fee value throughout.
-        fee = self._fee_cache.get_taker_fee(market.platform, mid, force_refresh=True)
+        # Fee check: recompute with live price (gap_detector may have used scanner price).
+        # Recompute fresh from current target price so we use one consistent fee.
+        # Kalshi fee is deterministic from price — no API call, always current.
+        fee = self._fee_cache.get_taker_fee(
+            market.platform, mid, price=signal.target_price, force_refresh=True
+        )
         gt_prob_for_gap = (
             gt.ground_truth_prob
             if gt and gt.ground_truth_prob is not None
             else signal.reference_price
         )
-        live_effective_gap = abs(signal.target_price - gt_prob_for_gap) - fee
-        if live_effective_gap < _minimum_gap_for_entry(market.hours_to_resolution):
+        live_effective_gap = abs(signal.target_price - gt_prob_for_gap) - fee * 2
+        if live_effective_gap < self._gap_detector._slippage_buffer:
             logger.info(
                 "ResolutionBot: SKIP %s – live effective_gap=%.3f below "
-                "time-adjusted threshold (fee=%.4f target=%.3f gt=%.3f)",
-                mid, live_effective_gap, fee, signal.target_price, gt_prob_for_gap,
+                "slippage buffer %.3f (one_way_fee=%.4f target=%.3f gt=%.3f)",
+                mid, live_effective_gap, self._gap_detector._slippage_buffer,
+                fee, signal.target_price, gt_prob_for_gap,
             )
             if fee > signal.taker_fee:
                 # Fee increased since signal generation — exclude to avoid repeat surprises

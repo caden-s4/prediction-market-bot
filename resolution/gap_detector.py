@@ -14,26 +14,18 @@ Two signal types:
    Action: buy the correct side on the single platform.
 
 Fee-adjusted gap calculation:
-  effective_gap = raw_gap - taker_fee_poly - taker_fee_kalshi
-  (or just taker_fee_poly for single-platform signals)
+  one_way_fee     = kalshi_fee_per_contract(yes_price)   [official formula]
+  round_trip_fee  = one_way_fee × 2
+  effective_gap   = raw_gap - round_trip_fee
 
-Time-adjusted minimum gap:
-  min_gap = min(BASE_GAP_THRESHOLD + hours_to_resolution × TIME_GAP_PREMIUM, MAX_MIN_GAP)
-  BASE_GAP_THRESHOLD = 0.04  (4% floor — minimum gap at any horizon)
-  TIME_GAP_PREMIUM   = 0.030 (extra 3.0% per hour remaining)
-  MAX_MIN_GAP        = 0.25  (cap — near-certain signals must never be blocked)
+  Kalshi fee formula: round_up(0.07 × P × (1-P)), minimum $0.01/contract.
+  At P=0.50: one_way=0.02, round_trip=0.04 (4pp deducted from gap).
+  At P=0.10: one_way=0.01, round_trip=0.02 (2pp deducted).
 
-  Examples:
-    4 h remaining  → min(0.04 + 4.00 × 0.030, 0.25) = 0.160  (16.0%)
-    1 h remaining  → min(0.04 + 1.00 × 0.030, 0.25) = 0.070  ( 7.0%)
-    15 min (0.25h) → min(0.04 + 0.25 × 0.030, 0.25) = 0.048  ( 4.8%)
-    15 h remaining → min(0.04 + 15.0 × 0.030, 0.25) = 0.250  (25.0%) ← capped
-
-  Rationale: the closer to resolution, the less time for the world to change.
-  A 9.5% gap at 3.8 hours is not the same edge as a 9.5% gap at 30 minutes.
-  The cap prevents the formula from blocking near-certain signals (e.g. gap=99.5%)
-  on long-duration markets where hours_left × 0.030 would otherwise exceed 25%.
-  Early entries require substantially larger mispricings to justify the time risk.
+Minimum edge required:
+  effective_gap must exceed SLIPPAGE_BUFFER (default 3%) to trade.
+  The buffer covers execution slippage and model error — it is NOT
+  time-based. A 10% gap at P=0.50 with 20h remaining is valid edge.
 """
 
 from __future__ import annotations
@@ -41,66 +33,22 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Set
+from typing import List, Optional, Tuple
 
 from data.ground_truth.base import GroundTruthResult, SourceType
 from data.ground_truth.cross_platform import CrossPlatformSource
 from data.markets.base import Market
-from shared.fee_cache import FeeCache
+from shared.fee_cache import FeeCache, kalshi_fee_per_contract
 
 logger = logging.getLogger(__name__)
 
-# Time-adjusted minimum gap: min_gap = BASE_GAP_THRESHOLD + hours × TIME_GAP_PREMIUM
-BASE_GAP_THRESHOLD = 0.04    # 4% floor — applies even at t=0
-TIME_GAP_PREMIUM   = 0.030   # additional 3.0% required per hour of remaining time
-MAX_MIN_GAP        = 0.25    # cap — near-certain signals must not be blocked by duration
+# Minimum post-fee edge required to trade.  After subtracting round-trip fees
+# from the raw gap, the remaining edge must exceed this buffer to cover
+# execution slippage and model uncertainty.
+SLIPPAGE_BUFFER = 0.03   # 3% — override via GapDetector(slippage_buffer=x)
 
 # Minimum hours remaining to act (avoid resolution chaos in last few minutes)
 MIN_HOURS_TO_RESOLUTION = 0.25  # 15 minutes
-
-# ── Category-specific base gap overrides ──────────────────────────────────────
-# Each category demands a minimum mispricing before the time premium is added.
-# Higher base gaps protect against categories with ambiguous resolution criteria
-# or oracle-dispute risk; lower gaps let clear-cut markets trade on tighter edges.
-#
-# Override with env var CATEGORY_BASE_GAP_<CATEGORY>=<float> (e.g. CATEGORY_BASE_GAP_WEATHER=0.08)
-# to tune at runtime without code changes.
-#
-# Checked against market.category (case-insensitive), then market.tags.
-_CATEGORY_BASE_GAP: Dict[str, float] = {
-    # Weather — resolution criteria often ambiguous ("above normal"?) and
-    # NWS/NOAA data can be revised after market close.
-    "weather": 0.08,
-
-    # Economics / FRED — authoritative data source but interpretation risk
-    # (seasonal adjustments, revisions) warrants a wider floor than sports.
-    "economics": 0.05,
-    "economic":  0.05,
-
-    # Financial — clear settlement (exchange close price), tight floor OK.
-    "financial": 0.04,
-
-    # Sports — binary result, live ESPN data, tight floor OK.
-    "sports": 0.04,
-    "sport":  0.04,
-
-    # Politics — binary result but resolution often delayed / disputed.
-    "politics": 0.06,
-    "political": 0.06,
-}
-
-# Tags that map to a category base gap (checked when category lookup misses).
-_TAG_BASE_GAP: Dict[str, float] = {
-    "weather":   0.08,
-    "climate":   0.08,
-    "economics": 0.05,
-    "economy":   0.05,
-    "fed":       0.05,
-    "cpi":       0.05,
-    "jobs":      0.05,
-    "politics":  0.06,
-    "election":  0.06,
-}
 
 
 @dataclass
@@ -156,12 +104,12 @@ class GapDetector:
     def __init__(
         self,
         fee_cache: FeeCache,
-        base_gap: float = BASE_GAP_THRESHOLD,
         force_test: bool = False,
+        slippage_buffer: float = SLIPPAGE_BUFFER,
     ) -> None:
         self._fee_cache = fee_cache
-        self._base_gap = base_gap
         self._force_test = force_test
+        self._slippage_buffer = slippage_buffer
         # Signal cache for the fuzzy cross-platform scan.
         # The gap evaluation loop (K Kalshi × P Poly) dominates cycle time:
         # build_pairs() is O(K×P) SequenceMatcher work, and the fee-cache
@@ -262,49 +210,53 @@ class GapDetector:
             self._cycle_blocked += 1
             return None
 
-        fee = self._fee_cache.get_taker_fee(market.platform, market.market_id)
+        one_way_fee = self._fee_cache.get_taker_fee(
+            market.platform, market.market_id, price=market.yes_price
+        )
+        round_trip_fee = one_way_fee * 2
         raw_gap = abs(ground_truth_prob - market.yes_price)
-        effective_gap = raw_gap - fee
+        effective_gap = raw_gap - round_trip_fee
 
-        base_gap = self._category_base_gap(market)
-        min_gap = self._time_adjusted_min_gap(market.hours_to_resolution, base_gap)
+        _buffer = self._slippage_buffer
         if release_window == "hunt":
-            min_gap *= 0.70   # 30% reduction: FRED data is confirmed-fresh, market is stale
+            _buffer *= 0.70   # 30% reduction: FRED data is confirmed-fresh, market is stale
             logger.debug(
-                "GapDetector: %s in FRED hunt window — min_gap reduced to %.3f",
-                market.market_id, min_gap,
+                "GapDetector: %s in FRED hunt window — slippage_buffer reduced to %.3f",
+                market.market_id, _buffer,
             )
         side = "YES" if ground_truth_prob > market.yes_price else "NO"
 
-        if effective_gap < min_gap:
-            shortfall = min_gap - effective_gap
-            near_miss = shortfall < min_gap * 0.20
+        if self._force_test:
+            _buffer = 0.01  # 1% — let almost everything through for testing
+            logger.debug("[FORCE-TEST] slippage_buffer overridden to %.2f", _buffer)
+
+        if effective_gap < _buffer:
+            shortfall = _buffer - effective_gap
+            near_miss = shortfall < _buffer * 0.20
             logger.info(
                 "[SIGNAL] BLOCKED %s | gt_prob=%.3f mkt_price=%.3f "
-                "gap=%.3f (%.1f%%) min_gap=%.3f shortfall=%.3f | side=%s",
+                "gap=%.3f (%.1f%%) fee_rt=%.3f eff_gap=%.3f "
+                "buffer=%.3f shortfall=%.3f | side=%s | reason=insufficient_edge",
                 market.market_id, ground_truth_prob, market.yes_price,
-                effective_gap, effective_gap * 100, min_gap, shortfall, side,
+                raw_gap, raw_gap * 100, round_trip_fee, effective_gap,
+                _buffer, shortfall, side,
             )
             self._cycle_blocked += 1
             if near_miss:
                 self._cycle_near_miss += 1
             return None
 
-        _uncapped_gap = base_gap + market.hours_to_resolution * TIME_GAP_PREMIUM
-        _cap_note = f" capped@{MAX_MIN_GAP:.2f}" if _uncapped_gap > MAX_MIN_GAP else ""
-        _cat_note = f" cat={market.category}" if base_gap != self._base_gap else ""
         reasoning = (
             f"Information signal: market_price={market.yes_price:.3f} "
             f"ground_truth={ground_truth_prob:.3f} raw_gap={raw_gap:.3f} "
-            f"taker_fee={fee:.3f} effective_gap={effective_gap:.3f} "
-            f"min_gap={min_gap:.3f} "
-            f"({base_gap:.2f}+{market.hours_to_resolution:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f}{_cap_note}{_cat_note})"
+            f"one_way_fee={one_way_fee:.4f} round_trip_fee={round_trip_fee:.4f} "
+            f"effective_gap={effective_gap:.3f} buffer={_buffer:.3f}"
         )
         logger.info(
             "[SIGNAL] ACTIONABLE %s | gt_prob=%.3f mkt_price=%.3f "
-            "gap=%.3f (%.1f%%) min_gap=%.3f | side=%s",
+            "gap=%.3f (%.1f%%) fee_rt=%.3f eff_gap=%.3f | side=%s",
             market.market_id, ground_truth_prob, market.yes_price,
-            effective_gap, effective_gap * 100, min_gap, side,
+            raw_gap, raw_gap * 100, round_trip_fee, effective_gap, side,
         )
         logger.info("GapDetector: %s – %s", market.market_id, reasoning)
         self._cycle_actionable += 1
@@ -318,7 +270,7 @@ class GapDetector:
             ground_truth_prob=ground_truth_prob,
             raw_gap=raw_gap,
             effective_gap=effective_gap,
-            taker_fee=fee,
+            taker_fee=one_way_fee,
             reasoning=reasoning,
         )
 
@@ -334,42 +286,34 @@ class GapDetector:
         if raw_gap <= 0:
             return None
 
-        fee_poly = self._fee_cache.get_taker_fee("polymarket", poly.market_id)
-        fee_kalshi = self._fee_cache.get_taker_fee("kalshi", kalshi.market_id)
-
         # Determine which platform lags (lower price = underpriced YES = buy).
-        # We only trade the lagging platform (hold to resolution, no hedge leg),
-        # so only the lagging platform's taker fee applies to the effective gap.
+        # We only trade the lagging platform (hold to resolution, no hedge leg).
         if poly.yes_price < kalshi.yes_price:
             lagging, reference = poly, kalshi
-            lagging_fee = fee_poly
             platform_label = "polymarket lags kalshi"
         else:
             lagging, reference = kalshi, poly
-            lagging_fee = fee_kalshi
             platform_label = "kalshi lags polymarket"
 
-        effective_gap = raw_gap - lagging_fee
+        one_way_fee = self._fee_cache.get_taker_fee(
+            lagging.platform, lagging.market_id, price=lagging.yes_price
+        )
+        round_trip_fee = one_way_fee * 2
+        effective_gap = raw_gap - round_trip_fee
 
-        hours = min(poly.hours_to_resolution, kalshi.hours_to_resolution)
-        base_gap = self._category_base_gap(kalshi)
-        min_gap = self._time_adjusted_min_gap(hours, base_gap)
-        if effective_gap < min_gap:
+        if effective_gap < self._slippage_buffer:
             logger.debug(
-                "GapDetector: pair %s/%s eff_gap=%.3f below threshold %.3f "
-                "(%.2fh remaining)",
-                poly.market_id, kalshi.market_id, effective_gap, min_gap, hours,
+                "GapDetector: pair %s/%s eff_gap=%.3f below buffer %.3f",
+                poly.market_id, kalshi.market_id, effective_gap, self._slippage_buffer,
             )
             return None
 
-        _uncapped_cross = base_gap + hours * TIME_GAP_PREMIUM
-        _cap_note_cross = f" capped@{MAX_MIN_GAP:.2f}" if _uncapped_cross > MAX_MIN_GAP else ""
         reasoning = (
             f"Cross-platform gap: poly={poly.yes_price:.3f} kalshi={kalshi.yes_price:.3f} "
-            f"raw_gap={raw_gap:.3f} lagging_fee={lagging_fee:.3f} "
+            f"raw_gap={raw_gap:.3f} one_way_fee={one_way_fee:.4f} "
+            f"round_trip_fee={round_trip_fee:.4f} "
             f"effective_gap={effective_gap:.3f} ({platform_label}) "
-            f"min_gap={min_gap:.3f} "
-            f"({base_gap:.2f}+{hours:.2f}h\u00d7{TIME_GAP_PREMIUM:.3f}{_cap_note_cross})"
+            f"buffer={self._slippage_buffer:.3f}"
         )
         logger.info(
             "GapDetector: FLAGGED %s/%s – %s",
@@ -384,50 +328,9 @@ class GapDetector:
             reference_price=reference.yes_price,
             raw_gap=raw_gap,
             effective_gap=effective_gap,
-            taker_fee=lagging_fee,
+            taker_fee=one_way_fee,
             reasoning=reasoning,
         )
-
-    def _category_base_gap(self, market: Market) -> float:
-        """Return the category-specific base gap floor for this market.
-
-        Checks _CATEGORY_BASE_GAP by market.category, then falls back to
-        _TAG_BASE_GAP by scanning market.tags, then falls back to self._base_gap.
-        """
-        cat = (market.category or "").lower().strip()
-        if cat in _CATEGORY_BASE_GAP:
-            return _CATEGORY_BASE_GAP[cat]
-        tags_lower: Set[str] = {t.lower() for t in (market.tags or [])}
-        for tag, gap in _TAG_BASE_GAP.items():
-            if tag in tags_lower:
-                return gap
-        return self._base_gap
-
-    def _time_adjusted_min_gap(self, hours: float, base_gap: Optional[float] = None) -> float:
-        """
-        Return the minimum effective gap required given hours to resolution.
-
-        min_gap = min(base_gap + hours × TIME_GAP_PREMIUM, MAX_MIN_GAP)
-
-        base_gap defaults to self._base_gap when not supplied; pass the result
-        of _category_base_gap(market) to apply a category-specific floor.
-
-        The further from resolution, the larger the gap must be to justify
-        entering: early positions have more time to go wrong.  The cap at
-        MAX_MIN_GAP (0.25) ensures that near-certain signals (e.g. gas price
-        gap=99.5%) are never blocked purely because the market has many hours
-        left — the formula would otherwise demand min_gap=0.499 at 15.3h.
-
-        In force-test mode the threshold is overridden to 1% so almost any
-        gap passes — this exists solely for end-to-end pipeline validation
-        and must never be used in production.
-        """
-        if self._force_test:
-            min_gap = 0.01  # 1% — let almost everything through for testing
-            logger.debug("[FORCE-TEST] min_gap overridden to %.2f", min_gap)
-            return min_gap
-        bg = base_gap if base_gap is not None else self._base_gap
-        return min(bg + hours * TIME_GAP_PREMIUM, MAX_MIN_GAP)
 
     def _enough_time(self, market: Market) -> bool:
         """Return False if market is resolving too soon to safely trade."""
@@ -480,7 +383,7 @@ class GapDetector:
         if self._cross_platform.needs_rebuild():
             self._cross_platform.build_pairs(kalshi_markets, polymarket_markets)
 
-        pm_by_id: Dict[str, Market] = {m.market_id: m for m in polymarket_markets}
+        pm_by_id = {m.market_id: m for m in polymarket_markets}
         signals: List[GapSignal] = []
 
         for km in kalshi_markets:
@@ -495,34 +398,31 @@ class GapDetector:
             if raw_gap <= 0:
                 continue
 
-            fee = self._fee_cache.get_taker_fee("kalshi", km.market_id)
-            effective_gap = raw_gap - fee
+            one_way_fee = self._fee_cache.get_taker_fee(
+                "kalshi", km.market_id, price=km.yes_price
+            )
+            round_trip_fee = one_way_fee * 2
+            effective_gap = raw_gap - round_trip_fee
 
-            base_gap = self._category_base_gap(km)
-            min_gap = self._time_adjusted_min_gap(km.hours_to_resolution, base_gap)
-            if effective_gap < min_gap:
-                shortfall = min_gap - effective_gap
+            if effective_gap < self._slippage_buffer:
+                shortfall = self._slippage_buffer - effective_gap
                 side = "YES" if pm_prob > km.yes_price else "NO"
                 logger.info(
                     "[SIGNAL] BLOCKED %s | gt_prob=%.3f mkt_price=%.3f "
-                    "gap=%.3f (%.1f%%) min_gap=%.3f shortfall=%.3f | side=%s | cross_platform",
+                    "gap=%.3f (%.1f%%) fee_rt=%.3f eff_gap=%.3f "
+                    "buffer=%.3f shortfall=%.3f | side=%s | reason=insufficient_edge | cross_platform",
                     km.market_id, pm_prob, km.yes_price,
-                    effective_gap, effective_gap * 100, min_gap, shortfall, side,
+                    raw_gap, raw_gap * 100, round_trip_fee, effective_gap,
+                    self._slippage_buffer, shortfall, side,
                 )
                 continue
 
-            if pm_prob > km.yes_price:
-                action_label = "buy_yes"
-                reference_price = pm_prob
-            else:
-                action_label = "buy_no"
-                reference_price = pm_prob
-
+            reference_price = pm_prob
             gt_result = GroundTruthResult(
                 ground_truth_prob=pm_prob,
                 confidence=confidence,
                 source_type=SourceType.AGGREGATED,
-                source_name=f"Polymarket/cross-platform",
+                source_name="Polymarket/cross-platform",
                 reasoning=(
                     f"Cross-platform: kalshi={km.yes_price:.3f} "
                     f"polymarket={pm_prob:.3f} raw_gap={raw_gap:.3f} "
@@ -533,14 +433,15 @@ class GapDetector:
             reasoning = (
                 f"Cross-platform (fuzzy): kalshi={km.yes_price:.3f} "
                 f"polymarket={pm_prob:.3f} raw_gap={raw_gap:.3f} "
-                f"fee={fee:.3f} effective_gap={effective_gap:.3f} "
-                f"min_gap={min_gap:.3f} confidence={confidence:.2f}"
+                f"one_way_fee={one_way_fee:.4f} round_trip_fee={round_trip_fee:.4f} "
+                f"effective_gap={effective_gap:.3f} "
+                f"buffer={self._slippage_buffer:.3f} confidence={confidence:.2f}"
             )
             logger.info(
                 "[SIGNAL] ACTIONABLE %s | gt_prob=%.3f mkt_price=%.3f "
-                "gap=%.3f (%.1f%%) min_gap=%.3f | side=%s | cross_platform",
+                "gap=%.3f (%.1f%%) fee_rt=%.3f eff_gap=%.3f | side=%s | cross_platform",
                 km.market_id, pm_prob, km.yes_price,
-                effective_gap, effective_gap * 100, min_gap,
+                raw_gap, raw_gap * 100, round_trip_fee, effective_gap,
                 "YES" if pm_prob > km.yes_price else "NO",
             )
             logger.info(
@@ -556,7 +457,7 @@ class GapDetector:
                 ground_truth_prob=pm_prob,
                 raw_gap=raw_gap,
                 effective_gap=effective_gap,
-                taker_fee=fee,
+                taker_fee=one_way_fee,
                 ground_truth_result=gt_result,
                 reasoning=reasoning,
             ))
