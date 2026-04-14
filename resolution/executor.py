@@ -221,6 +221,11 @@ MIN_EFFECTIVE_ENTRY_PRICE = 0.05   # 5 cents
 MIN_ENTRY_YES_PRICE = 0.02
 MAX_ENTRY_YES_PRICE = 0.98
 
+# Market-conviction filter for LARGE_DIVERGENCE signals.
+# When the market has converged to extreme certainty, trust the market over GT.
+EXTREME_CONVICTION_LOW  = 0.05   # market prices near-certain NO
+EXTREME_CONVICTION_HIGH = 0.95   # market prices near-certain YES
+
 
 def _check_minimum_ev(
     market_price: float, gt_prob: float, action: str
@@ -2420,6 +2425,32 @@ class ResolutionBot:
         )
         if requires_review:
             gap_pct = gt.raw_data.get("validator_gap_pct", 0.0) if gt else 0.0
+
+            # ── Market-conviction filter ────────────────────────────────────
+            # When the market has converged to near-certainty (yes_price <=
+            # EXTREME_CONVICTION_LOW or >= EXTREME_CONVICTION_HIGH), the
+            # LARGE_DIVERGENCE almost certainly reflects a stale or misrouted
+            # GT signal rather than a real edge.  Block in both ghost and live
+            # modes — ghost-trade accuracy tracking of these patterns has
+            # empirically yielded 0 correct calls and pollutes the track record.
+            if (
+                market.yes_price <= EXTREME_CONVICTION_LOW
+                or market.yes_price >= EXTREME_CONVICTION_HIGH
+            ):
+                logger.info(
+                    "ResolutionBot: SKIP %s large_divergence_extreme_market "
+                    "yes_price=%.4f gt_prob=%.4f gt_source=%s "
+                    "gt_confidence=%.2f gap_pct=%.1f%% "
+                    "— market conviction too high to trust GT",
+                    mid,
+                    market.yes_price,
+                    gt.ground_truth_prob if gt else float("nan"),
+                    gt.source_name if gt else "unknown",
+                    gt.confidence if gt else 0.0,
+                    gap_pct,
+                )
+                return None
+
             if self._dry_run:
                 logger.info(
                     "ResolutionBot: LARGE_DIVERGENCE ghost trade for %s "

@@ -328,7 +328,7 @@ def parse_signal_funnel(lines):
     actionable = 0
     blocked = 0
     block_reasons: Counter = Counter()
-    no_source = no_prob = perm_skip = illiq = deep_otm = extreme_entry_price = stale_ev_recheck = 0
+    no_source = no_prob = perm_skip = illiq = deep_otm = extreme_entry_price = stale_ev_recheck = large_div_extreme = 0
 
     blocked_re = re.compile(r"\[SIGNAL\] BLOCKED")
     # Try to extract a reason token after "reason=" or classify from content
@@ -372,18 +372,21 @@ def parse_signal_funnel(lines):
             extreme_entry_price += 1
         if "stale_price_ev_recheck_failed" in ll:
             stale_ev_recheck += 1
+        if "large_divergence_extreme_market" in ll:
+            large_div_extreme += 1
 
     return {
-        "actionable":          actionable,
-        "blocked":             blocked,
-        "block_reasons":       block_reasons,
-        "no_source":           no_source,
-        "no_prob":             no_prob,
-        "perm_skip":           perm_skip,
-        "illiq":               illiq,
-        "deep_otm":            deep_otm,
-        "extreme_entry_price": extreme_entry_price,
-        "stale_ev_recheck":    stale_ev_recheck,
+        "actionable":               actionable,
+        "blocked":                  blocked,
+        "block_reasons":            block_reasons,
+        "no_source":                no_source,
+        "no_prob":                  no_prob,
+        "perm_skip":                perm_skip,
+        "illiq":                    illiq,
+        "deep_otm":                 deep_otm,
+        "extreme_entry_price":      extreme_entry_price,
+        "stale_ev_recheck":         stale_ev_recheck,
+        "large_div_extreme":        large_div_extreme,
     }
 
 
@@ -678,6 +681,7 @@ def build_report(start: datetime, end: datetime, auto_commit_msg: str | None) ->
     w(f"  deep_otm:                   {funnel['deep_otm']}")
     w(f"  extreme_entry_price:        {funnel['extreme_entry_price']}")
     w(f"  stale_price_ev_recheck:     {funnel['stale_ev_recheck']}")
+    w(f"  large_div_extreme_market:   {funnel['large_div_extreme']}")
     w("")
 
     # ------------------------------------------------------------------ 6
