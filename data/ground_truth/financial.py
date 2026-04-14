@@ -295,7 +295,13 @@ _CLOSE_QUESTION_RE = re.compile(
 #   any   → 0.85–1.00  (always above 0.80 gate; spatial margin still applies)
 _MAX_SIGNAL_HOURS: float = 8.0
 _FULL_SIGNAL_HOURS: float = 1.0
-_TIME_CONF_FLOOR: float = 0.55          # Yahoo Finance fallback floor
+# Yahoo time_floor raised from 0.55 to 0.65 to match the MIN_CONFIDENCE_THRESHOLD
+# entry gate. The old 0.55 floor existed before we built the downstream risk
+# gates (fee-aware SLIPPAGE_BUFFER, 0.02/0.98 entry floor, LARGE_DIVERGENCE
+# extreme-market block, EV recheck after stale-price). Those gates now handle
+# the lag/staleness risk that the low floor was originally conservative about.
+# Re-evaluate if we see a spike in losing financial trades at mid-market prices.
+_TIME_CONF_FLOOR: float = 0.65          # Yahoo Finance fallback floor (matches MIN_CONFIDENCE_THRESHOLD)
 _TD_TIME_CONF_FLOOR: float = 0.85       # Twelve Data primary floor
 _TD_MAX_SPATIAL_CONF: float = 0.85      # Twelve Data spatial confidence cap
 
@@ -527,7 +533,7 @@ class FinancialDataSource(DataSource):
                 )
             else:
                 max_spatial = 0.90
-                time_floor  = _TIME_CONF_FLOOR          # 0.55
+                time_floor  = _TIME_CONF_FLOOR          # 0.65
 
             ground_truth_prob, spatial_conf = self._compute_prob_and_confidence(
                 current_price, threshold, is_above, max_conf=max_spatial
@@ -1043,8 +1049,8 @@ class FinancialDataSource(DataSource):
         Full confidence (1.0) within the final hour; linearly decays to `floor`
         at _MAX_SIGNAL_HOURS.
 
-        floor=_TIME_CONF_FLOOR (0.55) for Yahoo Finance — sits below the
-        ConfidenceScorer threshold (0.80), blocking signals beyond ~3h.
+        floor=_TIME_CONF_FLOOR (0.65) for Yahoo Finance — matches the
+        MIN_CONFIDENCE_THRESHOLD entry gate; downstream risk gates handle lag.
 
         floor=_TD_TIME_CONF_FLOOR (0.85) for Twelve Data — stays above the
         gate at any horizon; signals fire whenever the spatial margin is large
