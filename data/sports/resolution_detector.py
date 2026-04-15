@@ -243,13 +243,23 @@ def check_for_resolution_lags() -> List[ResolutionSignal]:
             )
             # Push immediately (on main thread) so the executor can exit any open
             # ghost positions this same cycle — before the background price check.
-            _correct_prob = 1.0 if completed.winner == "home" else 0.0
+            # Store the winning team name (not a pre-computed prob) so the executor
+            # can determine correct_prob per-market via get_yes_team(market_id).
+            # This avoids the "winner==home → 1.0" assumption that is wrong for
+            # away-team YES contracts (e.g. -MIA market when Miami is the away team).
+            if completed.winner == "home":
+                _winner_team = completed.home_team
+            elif completed.winner == "away":
+                _winner_team = completed.away_team
+            else:
+                _winner_team = ""  # tie sentinel — no team won
             logger.info(
                 "ResolutionDetector: queuing ghost exit for %s — home_score=%d away_score=%d "
-                "winner=%s settlement_value=%.1f (YES=home)",
-                market_id, completed.home_score, completed.away_score, completed.winner, _correct_prob,
+                "winner=%s winner_team=%s",
+                market_id, completed.home_score, completed.away_score,
+                completed.winner, _winner_team or "tie",
             )
-            _ghost_exit_queue.put((market_id, _correct_prob))
+            _ghost_exit_queue.put((market_id, _winner_team))
 
             _thread_pool.submit(
                 _background_lag_check,
@@ -269,11 +279,16 @@ def check_for_resolution_lags() -> List[ResolutionSignal]:
 
 def drain_ghost_exits() -> List[tuple]:
     """
-    Return and drain all pending (market_id, correct_prob) ghost exit entries.
+    Return and drain all pending (market_id, winner_team) ghost exit entries.
 
     Call once per cycle, immediately after check_for_resolution_lags().
-    Each entry represents a game that just went CONFIRMED FINAL; the executor
-    should close any open ghost positions on that market at correct_prob.
+    Each entry represents a game that just went CONFIRMED FINAL.
+
+    winner_team is the lowercase canonical name of the winning team, or ""
+    for a tie.  The executor computes correct_prob per-market by comparing
+    winner_team against the YES team parsed from the market_id (via
+    get_yes_team()), so this correctly handles both home-YES and away-YES
+    contracts.
     """
     exits = []
     try:
@@ -311,10 +326,24 @@ def _background_lag_check(
     fetch_elapsed_ms = (time.monotonic() - fetch_start) * 1000
     resolution_lag_ms = lag_wall * 1000 + fetch_elapsed_ms
 
-    correct_prob = 1.0 if completed.winner == "home" else 0.0
-    # Ties resolve NO (prob=0.0) since "did home team win?" is False for a tie
+    from data.sports.team_resolver import get_yes_team  # noqa: PLC0415
+    _yes_team = get_yes_team(market_id)
+    if _yes_team is None:
+        logger.warning(
+            "ResolutionDetector: cannot determine YES team for %s — skipping signal",
+            market_id,
+        )
+        return
+
     if completed.winner == "tie":
+        # Ties resolve NO regardless of which team is YES
         correct_prob = 0.0
+    else:
+        _winner_name = (
+            completed.home_team if completed.winner == "home" else completed.away_team
+        )
+        _wn = _winner_name.lower()
+        correct_prob = 1.0 if (_wn in _yes_team or _yes_team in _wn) else 0.0
 
     if current_price is None:
         logger.info(

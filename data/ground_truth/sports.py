@@ -265,16 +265,18 @@ class SportsDataSource(DataSource):
         For Kalshi game markets (KXNBAGAME / KXNCAAMBGAME / KXMLBSTGAME), the
         YES team is encoded in the market_id suffix and resolved via the alias
         table in market_matcher — much more reliable than parsing question text.
+        Delegates to the shared get_yes_team() helper so entry and exit use the
+        same resolution logic.
         Falls back to _extract_teams()[0] for non-game markets.
         """
         mid = market.market_id.upper()
         if any(mid.startswith(p) for p in (
             "KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME", "KXMLBSTGAME", "KXNCAAWBGAME",
         )):
-            from data.sports.market_matcher import match_market as _mm  # noqa: PLC0415
-            match = _mm(market.market_id, market.question, None)
-            if match and match.get("market_team"):
-                return match["market_team"].lower()
+            from data.sports.team_resolver import get_yes_team  # noqa: PLC0415
+            result = get_yes_team(market.market_id)
+            if result is not None:
+                return result
         teams = self._extract_teams(market.question)
         return teams[0].lower() if teams else None
 

@@ -3368,14 +3368,33 @@ class ResolutionBot:
         """
         Close open ghost positions whose game just reached CONFIRMED FINAL.
 
-        ghost_exits: list of (market_id, correct_prob) from drain_ghost_exits().
-          correct_prob = 1.0 if the home team (YES side) won, 0.0 otherwise.
+        ghost_exits: list of (market_id, winner_team) from drain_ghost_exits().
+          winner_team is the canonical name (lowercased) of the winning team,
+          or "" for a tie.  correct_prob = 1.0 if the YES team for this specific
+          market won; YES team is determined by parsing the market_id suffix via
+          get_yes_team(), which correctly handles both home-YES and away-YES
+          contracts.  If YES team cannot be determined the market is skipped and
+          the position is left open rather than settled on the wrong side.
 
         Exits at the settlement value so P&L is accurate.  Skips any live
         (non-ghost) positions — those need real order handling.
         """
+        from data.sports.team_resolver import get_yes_team  # noqa: PLC0415
         exits = 0
-        for market_id, correct_prob in ghost_exits:
+        for market_id, winner_team in ghost_exits:
+            yes_team = get_yes_team(market_id)
+            if yes_team is None:
+                logger.warning(
+                    "ResolutionBot: cannot determine YES team for %s — "
+                    "ghost exit skipped (position left open)", market_id,
+                )
+                continue
+            if not winner_team:
+                # Tie: no team won, YES contract resolves NO
+                correct_prob = 0.0
+            else:
+                wt = winner_team.lower()
+                correct_prob = 1.0 if (wt in yes_team or yes_team in wt) else 0.0
             rec = self._positions.get(market_id)
             if rec is None:
                 continue
