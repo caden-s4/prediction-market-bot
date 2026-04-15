@@ -328,7 +328,7 @@ def parse_signal_funnel(lines):
     actionable = 0
     blocked = 0
     block_reasons: Counter = Counter()
-    no_source = no_prob = perm_skip = illiq = deep_otm = extreme_entry_price = stale_ev_recheck = large_div_extreme = 0
+    no_source = no_prob = perm_skip = illiq = deep_otm = extreme_entry_price = stale_ev_recheck = large_div_extreme = gt_stale_at_entry = 0
 
     blocked_re = re.compile(r"\[SIGNAL\] BLOCKED")
     # Try to extract a reason token after "reason=" or classify from content
@@ -374,6 +374,8 @@ def parse_signal_funnel(lines):
             stale_ev_recheck += 1
         if "large_divergence_extreme_market" in ll:
             large_div_extreme += 1
+        if "gt_stale_at_entry" in ll:
+            gt_stale_at_entry += 1
 
     return {
         "actionable":               actionable,
@@ -387,6 +389,7 @@ def parse_signal_funnel(lines):
         "extreme_entry_price":      extreme_entry_price,
         "stale_ev_recheck":         stale_ev_recheck,
         "large_div_extreme":        large_div_extreme,
+        "gt_stale_at_entry":        gt_stale_at_entry,
     }
 
 
@@ -682,6 +685,7 @@ def build_report(start: datetime, end: datetime, auto_commit_msg: str | None) ->
     w(f"  extreme_entry_price:        {funnel['extreme_entry_price']}")
     w(f"  stale_price_ev_recheck:     {funnel['stale_ev_recheck']}")
     w(f"  large_div_extreme_market:   {funnel['large_div_extreme']}")
+    w(f"  gt_stale_at_entry:          {funnel['gt_stale_at_entry']}")
     w("")
 
     # ------------------------------------------------------------------ 6

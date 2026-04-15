@@ -15,11 +15,17 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
 
 from data.markets.base import Market
+
+
+# Max age of GT data considered fresh for any decisive action (entry or exit).
+# Sources that intentionally omit data_published_at (e.g. FRED) are always
+# treated as fresh — see GroundTruthResult.is_fresh().
+GT_FRESHNESS_SECONDS: int = 60
 
 
 class SourceType(str, Enum):
@@ -72,6 +78,24 @@ class GroundTruthResult:
     #   "ambiguous"– data is inconclusive about which side is correct (BLOCKS trade)
     #   None       – not assessed by this source (no directional block applied)
     directional_confidence: Optional[str] = None
+
+    def is_fresh(self, max_age_seconds: int) -> bool:
+        """
+        True if data_published_at is within max_age_seconds of now.
+        Returns True if data_published_at is None (source intentionally
+        skips freshness — e.g., FRED validates staleness internally).
+        Returns False if timestamp is present but stale.
+        """
+        if self.data_published_at is None:
+            return True
+        age = (datetime.now(timezone.utc) - self.data_published_at).total_seconds()
+        return age <= max_age_seconds
+
+    def gt_age_seconds(self) -> Optional[float]:
+        """Age of the GT data in seconds, or None if data_published_at is absent."""
+        if self.data_published_at is None:
+            return None
+        return (datetime.now(timezone.utc) - self.data_published_at).total_seconds()
 
     @property
     def is_tradeable(self) -> bool:

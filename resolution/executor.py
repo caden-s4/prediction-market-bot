@@ -40,7 +40,7 @@ except ImportError:
     from backports.zoneinfo import ZoneInfo as _ZoneInfo  # type: ignore[no-redef]
 
 from data.markets.kalshi_ws import KalshiWebSocket
-from data.ground_truth.base import GroundTruthResult, SourceType
+from data.ground_truth.base import GT_FRESHNESS_SECONDS, GroundTruthResult, SourceType
 from data.ground_truth.economic_fred import FREDEconomicSource
 from data.ground_truth.financial import FinancialDataSource, _PRICE_CACHE as _FINANCIAL_PRICE_CACHE
 from data.ground_truth.router import GroundTruthRouter, is_paper_only
@@ -2354,6 +2354,24 @@ class ResolutionBot:
             # Confidence passed — reset failure counter if any
             self._confidence_fail_count.pop(mid, None)
             self._unfilled_timeout_perm_skipped.discard(mid)
+
+        # ── GT freshness gate ──────────────────────────────────────────────────
+        # Hard gate: refuse to enter on stale Yahoo/financial data.
+        # is_fresh() returns True for sources with data_published_at=None
+        # (e.g. FRED) so this only fires for financial signals with a real
+        # timestamp that is older than GT_FRESHNESS_SECONDS.
+        if not gt.is_fresh(GT_FRESHNESS_SECONDS):
+            _gt_age = gt.gt_age_seconds()
+            logger.info(
+                "ResolutionBot: SKIP %s gt_stale_at_entry "
+                "gt_age=%.0fs threshold=%ds "
+                "gt_source=%s gt_prob=%.4f market_price=%.4f",
+                mid, _gt_age, GT_FRESHNESS_SECONDS,
+                gt.source_name,
+                gt.ground_truth_prob if gt.ground_truth_prob is not None else 0.0,
+                market.yes_price,
+            )
+            return None
 
         # ── Time-adjusted gap gate ─────────────────────────────────────────────
         # Require a larger mispricing for early entries: the further from

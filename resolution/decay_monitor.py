@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
+from data.ground_truth.base import GT_FRESHNESS_SECONDS
 from data.markets.base import Market
 
 logger = logging.getLogger(__name__)
@@ -65,7 +66,7 @@ STOP_LOSS_RATIO = 0.50             # exit if position moved 50%+ against us
 STOP_LOSS_MIN_HOURS = 4.0          # only apply stop-loss if > 4h to resolution
 APPROACH_THRESHOLD_HOURS = 0.25    # < 15 min to resolution = "approaching"
 HIGH_CONFIDENCE_HOLD_THRESHOLD = 0.90  # hold through resolution only if this confident
-GT_FRESHNESS_SECONDS = 60              # max age of GT data to be considered fresh for decisive-exit logic
+# GT_FRESHNESS_SECONDS imported from data.ground_truth.base (canonical definition)
 
 # Time-based escalation: if a position is 30%+ adverse AND resolution is
 # approaching fast (< 45 min), escalate to an urgent stop-loss exit regardless
