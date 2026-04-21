@@ -192,7 +192,7 @@ _CITY_COORDS: Dict[str, Dict[str, float]] = {
 
 # Kalshi documents ~1 req/s but tolerates bursts. 5/s sustained with burst=3
 # eliminates 429s while keeping cycles under 60s.
-_KALSHI_RATE_LIMIT = 5.0   # requests per second (sustained)
+_KALSHI_RATE_LIMIT = 8.0   # requests per second (sustained)
 _KALSHI_BURST_LIMIT = 3    # max burst tokens
 
 
