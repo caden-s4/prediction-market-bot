@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -189,6 +190,35 @@ _CITY_COORDS: Dict[str, Dict[str, float]] = {
 }
 
 
+# Kalshi documents ~1 req/s but tolerates bursts. 5/s sustained with burst=3
+# eliminates 429s while keeping cycles under 60s.
+_KALSHI_RATE_LIMIT = 5.0   # requests per second (sustained)
+_KALSHI_BURST_LIMIT = 3    # max burst tokens
+
+
+class _TokenBucket:
+    """Thread-safe token bucket rate limiter."""
+
+    def __init__(self, rate: float, burst: int) -> None:
+        self._rate = rate
+        self._burst = burst
+        self._tokens = float(burst)
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last
+                self._tokens = min(self._burst, self._tokens + elapsed * self._rate)
+                self._last = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+            time.sleep(0.05)
+
+
 def _safe_float(val) -> Optional[float]:
     """Convert val to float, returning None on failure or if val is None."""
     if val is None:
@@ -232,6 +262,7 @@ class KalshiClient(BaseMarketClient):
         })
         # Cache the loaded RSA private key so we only parse it once.
         self._private_key = self._load_private_key()
+        self._rate_limiter = _TokenBucket(rate=_KALSHI_RATE_LIMIT, burst=_KALSHI_BURST_LIMIT)
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
@@ -299,6 +330,7 @@ class KalshiClient(BaseMarketClient):
         url = self._base_url + path
         backoff = 5.0
         for attempt in range(4):
+            self._rate_limiter.acquire()
             headers = self._sign("GET", full_path)
             resp = self._session.get(url, params=params, headers=headers, timeout=15)
             if not _quiet:
@@ -330,6 +362,7 @@ class KalshiClient(BaseMarketClient):
         backoff = 2.0
         last_resp = None
         for attempt in range(4):
+            self._rate_limiter.acquire()
             headers = self._sign("POST", full_path)
             headers["Content-Type"] = "application/json"
             resp = self._session.post(url, data=body_str, headers=headers, timeout=15)
@@ -372,6 +405,7 @@ class KalshiClient(BaseMarketClient):
         return last_resp.json()  # unreachable
 
     def _delete(self, path: str) -> Any:
+        self._rate_limiter.acquire()
         headers = self._sign("DELETE", self._path_prefix + path)
         url = self._base_url + path
         resp = self._session.delete(url, headers=headers, timeout=15)
@@ -409,8 +443,6 @@ class KalshiClient(BaseMarketClient):
             if limit is not None and len(fetched) >= limit:
                 break
 
-            if page > 0:
-                time.sleep(0.6)   # ~1 req/s – matches Kalshi's documented rate limit
             page += 1
 
             params: Dict[str, Any] = {"status": "open", "limit": page_size}
@@ -467,8 +499,6 @@ class KalshiClient(BaseMarketClient):
         seen: set = set()
 
         for i, series in enumerate(_WEATHER_SERIES_TICKERS):
-            if i > 0:
-                time.sleep(0.6)  # stay under Kalshi rate limit (~1 req/s)
             try:
                 params: Dict[str, Any] = {
                     "status": "open",
@@ -508,8 +538,6 @@ class KalshiClient(BaseMarketClient):
         seen: set = set()
 
         for i, series in enumerate(_SPORTS_SERIES_TICKERS):
-            if i > 0:
-                time.sleep(0.6)  # ~1 req/s — stay under Kalshi rate limit
             try:
                 params: Dict[str, Any] = {
                     "status": "open",
@@ -558,8 +586,6 @@ class KalshiClient(BaseMarketClient):
         seen: set = set()
 
         for i, series in enumerate(_FINANCIAL_BRACKET_PREFIXES):
-            if i > 0:
-                time.sleep(0.6)  # ~1 req/s — stay under Kalshi rate limit
             try:
                 params: Dict[str, Any] = {
                     "status": "open",
@@ -589,7 +615,6 @@ class KalshiClient(BaseMarketClient):
     def _log_available_series(self) -> None:
         """Query /series and log all tickers so we can see what's on this API."""
         try:
-            time.sleep(0.6)
             data = self._get("/series", params={"limit": 200})
             series_list = data.get("series", [])
             tickers = [s.get("ticker", "") for s in series_list]
