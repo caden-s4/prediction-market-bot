@@ -45,7 +45,8 @@ logger = logging.getLogger(__name__)
 # Minimum post-fee edge required to trade.  After subtracting round-trip fees
 # from the raw gap, the remaining edge must exceed this buffer to cover
 # execution slippage and model uncertainty.
-SLIPPAGE_BUFFER = 0.03   # 3% — override via GapDetector(slippage_buffer=x)
+# LOOSENED for ghost-mode edge discovery (was 0.03) — revert if losing
+SLIPPAGE_BUFFER = 0.01   # 1% — override via GapDetector(slippage_buffer=x)
 
 # Minimum hours remaining to act (avoid resolution chaos in last few minutes)
 MIN_HOURS_TO_RESOLUTION = 0.25  # 15 minutes

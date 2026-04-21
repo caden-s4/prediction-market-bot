@@ -141,7 +141,8 @@ class BotConfig:
             resolution_scan_interval_seconds=int(float(_get("RESOLUTION_SCAN_INTERVAL_SECONDS", "300"))),
             financial_hard_stop_threshold=float(_get("FINANCIAL_HARD_STOP_THRESHOLD", "0.20")),
             dynamic_exit_enabled=_get("DYNAMIC_EXIT_ENABLED", "true").lower() != "false",
-            min_confidence_threshold=float(_get("MIN_CONFIDENCE_THRESHOLD", "0.80")),
+            # LOOSENED for ghost-mode edge discovery (was 0.80) — revert if losing
+            min_confidence_threshold=float(_get("MIN_CONFIDENCE_THRESHOLD", "0.45")),
         )
 
 

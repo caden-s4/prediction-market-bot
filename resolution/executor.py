@@ -218,8 +218,10 @@ MIN_EFFECTIVE_ENTRY_PRICE = 0.05   # 5 cents
 #   - Kelly contract counts explode at extreme prices
 #   - Stale GT data has the largest impact in absolute terms
 # This is a backstop, not a substitute for correct EV / fee modeling.
-MIN_ENTRY_YES_PRICE = 0.02
-MAX_ENTRY_YES_PRICE = 0.98
+# LOOSENED for ghost-mode edge discovery (was 0.02) — revert if losing
+MIN_ENTRY_YES_PRICE = 0.01
+# LOOSENED for ghost-mode edge discovery (was 0.98) — revert if losing
+MAX_ENTRY_YES_PRICE = 0.99
 
 # Market-conviction filter for LARGE_DIVERGENCE signals.
 # When the market has converged to extreme certainty, trust the market over GT.
@@ -468,7 +470,7 @@ class ResolutionBot:
         dynamic_exit_enabled: bool = True,
         calendar: Optional[FREDReleaseCalendar] = None,
         force_test: bool = False,
-        min_confidence: float = 0.80,
+        min_confidence: float = 0.45,
         min_gap: float = SLIPPAGE_BUFFER,
         kalshi_ws: Optional[KalshiWebSocket] = None,
     ) -> None:
