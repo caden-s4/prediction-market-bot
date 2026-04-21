@@ -2357,6 +2357,26 @@ class ResolutionBot:
             self._confidence_fail_count.pop(mid, None)
             self._unfilled_timeout_perm_skipped.discard(mid)
 
+        # ── GT re-fetch (pre-freshness) ────────────────────────────────────────
+        # GT is fetched once at cycle start. Rate-limited cycles can stretch
+        # 30-60+ seconds, aging out the data before execution. Yahoo cache
+        # TTL = 60s = GT_FRESHNESS_SECONDS, so a re-fetch at >60s triggers a
+        # cache miss and gets fresh data automatically — no cache invalidation
+        # needed. If re-fetch fails, original stale GT falls through to the
+        # freshness gate below and is blocked as before.
+        if not gt.is_fresh(GT_FRESHNESS_SECONDS):
+            _gt_old_age = gt.gt_age_seconds()
+            _refreshed_gt = self._ground_truth.fetch(market)
+            if _refreshed_gt is not None and _refreshed_gt.ground_truth_prob is not None:
+                gt = _refreshed_gt
+                signal.ground_truth_result = gt
+                logger.info(
+                    "ResolutionBot: GT re-fetched for %s — old_age=%.0fs new_age=%.0fs",
+                    market.market_id,
+                    _gt_old_age if _gt_old_age is not None else -1,
+                    gt.gt_age_seconds() if gt.gt_age_seconds() is not None else -1,
+                )
+
         # ── GT freshness gate ──────────────────────────────────────────────────
         # Hard gate: refuse to enter on stale Yahoo/financial data.
         # is_fresh() returns True for sources with data_published_at=None
