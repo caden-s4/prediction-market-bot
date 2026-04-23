@@ -399,6 +399,9 @@ class ResolutionScanner:
         # DISABLED 2026-04-23: Yahoo quote_ts staleness blocks 100% of financial bracket signals
         # at freshness gate. Re-enable individual prefixes only after routing to Twelve Data paid
         # tier or equivalent fresh-timestamp source. See commit history for prior contents.
+        # KXBRENTD/KXBRENTW: DO NOT re-enable even after Twelve Data upgrade. CL=F (WTI) is the
+        # wrong GT source for Brent markets. Brent requires its own feed (BZ=F or equivalent).
+        # Phase 0b showed 44.4% accuracy on 54 trades — structurally broken routing.
         _FINANCIAL_BRACKET_PREFIXES = ()
         _GAME_SERIES_PREFIXES = ("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME", "KXNCAAWBGAME")
 

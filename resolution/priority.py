@@ -61,7 +61,7 @@ _SERIES_TO_SYMBOL: Dict[str, str] = {
     "KXINX":        "ES=F",   # S&P 500 (^INX index → ES=F futures price)
     "KXWTI":        "CL=F",   # WTI crude oil (daily brackets)
     "KXWTIW":       "CL=F",   # WTI crude oil (weekly brackets)
-    "KXBRENTD":     "CL=F",   # Brent crude daily (proxy: CL=F WTI, ~$5-10 spread)
+    # KXBRENTD removed: CL=F (WTI) is wrong GT source for Brent. Phase 0b: 44.4% on 54 trades.
     "KXTNOTEW":     "^TNX",   # 10-year Treasury yield
     "KXGOLDD":      "GC=F",   # Gold daily brackets
     "KXGOLDW":      "GC=F",   # Gold futures

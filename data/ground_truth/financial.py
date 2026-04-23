@@ -227,6 +227,14 @@ FINANCIAL_EXCLUDED_SERIES: frozenset = frozenset({
     "KXPRESMENTION",
     "KXMENTION",
     "KXAPPROVAL",
+    # KXBRENTD: Brent crude markets were falling through to CL=F (WTI) because
+    # the question text contains "crude oil". CL=F is the wrong instrument —
+    # Brent and WTI have a $3–8 spread that moves independently. Phase 0b
+    # showed 44.4% accuracy on 54 trades (below coin-flip). Brent requires its
+    # own feed (BZ=F on Yahoo, or equivalent). DO NOT remove this entry until
+    # a dedicated Brent GT source is wired up.
+    "KXBRENTD",
+    "KXBRENTW",  # weekly variant — same instrument mismatch, block preemptively
 })
 
 # Regex that identifies the date segment in a Kalshi market_id
