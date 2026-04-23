@@ -25,6 +25,7 @@ data/state.json
 data/recordings/
 data/*.db
 data/exclusions.json
+data/runtime/
 *.db
 *.sqlite
 *.sqlite3
