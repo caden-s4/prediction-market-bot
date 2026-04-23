@@ -71,20 +71,10 @@ _SPORTS_SERIES_TICKERS = [
 # Sports game-result series whose close_time is a settlement window, not the game time.
 _GAME_SERIES_PREFIXES = ("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME", "KXNCAAWBGAME")
 
-_FINANCIAL_BRACKET_PREFIXES = (
-    "KXNASDAQ100",   # covers KXNASDAQ100 and KXNASDAQ100U
-    "KXINX",         # S&P 500 index
-    "KXWTI",         # WTI crude oil (covers KXWTI daily and KXWTIW weekly)
-    "KXBRENTD",      # Brent crude daily
-    "KXGOLDD",       # Gold daily brackets
-    "KXGOLDW",       # Gold weekly brackets
-    "KXSILVERD",     # Silver daily brackets
-    "KXSILVERW",     # Silver weekly brackets
-    "KXCOPPERD",     # Copper daily brackets
-    "KXAAAGASW",     # AAA gas storage weekly
-    "KXTNOTED",      # 10-year Treasury daily bracket
-    "KXTNOTEW",      # 10-year Treasury weekly bracket
-)
+# DISABLED 2026-04-23: Yahoo quote_ts staleness blocks 100% of financial bracket signals at
+# freshness gate. Re-enable individual prefixes only after routing to Twelve Data paid tier or
+# equivalent fresh-timestamp source. See commit history for prior contents.
+_FINANCIAL_BRACKET_PREFIXES = ()
 
 # Extra hours added to midnight UTC of the game date to estimate game end time.
 # 30h covers the latest possible game end in UTC (e.g. 10:30pm ET tipoff + 2.5h

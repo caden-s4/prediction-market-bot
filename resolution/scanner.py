@@ -396,11 +396,10 @@ class ResolutionScanner:
         # - Game markets (48h): same-day, quick turnaround
         # - Financial brackets (72h): daily/weekly, need longer scan window for weekend discovery
         #   (e.g. Monday 4pm brackets discovered Saturday afternoon are ~48h away)
-        _FINANCIAL_BRACKET_PREFIXES = (
-            "KXNASDAQ100", "KXINX", "KXWTI", "KXBRENTD",
-            "KXGOLDD", "KXGOLDW", "KXSILVERD", "KXSILVERW", "KXCOPPERD",
-            "KXAAAGASW", "KXTNOTED", "KXTNOTEW"
-        )
+        # DISABLED 2026-04-23: Yahoo quote_ts staleness blocks 100% of financial bracket signals
+        # at freshness gate. Re-enable individual prefixes only after routing to Twelve Data paid
+        # tier or equivalent fresh-timestamp source. See commit history for prior contents.
+        _FINANCIAL_BRACKET_PREFIXES = ()
         _GAME_SERIES_PREFIXES = ("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME", "KXNCAAWBGAME")
 
         if any(market.market_id.startswith(p) for p in _GAME_SERIES_PREFIXES):

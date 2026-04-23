@@ -99,6 +99,11 @@ class BotCoordinator:
                 "POLYMARKET_ENABLED=true in .env"
             )
 
+        logger.warning(
+            "Financial bracket markets disabled — Yahoo Finance staleness issue. "
+            "Re-enable after Twelve Data paid tier."
+        )
+
         # ── Shared infrastructure ─────────────────────────────────────────
         self._fee_cache = FeeCache(ttl=bc.fee_cache_ttl_seconds)
         self._exclusions = ExclusionList()
