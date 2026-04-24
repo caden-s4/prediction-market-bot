@@ -645,6 +645,7 @@ class ResolutionBot:
         # These tokens are stale or invalid — no cooldown retry, permanent for
         # the session.  Checked in _try_execute() before calling _get_live_book().
         self._orderbook_perm_skipped: set = set()
+        self._skip_empty_book_ghost_count: int = 0
         # Post-exit re-entry cooldowns.  Set in _exit_position() for both the
         # specific market and its series prefix.  Checked in _try_execute() before
         # sizing to prevent compounding spirals where repeated wins on the same
@@ -2047,10 +2048,11 @@ class ResolutionBot:
             "ResolutionBot: GT coverage summary — "
             "excluded_novelty=%d no_source_fast_skip=%d no_source_perm_skip=%d "
             "no_source=%d no_prob=%d covered=%d (sources: %s) "
-            "gap_too_small=%d actionable=%d",
+            "gap_too_small=%d actionable=%d skip_empty_book_ghost=%d",
             n_novelty, n_no_source_fast_skip, n_no_source_perm_skip,
             n_no_source, n_no_prob,
             n_covered, sources_str, n_gap_too_small, len(signals),
+            self._skip_empty_book_ghost_count,
         )
         self._last_gt_coverage = {
             "covered": n_covered,
@@ -2264,11 +2266,21 @@ class ResolutionBot:
                 # ob_live stays None; depth_ratio stays None (scorer skips penalty);
                 # limit_price will fall back to signal.target_price below.
             elif _is_game_market(mid) or _is_financial_bracket_market(mid):
-                # Game and financial bracket markets have intermittent order book
-                # data between trades.  The book appearing empty does NOT mean the
-                # market is dead.  Fall through with ob_live=None; limit_price falls
-                # back to signal.target_price below.  2-min cooldown at limit-price
-                # step keeps retries inside a tight window.
+                if self._dry_run:
+                    # Ghost mode: placing into an empty book produces unfillable
+                    # PENDING orders that distort the ghost dataset.  Skip entirely.
+                    logger.info(
+                        "ResolutionBot: SKIP_EMPTY_BOOK_GHOST %s — "
+                        "game/bracket book empty, not placing ghost trade "
+                        "(would be unfillable)",
+                        mid,
+                    )
+                    self._skip_empty_book_ghost_count += 1
+                    return None
+                # Live mode: intermittent book data between trades.  The book
+                # appearing empty does NOT mean the market is dead.  Fall through
+                # with ob_live=None; limit_price falls back to signal.target_price
+                # below.  2-min cooldown at limit-price step keeps retries tight.
                 logger.info(
                     "ResolutionBot: %s order book empty — "
                     "proceeding with signal.target_price=%.3f as limit (bracket bypass)",
