@@ -3635,7 +3635,7 @@ class ResolutionBot:
 
     def ghost_clear_positions(self) -> int:
         """
-        Remove all ghost positions from memory and delete ghost_positions.json.
+        Remove all ghost positions from memory and delete data/runtime/ghost_positions.json.
 
         Only removes positions whose order_id starts with "ghost_" or "dry_"
         (i.e. positions that were never real orders).  Live positions are untouched.
@@ -3858,13 +3858,13 @@ class ResolutionBot:
 
     # ── Position persistence ───────────────────────────────────────────────────
 
-    _GHOST_POSITIONS_FILE = "ghost_positions.json"
+    _GHOST_POSITIONS_FILE = "data/runtime/ghost_positions.json"
 
     def _save_positions(self) -> None:
         """Persist all open positions to disk.
 
         Live mode  → state store ("open_positions" key).
-        Ghost mode → ghost_positions.json in the working directory.
+        Ghost mode → data/runtime/ghost_positions.json
         """
         import json as _json
         from pathlib import Path as _Path
@@ -3912,7 +3912,7 @@ class ResolutionBot:
     def _load_positions(self) -> None:
         """Reload open positions from disk on startup.
 
-        Ghost mode → load from ghost_positions.json (separate from live).
+        Ghost mode → load from data/runtime/ghost_positions.json (separate from live).
         Live mode  → load from state store ("open_positions" key).
         """
         import json as _json

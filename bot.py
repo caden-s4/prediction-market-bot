@@ -38,7 +38,7 @@ from utils.storage import StateStore
 
 logger = logging.getLogger(__name__)
 
-_GHOST_STATE_FILE = "ghost_state.json"
+_GHOST_STATE_FILE = "data/runtime/ghost_state.json"
 _GHOST_DEFAULT_BANKROLL = 500.0
 
 
@@ -288,7 +288,7 @@ class BotCoordinator:
         return self._resolution.clear_positions()
 
     def ghost_clear_positions(self) -> int:
-        """Remove ghost positions from memory and delete ghost_positions.json."""
+        """Remove ghost positions from memory and delete data/runtime/ghost_positions.json."""
         return self._resolution.ghost_clear_positions()
 
     def get_resolved_positions(self) -> list:
@@ -307,7 +307,7 @@ class BotCoordinator:
         """
         Override the trading bankroll with a virtual amount.
 
-        Only valid in dry-run mode.  Persists to ghost_state.json so the
+        Only valid in dry-run mode.  Persists to data/runtime/ghost_state.json so the
         value survives restarts.
         """
         if not self._cfg.bot.dry_run:
@@ -331,7 +331,7 @@ class BotCoordinator:
         virtual bankroll to the configured default ($500).
 
         Returns the number of positions cleared.  Writes a fresh
-        ghost_state.json so the reset survives the next restart.
+        data/runtime/ghost_state.json so the reset survives the next restart.
         """
         if not self._cfg.bot.dry_run:
             raise RuntimeError("ghost_reset() is only available in dry-run mode.")
@@ -429,7 +429,7 @@ class BotCoordinator:
         logger.debug("BotCoordinator: state persisted %s", summary)
 
     def _save_ghost_state(self) -> None:
-        """Write current virtual bankroll to ghost_state.json."""
+        """Write current virtual bankroll to data/runtime/ghost_state.json."""
         try:
             summary = self._bankroll.summary()
             payload = {
@@ -444,7 +444,7 @@ class BotCoordinator:
             logger.warning("BotCoordinator: failed to save %s: %s", _GHOST_STATE_FILE, exc)
 
     def _load_ghost_state(self) -> Optional[float]:
-        """Load virtual bankroll from ghost_state.json. Returns total_usd or None."""
+        """Load virtual bankroll from data/runtime/ghost_state.json. Returns total_usd or None."""
         path = Path(_GHOST_STATE_FILE)
         if not path.exists():
             return None

@@ -33,10 +33,10 @@ from typing import Dict, List
 
 from data.markets.base import Market
 
-# Sticky-T1 persistence file — lives in the project root.
+# Sticky-T1 persistence file — lives in data/runtime/.
 # Stores a JSON list of market IDs that have sticky_t1=True so they survive
 # a bot restart and are immediately re-promoted to T1 on the next ingest.
-_STICKY_FILE = Path(__file__).parent.parent / ".tier_sticky.json"
+_STICKY_FILE = Path(__file__).parent.parent / "data" / "runtime" / ".tier_sticky.json"
 
 logger = logging.getLogger(__name__)
 

@@ -65,7 +65,7 @@ from .live_game_monitor import CompletedGame, get_newly_confirmed_finals
 logger = logging.getLogger(__name__)
 
 # Persistence file for the dispatched set — survives restarts
-_DISPATCHED_FILE = "dispatched_finals.json"
+_DISPATCHED_FILE = "data/runtime/dispatched_finals.json"
 
 # Gap threshold — do not fire if market is already within 3¢ of resolution
 _RESOLUTION_THRESHOLD = 0.03

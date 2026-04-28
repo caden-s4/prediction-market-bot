@@ -202,7 +202,7 @@ def load_trades(start: datetime, end: datetime):
     Load ghost_trades.jsonl, filter to [start, end].
     Return list of all records in range.
     """
-    path = REPO_ROOT / "ghost_trades.jsonl"
+    path = REPO_ROOT / "data" / "runtime" / "ghost_trades.jsonl"
     if not path.exists():
         return []
     records = []
@@ -293,7 +293,7 @@ def analyse_trades(records):
 
 
 def load_bankroll():
-    path = REPO_ROOT / "ghost_state.json"
+    path = REPO_ROOT / "data" / "runtime" / "ghost_state.json"
     if not path.exists():
         return None
     try:
@@ -309,7 +309,7 @@ def load_bankroll():
 # ---------------------------------------------------------------------------
 
 def load_positions():
-    path = REPO_ROOT / "ghost_positions.json"
+    path = REPO_ROOT / "data" / "runtime" / "ghost_positions.json"
     if not path.exists():
         return None
     try:
@@ -588,7 +588,7 @@ def build_report(start: datetime, end: datetime, auto_commit_msg: str | None) ->
     w("## 3. TRADES")
     w("")
     trade_records = load_trades(start, end)
-    if not trade_records and not (REPO_ROOT / "ghost_trades.jsonl").exists():
+    if not trade_records and not (REPO_ROOT / "data" / "runtime" / "ghost_trades.jsonl").exists():
         w("No data found — ghost_trades.jsonl missing.")
     else:
         stats = analyse_trades(trade_records)

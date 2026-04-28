@@ -2,7 +2,7 @@
 shared/paper_log.py – Append-only ghost-trade journal.
 
 PaperTradeLog records every ghost-trade entry and exit to a JSONL file
-(ghost_trades.jsonl in the working directory).  Each line is a self-contained
+(data/runtime/ghost_trades.jsonl).  Each line is a self-contained
 JSON object with an "event" field: "entry" or "exit".
 
 Entry fields:
@@ -25,7 +25,7 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_PATH = "ghost_trades.jsonl"
+_DEFAULT_PATH = "data/runtime/ghost_trades.jsonl"
 
 
 class PaperTradeLog:

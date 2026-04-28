@@ -28,7 +28,7 @@ from config import AppConfig
 from data.ground_truth.financial import _extract_series_prefix
 from data.markets.kalshi import KalshiClient
 
-GHOST_TRADES = ROOT / "ghost_trades.jsonl"
+GHOST_TRADES = ROOT / "data" / "runtime" / "ghost_trades.jsonl"
 CACHE_FILE = ROOT / "data" / "runtime" / "settlement_cache.json"
 CSV_OUT = ROOT / "data" / "runtime" / "phase0_accuracy_results.csv"
 

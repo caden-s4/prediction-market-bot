@@ -30,12 +30,12 @@ data/runtime/
 *.sqlite
 *.sqlite3
 
-# ── Ghost trading state (financial data, not for version control) ─────────────
-ghost_positions.json
-ghost_state.json
-ghost_trades.jsonl
-dispatched_finals.json
-.tier_sticky.json
+# ── Runtime state — generated at runtime, do not commit ──────────────────────
+data/runtime/*.json
+data/runtime/*.jsonl
+data/runtime/*.jsonl.bak.*
+data/runtime/*.log
+data/runtime/*.txt
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 *.log
