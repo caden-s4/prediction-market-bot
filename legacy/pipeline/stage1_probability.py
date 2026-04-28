@@ -18,7 +18,7 @@ import logging
 from typing import Optional
 
 from data.markets.base import Market
-from data.weather.aggregator import ConsensusForecast, WeatherAggregator
+from legacy.data.weather.aggregator import ConsensusForecast, WeatherAggregator
 
 logger = logging.getLogger(__name__)
 

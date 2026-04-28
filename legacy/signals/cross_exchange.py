@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from adapters.base import LiveOrderBook
+from legacy.adapters.base import LiveOrderBook
 from shared.fee_cache import kalshi_fee_per_contract
 from .base import BaseSignal, Signal, SignalDirection, SignalType
 

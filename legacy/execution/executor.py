@@ -14,10 +14,10 @@ import logging
 from typing import Dict, List, Optional
 
 from data.markets.base import BaseMarketClient, Order, OrderStatus
-from execution.portfolio import Portfolio, Position
-from meta.calibration import CalibrationTracker, TradeRecord
-from pipeline.reasoning_engine import TradeAction, TradeSignal
-from pipeline.stage6_reevaluation import ReevalAction, ReevaluationDecision
+from legacy.execution.portfolio import Portfolio, Position
+from legacy.meta.calibration import CalibrationTracker, TradeRecord
+from legacy.pipeline.reasoning_engine import TradeAction, TradeSignal
+from legacy.pipeline.stage6_reevaluation import ReevalAction, ReevaluationDecision
 
 logger = logging.getLogger(__name__)
 

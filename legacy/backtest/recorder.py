@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, IO, Optional
 
-from adapters.base import LiveOrderBook
+from legacy.adapters.base import LiveOrderBook
 
 logger = logging.getLogger(__name__)
 

@@ -23,7 +23,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from data.markets.base import Market, OrderBook, Side
-from data.weather.aggregator import ConsensusForecast
+from legacy.data.weather.aggregator import ConsensusForecast
 
 
 class TradeAction(str, Enum):

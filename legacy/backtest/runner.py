@@ -42,10 +42,10 @@ from typing import List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from adapters.base import LiveOrderBook
-from signals.base import Signal, SignalDirection
-from signals.engine import SignalEngine
-from risk.manager import RiskManager
+from legacy.adapters.base import LiveOrderBook
+from legacy.signals.base import Signal, SignalDirection
+from legacy.signals.engine import SignalEngine
+from legacy.risk.manager import RiskManager
 
 logger = logging.getLogger(__name__)
 

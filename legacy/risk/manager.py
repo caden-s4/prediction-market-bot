@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Dict, Optional
 
-from signals.base import Signal, SignalDirection
+from legacy.signals.base import Signal, SignalDirection
 
 logger = logging.getLogger(__name__)
 

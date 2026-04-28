@@ -21,8 +21,8 @@ from typing import Optional
 import numpy as np
 from scipy import stats
 
-from data.weather.aggregator import ConsensusForecast
-from pipeline.stage2_market import MarketAnalysis
+from legacy.data.weather.aggregator import ConsensusForecast
+from legacy.pipeline.stage2_market import MarketAnalysis
 from shared.fee_cache import kalshi_fee_per_contract
 
 logger = logging.getLogger(__name__)

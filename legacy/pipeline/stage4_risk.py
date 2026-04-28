@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from pipeline.stage3_edge import EdgeResult
+from legacy.pipeline.stage3_edge import EdgeResult
 
 logger = logging.getLogger(__name__)
 

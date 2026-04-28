@@ -32,7 +32,7 @@ import logging
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
-from adapters.base import LiveOrderBook
+from legacy.adapters.base import LiveOrderBook
 from .base import Signal, SignalDirection
 from .cross_exchange import CrossExchangeSignal
 from .book_imbalance import BookImbalanceSignal

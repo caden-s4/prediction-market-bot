@@ -91,6 +91,6 @@ for fate, count in fates.most_common():
 
 if stale_then_what:
     print()
-    print("=== STALE CORRECTED → then what? ===")
+    print("=== STALE CORRECTED -> then what? ===")
     for label, count in stale_then_what.most_common():
-        print(f"  stale → {label:35s}: {count:>5}")
+        print(f"  stale -> {label:35s}: {count:>5}")

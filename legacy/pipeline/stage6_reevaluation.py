@@ -20,9 +20,9 @@ from enum import Enum
 from typing import Dict, List, Optional
 
 from data.markets.base import Market, Order, OrderBook, Side
-from data.weather.aggregator import ConsensusForecast
-from pipeline.stage2_market import Stage2Market
-from pipeline.stage3_edge import EdgeResult, Stage3Edge
+from legacy.data.weather.aggregator import ConsensusForecast
+from legacy.pipeline.stage2_market import Stage2Market
+from legacy.pipeline.stage3_edge import EdgeResult, Stage3Edge
 
 logger = logging.getLogger(__name__)
 

@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from data.markets.base import Market
-from pipeline.stage3_edge import EdgeResult
+from legacy.pipeline.stage3_edge import EdgeResult
 
 logger = logging.getLogger(__name__)
 

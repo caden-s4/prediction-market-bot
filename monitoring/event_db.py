@@ -41,9 +41,10 @@ import logging
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
-from signals.base import Signal
+if TYPE_CHECKING:
+    from signals.base import Signal
 
 logger = logging.getLogger(__name__)
 

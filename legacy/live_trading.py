@@ -216,8 +216,8 @@ def discover_market_pairs(kalshi_client, poly_client, signal_engine, recorder, l
 
     Returns (kalshi_ids, poly_ids) – the market IDs to subscribe the WS adapters to.
     """
-    from data.markets.scanner import build_default_scanner
-    from adapters.base import LiveOrderBook
+    from legacy.data.markets.scanner import build_default_scanner
+    from legacy.adapters.base import LiveOrderBook
 
     scanner = build_default_scanner(
         polymarket_client=poly_client,
@@ -315,15 +315,15 @@ async def snapshot_loop(event_db, risk_manager, alert_manager, interval: int = 6
 async def run_live(cfg: AppConfig, dry_run: bool, scan_interval: int) -> None:
     from data.markets.kalshi import KalshiClient
     from data.markets.polymarket import PolymarketClient
-    from adapters.kalshi_ws import KalshiWSAdapter
-    from adapters.polymarket_ws import PolymarketWSAdapter
-    from signals.cross_exchange import CrossExchangeSignal
-    from signals.book_imbalance import BookImbalanceSignal
-    from signals.engine import SignalEngine
-    from risk.manager import RiskManager
+    from legacy.adapters.kalshi_ws import KalshiWSAdapter
+    from legacy.adapters.polymarket_ws import PolymarketWSAdapter
+    from legacy.signals.cross_exchange import CrossExchangeSignal
+    from legacy.signals.book_imbalance import BookImbalanceSignal
+    from legacy.signals.engine import SignalEngine
+    from legacy.risk.manager import RiskManager
     from monitoring.event_db import EventDB
     from monitoring.alerts import AlertManager
-    from backtest.recorder import BookRecorder
+    from legacy.backtest.recorder import BookRecorder
 
     # ── Clients (REST) ─────────────────────────────────────────────────────
     kalshi_rest = None

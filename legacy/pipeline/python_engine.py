@@ -20,13 +20,13 @@ import logging
 from typing import Optional
 
 from data.markets.base import Market, OrderBook, Side
-from data.weather.aggregator import ConsensusForecast
-from pipeline.reasoning_engine import ReasoningEngine, TradeAction, TradeSignal
-from pipeline.stage1_probability import Stage1Probability
-from pipeline.stage2_market import Stage2Market
-from pipeline.stage3_edge import Stage3Edge
-from pipeline.stage4_risk import Stage4Risk
-from pipeline.stage5_timing import Stage5Timing
+from legacy.data.weather.aggregator import ConsensusForecast
+from legacy.pipeline.reasoning_engine import ReasoningEngine, TradeAction, TradeSignal
+from legacy.pipeline.stage1_probability import Stage1Probability
+from legacy.pipeline.stage2_market import Stage2Market
+from legacy.pipeline.stage3_edge import Stage3Edge
+from legacy.pipeline.stage4_risk import Stage4Risk
+from legacy.pipeline.stage5_timing import Stage5Timing
 
 logger = logging.getLogger(__name__)
 
