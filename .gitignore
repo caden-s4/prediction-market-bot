@@ -53,5 +53,12 @@ logs/
 .codex/
 .tracecov/
 
+# ── Logs and generated artifacts ─────────────────────────────────────────────
+logs/*.log
+logs/*.log.*
+*.zip
+diagnostics/diagnostic_*.txt
+diagnostics/archive/*.txt
+
 # ── Misc ──────────────────────────────────────────────────────────────────────
 *.docx
