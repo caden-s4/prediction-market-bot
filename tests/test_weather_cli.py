@@ -162,6 +162,24 @@ def test_yesterday_block():
     assert report.min_temp_f == 48
 
 
+def test_time_no_colon():
+    """'454 PM' (no colon) normalizes to '4:54 PM'."""
+    text = _make_cli_text(max_val="79", max_time="454 PM", min_val="55", min_time="612 AM")
+    report = parse_cli_text(text, _FAKE_ISSUANCE)
+    assert report is not None
+    assert report.max_temp_time == "4:54 PM"
+    assert report.min_temp_time == "6:12 AM"
+
+
+def test_time_with_colon():
+    """'5:16 PM' (with colon) normalizes to '5:16 PM'."""
+    text = _make_cli_text(max_val="60", max_time="5:16 PM", min_val="44", min_time="6:02 AM")
+    report = parse_cli_text(text, _FAKE_ISSUANCE)
+    assert report is not None
+    assert report.max_temp_time == "5:16 PM"
+    assert report.min_temp_time == "6:02 AM"
+
+
 @pytest.mark.network
 def test_fetch_cli_for_date_network():
     from datetime import timedelta

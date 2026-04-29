@@ -109,12 +109,15 @@ _DATE_RE = re.compile(r"CLIMATE SUMMARY FOR ([A-Z]+)\s+(\d{1,2})\s+(\d{4})", re.
 _PRELIM_RE = re.compile(r"VALID TODAY AS OF\s+(\d{1,2}):?(\d{2})\s*(AM|PM)", re.IGNORECASE)
 
 _TEMP_VAL = r"(MM|-?\d+R?)"
+# Time groups: hour (\d{1,2}), optional colon, minute (\d{2}), AM/PM — matches both
+# "454 PM" (no colon) and "4:54 PM". Groups: (val)(hour)(min)(ampm).
+_TIME_GROUPS = r"(?:\s+(\d{1,2}):?(\d{2})\s+([AP]M))?"
 _MAX_RE = re.compile(
-    r"^\s+MAXIMUM\s+" + _TEMP_VAL + r"(?:\s+(\d{1,2}:\d{2}\s+[AP]M))?",
+    r"^\s+MAXIMUM\s+" + _TEMP_VAL + _TIME_GROUPS,
     re.MULTILINE | re.IGNORECASE,
 )
 _MIN_RE = re.compile(
-    r"^\s+MINIMUM\s+" + _TEMP_VAL + r"(?:\s+(\d{1,2}:\d{2}\s+[AP]M))?",
+    r"^\s+MINIMUM\s+" + _TEMP_VAL + _TIME_GROUPS,
     re.MULTILINE | re.IGNORECASE,
 )
 _NEXT_SECTION_RE = re.compile(
@@ -136,6 +139,11 @@ def _parse_temp_value(raw: str) -> Optional[int]:
 def _parse_12h_time(hour_str: str, minute_str: str, ampm: str) -> time:
     h = int(hour_str) % 12 + (12 if ampm.upper() == "PM" else 0)
     return time(h, int(minute_str))
+
+
+def _format_obs_time(hour_str: str, minute_str: str, ampm: str) -> str:
+    """Normalize colon-less or colon format to canonical 'H:MM AM/PM'."""
+    return f"{int(hour_str)}:{minute_str} {ampm.upper()}"
 
 
 def _extract_temp_block(temp_section: str, is_preliminary: bool) -> str:
@@ -206,9 +214,15 @@ def parse_cli_text(text: str, issuance_time: datetime) -> Optional[CLIReport]:
         is_preliminary=is_preliminary,
         valid_through_local=valid_through_local,
         max_temp_f=_parse_temp_value(max_m.group(1)) if max_m else None,
-        max_temp_time=max_m.group(2).strip() if (max_m and max_m.group(2)) else None,
+        max_temp_time=(
+            _format_obs_time(max_m.group(2), max_m.group(3), max_m.group(4))
+            if (max_m and max_m.group(2)) else None
+        ),
         min_temp_f=_parse_temp_value(min_m.group(1)) if min_m else None,
-        min_temp_time=min_m.group(2).strip() if (min_m and min_m.group(2)) else None,
+        min_temp_time=(
+            _format_obs_time(min_m.group(2), min_m.group(3), min_m.group(4))
+            if (min_m and min_m.group(2)) else None
+        ),
         issuance_time=issuance_time,
         raw_text=text,
     )
