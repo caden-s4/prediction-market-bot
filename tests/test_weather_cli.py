@@ -180,6 +180,24 @@ def test_time_with_colon():
     assert report.min_temp_time == "6:02 AM"
 
 
+def test_time_packed_four_digit():
+    """'1130 AM' (4-digit packed, no colon) normalizes to '11:30 AM'."""
+    text = _make_cli_text(max_val="85", max_time="1130 AM", min_val="60", min_time="702 AM")
+    report = parse_cli_text(text, _FAKE_ISSUANCE)
+    assert report is not None
+    assert report.max_temp_time == "11:30 AM"
+    assert report.min_temp_time == "7:02 AM"
+
+
+def test_time_single_digit_minutes():
+    """'302 AM' — ensure single-digit minutes are zero-padded: '3:02 AM'."""
+    text = _make_cli_text(max_val="70", max_time="302 AM", min_val="50", min_time="137 AM")
+    report = parse_cli_text(text, _FAKE_ISSUANCE)
+    assert report is not None
+    assert report.max_temp_time == "3:02 AM"
+    assert report.min_temp_time == "1:37 AM"
+
+
 @pytest.mark.network
 def test_fetch_cli_for_date_network():
     from datetime import timedelta
