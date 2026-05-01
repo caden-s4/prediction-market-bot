@@ -11,6 +11,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from data.ground_truth.weather_cli import (
+    fetch_asos_running_extreme,
     fetch_cli_for_date,
     parse_cli_text,
 )
@@ -206,3 +207,148 @@ def test_fetch_cli_for_date_network():
     assert report is not None, f"No CLI report found for LAX on {target}"
     assert report.station == "LAX"
     assert report.report_date == target
+
+
+# ── ASOS running extreme tests ────────────────────────────────────────────────
+
+class _FakeResponse:
+    """Minimal stand-in for requests.Response used by _get()."""
+    def __init__(self, payload, status_code: int = 200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+def _patch_requests_get(monkeypatch, payload, status_code: int = 200):
+    captured = {}
+
+    def fake_get(url, *args, **kwargs):
+        captured["url"] = url
+        return _FakeResponse(payload, status_code=status_code)
+
+    monkeypatch.setattr(
+        "data.ground_truth.weather_cli.requests.get",
+        fake_get,
+    )
+    return captured
+
+
+def test_asos_running_extreme_synthetic(monkeypatch):
+    """Mixed-quality, mixed-time obs: only V-quality within today's local window aggregated.
+
+    Phoenix tz is UTC-7 year-round (no DST). With now_utc = 2026-04-29T20:00Z,
+    local-now = 13:00 PHX on 2026-04-29; local midnight = 2026-04-29T00:00 PHX
+    = 2026-04-29T07:00Z. Window is [07:00Z, 20:00Z].
+    """
+    fixed_now_utc = datetime(2026, 4, 29, 20, 0, tzinfo=timezone.utc)
+
+    fake_features = [
+        # V-quality, within window: 25C → 77F
+        {"properties": {
+            "temperature": {"value": 25.0, "qualityControl": "V"},
+            "timestamp": "2026-04-29T15:00:00+00:00",
+        }},
+        # V-quality, within window: 30C → 86F (max)
+        {"properties": {
+            "temperature": {"value": 30.0, "qualityControl": "V"},
+            "timestamp": "2026-04-29T18:00:00+00:00",
+        }},
+        # V-quality, within window: 20C → 68F (min)
+        {"properties": {
+            "temperature": {"value": 20.0, "qualityControl": "V"},
+            "timestamp": "2026-04-29T08:00:00+00:00",
+        }},
+        # Z-quality (automated): would be max-ish; must be rejected
+        {"properties": {
+            "temperature": {"value": 50.0, "qualityControl": "Z"},
+            "timestamp": "2026-04-29T17:00:00+00:00",
+        }},
+        # V-quality but BEFORE window (before local midnight): must be rejected
+        {"properties": {
+            "temperature": {"value": 100.0, "qualityControl": "V"},
+            "timestamp": "2026-04-29T05:00:00+00:00",
+        }},
+        # S-quality: must be rejected
+        {"properties": {
+            "temperature": {"value": -10.0, "qualityControl": "S"},
+            "timestamp": "2026-04-29T16:00:00+00:00",
+        }},
+        # null temperature value: must be skipped
+        {"properties": {
+            "temperature": {"value": None, "qualityControl": "V"},
+            "timestamp": "2026-04-29T19:00:00+00:00",
+        }},
+    ]
+    captured = _patch_requests_get(monkeypatch, {"features": fake_features})
+
+    result = fetch_asos_running_extreme(
+        "PHX", "America/Phoenix", now_utc=fixed_now_utc
+    )
+
+    assert result is not None
+    assert result.station == "PHX"
+    assert result.local_date == date(2026, 4, 29)
+    assert result.running_max_f == pytest.approx(86.0)  # 30C
+    assert result.running_min_f == pytest.approx(68.0)  # 20C
+    assert result.observation_count == 3
+    assert result.last_observation_utc == datetime(2026, 4, 29, 18, 0, tzinfo=timezone.utc)
+    # ICAO form must appear in the URL.
+    assert "/stations/KPHX/observations" in captured["url"]
+    assert "start=" in captured["url"]
+
+
+def test_asos_running_extreme_no_obs_returns_none(monkeypatch):
+    fixed_now_utc = datetime(2026, 4, 29, 20, 0, tzinfo=timezone.utc)
+    _patch_requests_get(monkeypatch, {"features": []})
+    assert fetch_asos_running_extreme("PHX", "America/Phoenix", now_utc=fixed_now_utc) is None
+
+
+def test_asos_running_extreme_only_z_quality_returns_none(monkeypatch):
+    """All obs are Z-quality (unvalidated): function must return None."""
+    fixed_now_utc = datetime(2026, 4, 29, 20, 0, tzinfo=timezone.utc)
+    fake_features = [
+        {"properties": {
+            "temperature": {"value": 25.0, "qualityControl": "Z"},
+            "timestamp": "2026-04-29T15:00:00+00:00",
+        }},
+        {"properties": {
+            "temperature": {"value": 28.0, "qualityControl": "Z"},
+            "timestamp": "2026-04-29T18:00:00+00:00",
+        }},
+    ]
+    _patch_requests_get(monkeypatch, {"features": fake_features})
+    assert fetch_asos_running_extreme("PHX", "America/Phoenix", now_utc=fixed_now_utc) is None
+
+
+def test_asos_running_extreme_unknown_timezone_returns_none(monkeypatch):
+    """Bad timezone string: function must return None without an HTTP call."""
+    called = {"hit": False}
+
+    def boom(*args, **kwargs):
+        called["hit"] = True
+        raise AssertionError("HTTP should not be reached")
+
+    monkeypatch.setattr("data.ground_truth.weather_cli.requests.get", boom)
+    result = fetch_asos_running_extreme("PHX", "Not/A_Real_Zone")
+    assert result is None
+    assert called["hit"] is False
+
+
+@pytest.mark.network
+def test_asos_running_extreme_network():
+    """Real ASOS fetch for PHX. Either returns a result or None (e.g., overnight,
+    no V-quality obs yet). Just verifies the call shape works end-to-end."""
+    result = fetch_asos_running_extreme("PHX", "America/Phoenix")
+    if result is None:
+        return  # acceptable — V-quality obs may not exist for today yet
+    assert result.station == "PHX"
+    assert result.observation_count >= 1
+    assert result.running_max_f is not None
+    assert result.running_min_f is not None
+    assert result.running_min_f <= result.running_max_f

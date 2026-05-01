@@ -14,8 +14,10 @@ import logging
 import re
 import time as _time_module
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from typing import Optional
+from urllib.parse import quote
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 
@@ -278,3 +280,116 @@ def fetch_cli_for_date(station: str, target_date: date) -> Optional[CLIReport]:
         return None
     finals = [r for r in candidates if not r.is_preliminary]
     return finals[0] if finals else candidates[0]
+
+
+# ── ASOS running max/min from raw observations ────────────────────────────────
+
+@dataclass
+class ASOSDailyExtreme:
+    station: str                    # NWS station code (bare, e.g. "PHX")
+    local_date: date                # date in city's local time
+    running_max_f: Optional[float]  # max temp observed since local midnight
+    running_min_f: Optional[float]  # min temp observed since local midnight
+    last_observation_utc: datetime  # timestamp of most recent obs
+    observation_count: int          # how many V-quality obs in the window
+
+
+def fetch_asos_running_extreme(
+    station: str,
+    timezone_name: str,
+    now_utc: Optional[datetime] = None,
+) -> Optional[ASOSDailyExtreme]:
+    """Fetch today's running max/min temperature from ASOS observations.
+
+    "Today" is the local calendar day at the station's timezone — observations
+    are aggregated from local-midnight up through ``now_utc``.
+
+    Only observations with ``qualityControl == 'V'`` (validated) are accepted;
+    'Z' (automated/unvalidated), 'S' (subjective), and other codes are skipped
+    to avoid trading on bad data. NOTE: 'V' is rare in real-time — most live
+    obs are 'Z'. Callers must check ``observation_count`` before trusting the
+    extremes.
+
+    :param station: bare NWS station code, e.g. "PHX". The observations
+        endpoint requires the ICAO form, so this function prepends 'K'
+        (PHX → KPHX). The CLI module elsewhere uses bare codes — this
+        asymmetry will trip up anyone mixing the two endpoints.
+    :param timezone_name: IANA tz name from CITY_TZ_MAP, e.g. "America/Phoenix".
+    :param now_utc: override for current time (UTC); defaults to now.
+    :return: ASOSDailyExtreme, or None if no valid observations exist for today.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+    elif now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+
+    try:
+        tz = ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        logger.warning("Unknown timezone %r for station %s", timezone_name, station)
+        return None
+
+    local_now = now_utc.astimezone(tz)
+    local_date_today = local_now.date()
+    local_midnight = datetime.combine(local_date_today, time.min, tzinfo=tz)
+    midnight_utc = local_midnight.astimezone(timezone.utc)
+
+    # NWS observations endpoint requires the ICAO form (K-prefixed). The CLI
+    # module elsewhere uses bare 3-letter codes ('PHX') — keep that asymmetry
+    # contained here.
+    icao_station = f"K{station.upper()}"
+
+    start_iso = midnight_utc.isoformat().replace("+00:00", "Z")
+    url = (
+        f"{_NWS_BASE}/stations/{icao_station}/observations"
+        f"?start={quote(start_iso, safe='')}"
+    )
+    data = _get(url)
+    if not data:
+        return None
+
+    features = data.get("features") or []
+    max_f: Optional[float] = None
+    min_f: Optional[float] = None
+    last_obs: Optional[datetime] = None
+    count = 0
+
+    for feat in features:
+        props = feat.get("properties") or {}
+        temp = props.get("temperature") or {}
+        c_value = temp.get("value")
+        if c_value is None:
+            continue
+        if temp.get("qualityControl") != "V":
+            continue
+        ts_iso = props.get("timestamp")
+        if not ts_iso:
+            continue
+        try:
+            ts_utc = datetime.fromisoformat(ts_iso.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if ts_utc.tzinfo is None:
+            ts_utc = ts_utc.replace(tzinfo=timezone.utc)
+        if ts_utc < midnight_utc or ts_utc > now_utc:
+            continue
+        f_value = (float(c_value) * 9.0 / 5.0) + 32.0
+        if max_f is None or f_value > max_f:
+            max_f = f_value
+        if min_f is None or f_value < min_f:
+            min_f = f_value
+        if last_obs is None or ts_utc > last_obs:
+            last_obs = ts_utc
+        count += 1
+
+    if count == 0 or last_obs is None:
+        return None
+
+    return ASOSDailyExtreme(
+        station=station.upper(),
+        local_date=local_date_today,
+        running_max_f=max_f,
+        running_min_f=min_f,
+        last_observation_utc=last_obs,
+        observation_count=count,
+    )

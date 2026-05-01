@@ -39,11 +39,18 @@ _WEATHER_SERIES = re.compile(
 )
 
 # All known Kalshi weather series tickers — queried directly via series_ticker
-# to avoid scanning thousands of unrelated markets.
+# to avoid scanning thousands of unrelated markets. Generic prefixes
+# (KXHIGHS, KXLOWS, etc.) return 0 markets; the live series are city-specific.
 _WEATHER_SERIES_TICKERS = [
-    "KXHIGHS", "KXLOWS", "KXTEMP",
-    "KXRAIN", "KXPRECIP", "KXSNOW",
-    "KXWIND", "KXHURR", "KXWEATHER",
+    # Daily high temperature — 13 cities
+    "KXHIGHTPHX", "KXHIGHTLV", "KXHIGHTHOU", "KXHIGHTSATX", "KXHIGHTNOLA",
+    "KXHIGHTATL", "KXHIGHTDAL", "KXHIGHTDC", "KXHIGHTSFO", "KXHIGHTSEA",
+    "KXHIGHTOKC", "KXHIGHTBOS", "KXHIGHTMIN",
+    # Daily low temperature — 20 cities
+    "KXLOWTMIA", "KXLOWTNOLA", "KXLOWTAUS", "KXLOWTSATX", "KXLOWTHOU",
+    "KXLOWTATL", "KXLOWTDAL", "KXLOWTPHX", "KXLOWTLV", "KXLOWTLAX",
+    "KXLOWTSFO", "KXLOWTSEA", "KXLOWTOKC", "KXLOWTCHI", "KXLOWTDEN",
+    "KXLOWTMIN", "KXLOWTDC", "KXLOWTNYC", "KXLOWTPHIL", "KXLOWTBOS",
 ]
 
 # Known Kalshi sports series tickers.  Same-day game markets are short-lived

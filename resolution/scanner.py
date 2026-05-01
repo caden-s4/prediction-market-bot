@@ -20,12 +20,15 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from data.markets.base import BaseMarketClient, Market
-from data.markets.kalshi import _GAME_SERIES_PREFIXES
+from data.markets.kalshi import _GAME_SERIES_PREFIXES, _WEATHER_SERIES_TICKERS
 from resolution.priority import PriorityScorer
 from shared.exclusion_list import ExclusionList
+from strategies.weather_snipe import SnipeSignal, evaluate_snipe
+
+SnipeCallback = Callable[[Market, SnipeSignal], Optional[str]]
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +63,80 @@ MIN_DEPTH_USD = 50.0
 # without triggering the rate limiter.
 TIER_REFRESH_MAX_WORKERS = 4
 
+# Coarse pre-filter window for the weather snipe dispatch hook.
+# The strategy module re-validates the exact window — this is just a fast
+# rejection so we don't construct a now/delta for every market.
+_WEATHER_SNIPE_WINDOW = timedelta(minutes=60)
+
+
+def _is_weather_snipe_candidate(market: Market) -> bool:
+    """Return True if `market` is a Kalshi weather market in its final 60 min.
+
+    Defensive: handles missing/empty market_id and missing resolution_date,
+    since the dispatch fires on every market in the kalshi fetch including
+    rejected ones.
+    """
+    mid = getattr(market, "market_id", None)
+    if not mid:
+        return False
+    rd = getattr(market, "resolution_date", None)
+    if rd is None:
+        return False
+    if rd.tzinfo is None:
+        rd = rd.replace(tzinfo=timezone.utc)
+    delta = rd - datetime.now(timezone.utc)
+    if delta <= timedelta(0):
+        return False
+    if delta > _WEATHER_SNIPE_WINDOW:
+        return False
+    return any(mid.startswith(p) for p in _WEATHER_SERIES_TICKERS)
+
+
+def _dispatch_weather_snipe(
+    market: Market,
+    snipe_callback: Optional[SnipeCallback] = None,
+) -> None:
+    """Per-market snipe dispatch hook.
+
+    Fires AFTER standard market processing. Snipes are additive — they do
+    not replace standard signals. Any exception from the strategy or the
+    placement callback is logged with traceback and swallowed; this hook
+    must never crash the scan loop.
+
+    If ``snipe_callback`` is None, the dispatch only logs the SnipeSignal
+    (useful for tests and dry inspection). When wired to the executor's
+    ``place_snipe_trade``, the callback returns an order ID on placement
+    or None when a safety gate blocked.
+    """
+    if not _is_weather_snipe_candidate(market):
+        return
+    try:
+        signal = evaluate_snipe(market, datetime.now(timezone.utc))
+    except Exception:
+        logger.exception(
+            "WeatherSnipe dispatch failed for %s", market.market_id,
+        )
+        return
+    if signal is None:
+        return
+    if snipe_callback is None:
+        logger.info(
+            "WeatherSnipe candidate: %s -> %s", market.market_id, signal,
+        )
+        return
+    try:
+        order_id = snipe_callback(market, signal)
+    except Exception:
+        logger.exception(
+            "WeatherSnipe placement failed for %s", market.market_id,
+        )
+        return
+    if order_id is not None:
+        logger.info(
+            "WeatherSnipe trade placed: %s order=%s",
+            market.market_id, order_id,
+        )
+
 
 class ResolutionScanner:
     """
@@ -84,6 +161,7 @@ class ResolutionScanner:
         poly_window_hours: Optional[float] = None,
         max_per_platform: int = 500,
         priority_scorer: Optional[PriorityScorer] = None,
+        snipe_callback: Optional[SnipeCallback] = None,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
@@ -92,6 +170,7 @@ class ResolutionScanner:
         self._poly_window = poly_window_hours if poly_window_hours is not None else window_hours
         self._max = max_per_platform
         self._priority_scorer = priority_scorer
+        self._snipe_callback = snipe_callback
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -263,6 +342,11 @@ class ResolutionScanner:
                     elif m.market_id not in seen:
                         seen.add(m.market_id)
                         results.append(m)
+                    # Weather snipe dispatch fires AFTER standard processing.
+                    # Weather markets are filtered out by EXCLUDED_CATEGORIES,
+                    # so they appear here as reason="category" — the snipe
+                    # strategy intentionally bypasses that exclusion.
+                    _dispatch_weather_snipe(m, self._snipe_callback)
             except Exception as exc:
                 logger.warning(
                     "ResolutionScanner: failed fetching kalshi markets: %s", exc

@@ -65,6 +65,7 @@ from shared.bankroll import Bankroll
 from shared.exclusion_list import ExclusionList
 from shared.fee_cache import FeeCache
 from shared.paper_log import PaperTradeLog
+from strategies.weather_snipe import SnipeSignal
 from utils.storage import StateStore
 
 logger = logging.getLogger(__name__)
@@ -517,6 +518,7 @@ class ResolutionBot:
             kalshi_window_hours=kalshi_window_hours,
             poly_window_hours=poly_window_hours,
             priority_scorer=_priority_scorer,
+            snipe_callback=self.place_snipe_trade,
         )
         self._gap_detector = GapDetector(fee_cache, force_test=force_test, slippage_buffer=min_gap)
         self._confidence = ConfidenceScorer(threshold=min_confidence)
@@ -2977,6 +2979,183 @@ class ResolutionBot:
             "hours_left": round(market.hours_to_resolution, 1),
             "source": gt.source_name if gt else "unknown",
         }
+
+    def place_snipe_trade(
+        self, market: Market, signal: SnipeSignal,
+    ) -> Optional[str]:
+        """Place a trade emitted by a sniping strategy (e.g. WeatherSnipe).
+
+        Bypasses the standard GT router / gap detector / scorer pipeline —
+        the strategy module is responsible for its own gap/edge decision.
+        Still applies the executor's safety gates: exclusions, position
+        dedup, series exposure cap, bankroll reserve. Honors ghost mode.
+
+        Empty-book guard differs from `_try_execute`: an empty book in the
+        final-hour snipe window is itself a signal that something is wrong,
+        so we log SKIP_EMPTY_BOOK_SNIPE and refuse to place a PENDING ghost
+        rather than creating an unfillable resting order.
+
+        Returns the order ID (or ghost trade ID), or None when a gate blocked.
+
+        TODO(pre-live): Snipe positions store TradeRecord.signal=None because
+        SnipeSignal isn't a GapSignal. Audited 2026-04-30 — all `.signal.`
+        dereferences in this module are None-guarded so no AttributeError,
+        but downstream visibility is reduced: the financial hard-stop loop
+        skips snipe positions (they are not financial sources), the decay
+        monitor sees `_gt_published_at=None` (no freshness reference), and
+        exit records show source="unknown". Before flipping snipes to live
+        mode, either populate a synthetic ground_truth_result on the wrapped
+        GapSignal or add a TradeRecord.source attribute and migrate the
+        attribution paths off of `signal.ground_truth_result.source_name`.
+        """
+        mid = market.market_id
+
+        if self._exclusions.is_excluded(market.platform, mid):
+            logger.info("ResolutionBot: SKIP_SNIPE %s — on exclusion list", mid)
+            return None
+        if mid in self._positions:
+            logger.info(
+                "ResolutionBot: SKIP_SNIPE %s — already holding position", mid,
+            )
+            return None
+        if signal.action not in ("buy_yes", "buy_no"):
+            logger.warning(
+                "ResolutionBot: SKIP_SNIPE %s — invalid action %r",
+                mid, signal.action,
+            )
+            return None
+
+        # Empty-book guard (snipe variant: skip rather than place PENDING).
+        ob_live = self._get_live_book(market)
+        if ob_live is None:
+            logger.info(
+                "ResolutionBot: SKIP_EMPTY_BOOK_SNIPE %s — book empty in "
+                "final-hour window; refusing to place PENDING (would be "
+                "unfillable, and an empty book here is itself suspect)", mid,
+            )
+            return None
+        if signal.action == "buy_yes":
+            limit_price = ob_live.best_yes_ask
+            side_label = "YES ask"
+        else:
+            limit_price = ob_live.best_yes_bid
+            side_label = "YES bid"
+        if limit_price is None:
+            logger.info(
+                "ResolutionBot: SKIP_EMPTY_BOOK_SNIPE %s — no %s in book",
+                mid, side_label,
+            )
+            return None
+
+        # Wrap the SnipeSignal in a minimal GapSignal so we can reuse the
+        # existing _compute_size and _place_order paths without forking the
+        # Kelly logic. ground_truth_prob and reference_price are set so the
+        # GapSignal.action property derives the correct side, and Kelly sees
+        # a decisive 0.99 probability on the bought side.
+        if signal.action == "buy_yes":
+            gt_prob_for_kelly = 0.99
+            ref_price = 0.99
+        else:
+            gt_prob_for_kelly = 0.01
+            ref_price = 0.01
+        snipe_gap = GapSignal(
+            signal_type="weather_snipe",
+            market_to_buy=market,
+            market_reference=None,
+            target_price=limit_price,
+            reference_price=ref_price,
+            ground_truth_prob=gt_prob_for_kelly,
+            effective_gap=signal.edge,
+            taker_fee=0.0,
+            ground_truth_result=None,
+            reasoning=signal.rationale,
+        )
+
+        size_usd = self._compute_size(snipe_gap, signal.confidence)
+        if size_usd < 1.0:
+            logger.info(
+                "ResolutionBot: SKIP_SNIPE %s — size too small ($%.2f)",
+                mid, size_usd,
+            )
+            return None
+
+        # Per-series exposure cap (same logic as _try_execute).
+        series_root = _series_root(mid)
+        if series_root is not None:
+            series_exposure = sum(
+                r.size_usd for r_id, r in self._positions.items()
+                if _series_root(r_id) == series_root
+            )
+            cap_fraction = (
+                MAX_SERIES_EXPOSURE_FRACTION_GHOST
+                if self._dry_run
+                else MAX_SERIES_EXPOSURE_FRACTION
+            )
+            max_series = self._bankroll.total_usd * cap_fraction
+            if series_exposure + size_usd > max_series:
+                logger.info(
+                    "ResolutionBot: SKIP_SNIPE %s — series exposure cap "
+                    "($%.2f in %s, max $%.2f)",
+                    mid, series_exposure, series_root, max_series,
+                )
+                return None
+
+        if not self._bankroll.reserve(mid, size_usd):
+            logger.info(
+                "ResolutionBot: SKIP_SNIPE %s — bankroll reserve failed", mid,
+            )
+            return None
+
+        order_id = self._place_order(
+            market, snipe_gap, size_usd, fee=0.0, limit_price=limit_price,
+        )
+        if order_id is None and not self._dry_run:
+            logger.warning(
+                "ResolutionBot: SNIPE order placement failed for %s — "
+                "no position recorded", mid,
+            )
+            return None
+
+        self._positions[mid] = TradeRecord(
+            market_id=mid,
+            platform=market.platform,
+            market=market,
+            signal=None,
+            action=signal.action,
+            entry_price=limit_price,
+            size_usd=size_usd,
+            ground_truth_prob=gt_prob_for_kelly,
+            source_confidence=signal.confidence,
+            distance_pct=0.0,
+            order_id=order_id,
+            fill_status="filled",
+            limit_price_used=None,
+        )
+
+        if self._paper_log is not None:
+            _tier = getattr(self._registry._entries.get(mid), "tier", 0)
+            self._paper_log.log_entry(
+                market_id=mid,
+                platform=market.platform,
+                action=signal.action,
+                entry_price=limit_price,
+                size_usd=size_usd,
+                gt_prob=gt_prob_for_kelly,
+                gap=signal.edge,
+                confidence=signal.confidence,
+                source="WeatherSnipe",
+                tier=_tier,
+                question=market.question,
+                entry_time=self._positions[mid].entry_time,
+            )
+
+        self._save_positions()
+        logger.info(
+            "ResolutionBot: SNIPE %s %s @ %.4f size=$%.2f (order=%s) — %s",
+            signal.action, mid, limit_price, size_usd, order_id,
+            signal.rationale,
+        )
+        return order_id
 
     def approve_human_review(self, market_id: str) -> bool:
         """Approve a pending human-review signal and attempt to execute it.
