@@ -3009,6 +3009,10 @@ class ResolutionBot:
         attribution paths off of `signal.ground_truth_result.source_name`.
         """
         mid = market.market_id
+        logger.info(
+            "ResolutionBot: SNIPE_ENTRY %s action=%s target_price=%.4f edge=%.4f",
+            mid, signal.action, signal.target_price, signal.edge,
+        )
 
         if self._exclusions.is_excluded(market.platform, mid):
             logger.info("ResolutionBot: SKIP_SNIPE %s — on exclusion list", mid)
@@ -3072,6 +3076,10 @@ class ResolutionBot:
         )
 
         size_usd = self._compute_size(snipe_gap, signal.confidence)
+        logger.info(
+            "ResolutionBot: SNIPE_SIZE %s computed=$%.2f (confidence=%.3f bankroll=$%.2f)",
+            mid, size_usd, signal.confidence, self._bankroll.total_usd,
+        )
         if size_usd < 1.0:
             logger.info(
                 "ResolutionBot: SKIP_SNIPE %s — size too small ($%.2f)",

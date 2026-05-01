@@ -17,10 +17,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import logging
+
 from data.ground_truth.weather_cli import fetch_asos_running_extreme
 from data.ground_truth.weather_kalshi import parse_weather_ticker
 from data.ground_truth.weather_timezones import CITY_TZ_MAP
 from data.markets.base import Market
+
+logger = logging.getLogger(__name__)
 
 
 _SNIPE_WINDOW_MINUTES = 60
@@ -60,18 +64,29 @@ def evaluate_snipe(
     if not _within_snipe_window(market, now_utc):
         return None
 
-    wm = parse_weather_ticker(market.market_id, market.question)
+    mid = market.market_id
+
+    wm = parse_weather_ticker(mid, market.question)
     if wm is None:
+        logger.info("WeatherSnipe: %s — no ASOS data (unparseable ticker)", mid)
         return None
 
     tz_name = CITY_TZ_MAP.get(wm.city)
     if tz_name is None:
+        logger.info("WeatherSnipe: %s — no ASOS data (no timezone for city %r)", mid, wm.city)
         return None
 
     extreme = fetch_asos_running_extreme(
         wm.cli_station, tz_name, now_utc=now_utc
     )
-    if extreme is None or extreme.observation_count < _MIN_OBSERVATIONS:
+    if extreme is None:
+        logger.info("WeatherSnipe: %s — no ASOS data (fetch returned None, station=%s)", mid, wm.cli_station)
+        return None
+    if extreme.observation_count < _MIN_OBSERVATIONS:
+        logger.info(
+            "WeatherSnipe: %s — insufficient observations (%d < %d, station=%s)",
+            mid, extreme.observation_count, _MIN_OBSERVATIONS, wm.cli_station,
+        )
         return None
 
     if wm.market_type == "high":
@@ -79,12 +94,18 @@ def evaluate_snipe(
     elif wm.market_type == "low":
         temp = extreme.running_min_f
     else:
+        logger.info("WeatherSnipe: %s — no ASOS data (unknown market_type %r)", mid, wm.market_type)
         return None
     if temp is None:
+        logger.info("WeatherSnipe: %s — no ASOS data (running temp is None, station=%s)", mid, wm.cli_station)
         return None
 
     decision = _decide_outcome(wm, temp)
     if decision is None:
+        logger.info(
+            "WeatherSnipe: %s — outcome not decisive (temp=%.1fF, type=%s, threshold=%.1f)",
+            mid, temp, wm.threshold_type, getattr(wm, "threshold_value", float("nan")),
+        )
         return None
 
     return _build_signal(market, wm, temp, decision)
@@ -137,15 +158,24 @@ def _build_signal(
     yes_ask = _resolve_price(getattr(market, "yes_ask", None), market.yes_price)
     yes_bid = _resolve_price(getattr(market, "yes_bid", None), market.yes_price)
 
+    mid = market.market_id
     if decision == "yes":
         if yes_ask >= _YES_FULLY_PRICED:
-            return None  # already priced — no edge
+            logger.info(
+                "WeatherSnipe: %s — already priced no edge (buy_yes: yes_ask=%.4f >= %.2f)",
+                mid, yes_ask, _YES_FULLY_PRICED,
+            )
+            return None
         action = "buy_yes"
         target_price = yes_ask
         edge = _DECISIVE_PROB - yes_ask
     else:  # "no"
         # NO is fully priced when YES is near zero.
         if yes_bid <= _NO_FULLY_PRICED:
+            logger.info(
+                "WeatherSnipe: %s — already priced no edge (buy_no: yes_bid=%.4f <= %.2f)",
+                mid, yes_bid, _NO_FULLY_PRICED,
+            )
             return None
         action = "buy_no"
         no_ask = 1.0 - yes_bid
