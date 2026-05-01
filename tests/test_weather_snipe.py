@@ -231,6 +231,35 @@ def test_evaluate_snipe_unparseable_ticker_returns_none(monkeypatch):
     assert evaluate_snipe(market, _NOW) is None
 
 
+# ── shadow_mode parameter ────────────────────────────────────────────────────
+
+def test_evaluate_snipe_shadow_mode_bypasses_window_check(monkeypatch):
+    # _CLOSE_90M is 90 min out — outside the real 60-min window but inside
+    # the 240-min shadow window. shadow_mode=True should skip the window gate.
+    _patch_asos(monkeypatch, running_max=78.0)
+    market = _mk_market(
+        "KXHIGHTPHX-26APR30-T75",
+        "Will the high in Phoenix be > 75F?",
+        _CLOSE_90M,
+        yes_ask=0.50, yes_bid=0.49,
+    )
+    sig = evaluate_snipe(market, _NOW, shadow_mode=True)
+    assert sig is not None
+    assert sig.action == "buy_yes"
+
+
+def test_evaluate_snipe_shadow_mode_default_false_unchanged(monkeypatch):
+    # Same market and data — without shadow_mode the window check still rejects it.
+    _patch_asos(monkeypatch, running_max=78.0)
+    market = _mk_market(
+        "KXHIGHTPHX-26APR30-T75",
+        "Will the high in Phoenix be > 75F?",
+        _CLOSE_90M,
+        yes_ask=0.50, yes_bid=0.49,
+    )
+    assert evaluate_snipe(market, _NOW) is None
+
+
 # ── CITY_TZ_MAP completeness ──────────────────────────────────────────────────
 
 def test_city_tz_map_covers_all_cli_cities():

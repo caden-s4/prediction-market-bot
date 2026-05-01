@@ -68,6 +68,11 @@ TIER_REFRESH_MAX_WORKERS = 4
 # rejection so we don't construct a now/delta for every market.
 _WEATHER_SNIPE_WINDOW = timedelta(minutes=60)
 
+# Shadow window: markets 60-240 min from close are evaluated but never
+# dispatched to the executor. Used to diagnose whether widening the live
+# window would produce more actionable signals.
+_WEATHER_SNIPE_SHADOW_WINDOW = timedelta(minutes=240)
+
 
 def _is_weather_snipe_candidate(market: Market) -> bool:
     """Return True if `market` is a Kalshi weather market in its final 60 min.
@@ -92,6 +97,28 @@ def _is_weather_snipe_candidate(market: Market) -> bool:
     return any(mid.startswith(p) for p in _WEATHER_SERIES_TICKERS)
 
 
+def _is_weather_shadow_candidate(market: Market) -> bool:
+    """Return True if `market` is a weather market 60-240 min from close.
+
+    Mutually exclusive with _is_weather_snipe_candidate (which covers 0-60 min).
+    Defensive: same missing-field handling as the real candidate check.
+    """
+    mid = getattr(market, "market_id", None)
+    if not mid:
+        return False
+    rd = getattr(market, "resolution_date", None)
+    if rd is None:
+        return False
+    if rd.tzinfo is None:
+        rd = rd.replace(tzinfo=timezone.utc)
+    delta = rd - datetime.now(timezone.utc)
+    if delta <= _WEATHER_SNIPE_WINDOW:
+        return False
+    if delta > _WEATHER_SNIPE_SHADOW_WINDOW:
+        return False
+    return any(mid.startswith(p) for p in _WEATHER_SERIES_TICKERS)
+
+
 def _dispatch_weather_snipe(
     market: Market,
     snipe_callback: Optional[SnipeCallback] = None,
@@ -103,38 +130,68 @@ def _dispatch_weather_snipe(
     placement callback is logged with traceback and swallowed; this hook
     must never crash the scan loop.
 
-    If ``snipe_callback`` is None, the dispatch only logs the SnipeSignal
-    (useful for tests and dry inspection). When wired to the executor's
-    ``place_snipe_trade``, the callback returns an order ID on placement
-    or None when a safety gate blocked.
+    Real path (0-60 min): evaluates and dispatches to the executor callback.
+    If ``snipe_callback`` is None, logs the SnipeSignal without dispatching
+    (useful for tests and dry inspection).
+
+    Shadow path (60-240 min): evaluates but never dispatches — logs only,
+    with SHADOW_ prefixed lines. Used for window-tuning diagnostics.
     """
-    if not _is_weather_snipe_candidate(market):
-        return
-    try:
-        signal = evaluate_snipe(market, datetime.now(timezone.utc))
-    except Exception:
-        logger.exception(
-            "WeatherSnipe dispatch failed for %s", market.market_id,
-        )
-        return
-    if signal is None:
-        return
-    if snipe_callback is None:
+    if _is_weather_snipe_candidate(market):
+        try:
+            signal = evaluate_snipe(market, datetime.now(timezone.utc))
+        except Exception:
+            logger.exception(
+                "WeatherSnipe dispatch failed for %s", market.market_id,
+            )
+            return
+        if signal is None:
+            return
+        if snipe_callback is None:
+            logger.info(
+                "WeatherSnipe candidate: %s -> %s", market.market_id, signal,
+            )
+            return
+        try:
+            order_id = snipe_callback(market, signal)
+        except Exception:
+            logger.exception(
+                "WeatherSnipe placement failed for %s", market.market_id,
+            )
+            return
+        if order_id is not None:
+            logger.info(
+                "WeatherSnipe trade placed: %s order=%s",
+                market.market_id, order_id,
+            )
+    elif _is_weather_shadow_candidate(market):
+        now_utc = datetime.now(timezone.utc)
+        rd = market.resolution_date
+        if rd.tzinfo is None:
+            rd = rd.replace(tzinfo=timezone.utc)
+        minutes_to_close = int((rd - now_utc).total_seconds() / 60)
+        mid = market.market_id
         logger.info(
-            "WeatherSnipe candidate: %s -> %s", market.market_id, signal,
+            "ResolutionBot: SHADOW_CANDIDATE %s — minutes_to_close=%d",
+            mid, minutes_to_close,
         )
-        return
-    try:
-        order_id = snipe_callback(market, signal)
-    except Exception:
-        logger.exception(
-            "WeatherSnipe placement failed for %s", market.market_id,
-        )
-        return
-    if order_id is not None:
+        try:
+            signal = evaluate_snipe(market, now_utc, shadow_mode=True)
+        except Exception:
+            logger.exception(
+                "WeatherSnipe shadow dispatch failed for %s", mid,
+            )
+            return
+        if signal is None:
+            logger.info(
+                "ResolutionBot: SHADOW_REJECT %s — no signal minutes_to_close=%d",
+                mid, minutes_to_close,
+            )
+            return
         logger.info(
-            "WeatherSnipe trade placed: %s order=%s",
-            market.market_id, order_id,
+            "ResolutionBot: SHADOW_SIGNAL %s action=%s target_price=%.4f "
+            "edge=%.4f minutes_to_close=%d",
+            mid, signal.action, signal.target_price, signal.edge, minutes_to_close,
         )
 
 

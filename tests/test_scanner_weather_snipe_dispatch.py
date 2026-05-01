@@ -8,6 +8,7 @@ from data.markets.base import Market
 from resolution import scanner as scanner_mod
 from resolution.scanner import (
     _dispatch_weather_snipe,
+    _is_weather_shadow_candidate,
     _is_weather_snipe_candidate,
 )
 from strategies.weather_snipe import SnipeSignal
@@ -173,3 +174,60 @@ def test_dispatch_logs_candidate_only_when_callback_is_none(monkeypatch, caplog)
     with caplog.at_level(logging.INFO, logger="resolution.scanner"):
         _dispatch_weather_snipe(m, None)
     assert "WeatherSnipe candidate" in caplog.text
+
+
+# ── shadow path (60-240 min) ────────────────────────────────────────────────
+
+def _shadow_market(hours_ahead: float = 2.0) -> Market:
+    """Market at hours_ahead hours from close — in the 60-240 min shadow window."""
+    return _mk_market("KXHIGHTPHX-26MAY01-B91.5", hours_ahead=hours_ahead)
+
+
+def test_dispatch_shadow_path_fires_between_60_and_240_min(monkeypatch, caplog):
+    monkeypatch.setattr(
+        scanner_mod, "evaluate_snipe",
+        lambda m, now, shadow_mode=False: _ok_signal(),
+    )
+    m = _shadow_market(hours_ahead=2.0)
+    with caplog.at_level(logging.INFO, logger="resolution.scanner"):
+        _dispatch_weather_snipe(m)
+    assert "SHADOW_CANDIDATE" in caplog.text
+    assert "SHADOW_SIGNAL" in caplog.text
+    # Real path must NOT fire for a shadow-window market
+    assert "WeatherSnipe candidate" not in caplog.text
+    assert "WeatherSnipe trade placed" not in caplog.text
+
+
+def test_dispatch_shadow_path_does_not_invoke_callback(monkeypatch):
+    monkeypatch.setattr(
+        scanner_mod, "evaluate_snipe",
+        lambda m, now, shadow_mode=False: _ok_signal(),
+    )
+    called = []
+    def cb(market, sig):
+        called.append(True)
+        return "ghost_123"
+    m = _shadow_market()
+    _dispatch_weather_snipe(m, cb)
+    assert called == [], "shadow path must never invoke the executor callback"
+
+
+def test_dispatch_shadow_path_logs_with_shadow_prefix(monkeypatch, caplog):
+    monkeypatch.setattr(
+        scanner_mod, "evaluate_snipe",
+        lambda m, now, shadow_mode=False: _ok_signal(),
+    )
+    m = _shadow_market()
+    with caplog.at_level(logging.INFO, logger="resolution.scanner"):
+        _dispatch_weather_snipe(m)
+    assert "SHADOW_" in caplog.text
+    assert "minutes_to_close" in caplog.text
+
+
+def test_real_window_unchanged(monkeypatch, caplog):
+    monkeypatch.setattr(scanner_mod, "evaluate_snipe", lambda m, now: _ok_signal())
+    m = _mk_market("KXHIGHTPHX-26APR30-T80", hours_ahead=0.5)  # 30 min — real window
+    with caplog.at_level(logging.INFO, logger="resolution.scanner"):
+        _dispatch_weather_snipe(m)
+    assert "WeatherSnipe candidate" in caplog.text
+    assert "SHADOW_" not in caplog.text

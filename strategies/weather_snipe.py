@@ -51,17 +51,20 @@ class SnipeSignal:
 def evaluate_snipe(
     market: Market,
     now_utc: datetime,
+    *,
+    shadow_mode: bool = False,
 ) -> Optional[SnipeSignal]:
     """Evaluate a weather market for a sniping signal.
 
     Returns None if:
-    - Market is outside the 60-min snipe window (or already closed)
+    - Market is outside the 60-min snipe window (or already closed) — unless
+      shadow_mode=True, which bypasses the window check for diagnostic runs
     - Ticker isn't a parseable weather ticker
     - Today's running max/min isn't available, or has too few observations
     - Outcome is not decisively determined
     - Kalshi market is already priced near certainty (no edge left)
     """
-    if not _within_snipe_window(market, now_utc):
+    if not shadow_mode and not _within_snipe_window(market, now_utc):
         return None
 
     mid = market.market_id
