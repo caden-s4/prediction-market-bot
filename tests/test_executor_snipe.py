@@ -106,6 +106,8 @@ def _make_bot(
     bot._paper_log = paper_log
     bot._registry = types.SimpleNamespace(_entries={})
 
+    bot._snipes_placed_cum = 0
+
     bot._get_live_book = lambda m: ob
     bot._compute_size = lambda gap, conf: size_usd
     bot._place_order = lambda m, gap, size, fee=0.0, limit_price=None: place_order_id

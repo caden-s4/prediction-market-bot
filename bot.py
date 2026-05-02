@@ -17,7 +17,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import requests
 
@@ -29,6 +29,7 @@ from data.markets.polymarket import PolymarketClient
 from data.release_calendar import FREDReleaseCalendar
 from monitoring.alerts import AlertManager
 from monitoring.event_db import EventDB
+from monitoring.tui_state import TUIStateSnapshot, _read_git_commit_short, write_snapshot
 from resolution.executor import ResolutionBot
 from resolution.gap_detector import SLIPPAGE_BUFFER
 from shared.bankroll import Bankroll
@@ -236,6 +237,12 @@ class BotCoordinator:
         )
 
         self._cycle_count: int = 0
+
+        # ── TUI snapshot infrastructure ────────────────────────────────────────
+        self._uptime_start: datetime = datetime.now(timezone.utc)
+        self._disabled_features: List[str] = self._compute_disabled_features()
+        self._git_commit: Optional[str] = _read_git_commit_short()
+        self._resolution._post_cycle_hook = self._write_tui_snapshot
 
         # Check for system clock drift at startup.  A VPS whose clock is more
         # than 2 seconds ahead of / behind real UTC will produce stale-looking
@@ -462,3 +469,37 @@ class BotCoordinator:
                 _GHOST_STATE_FILE, exc,
             )
             return None
+
+    def _compute_disabled_features(self) -> List[str]:
+        disabled: List[str] = [
+            "yahoo_brackets",  # _FINANCIAL_BRACKET_PREFIXES = () in scanner.py
+            "kxbrentd",        # wrong GT source (BZ=F vs CL=F), permanently removed
+        ]
+        if not self._cfg.polymarket.enabled:
+            disabled.append("polymarket")
+        return disabled
+
+    def _write_tui_snapshot(self) -> None:
+        """Build and atomically write data/runtime/tui_state.json."""
+        from resolution.scanner import get_snipe_stats  # noqa: PLC0415
+        res = self._resolution
+        snipes_attempted, shadow_total = get_snipe_stats()
+        now_utc = datetime.now(timezone.utc)
+        snapshot = TUIStateSnapshot(
+            mode="GHOST" if self._cfg.bot.dry_run else "LIVE",
+            paused=False,
+            cycle_start_ts=res._last_cycle_start_ts or now_utc.isoformat(),
+            cycle_duration_s=res._last_cycle_duration_s,
+            uptime_start_ts=self._uptime_start.isoformat(),
+            wall_clock_utc=now_utc.isoformat(),
+            disabled_features=self._disabled_features,
+            current_pipeline_stage=res._pipeline_stage,
+            signals_total=res._signals_total_cum,
+            fills_total=res._fills_total_cum,
+            snipes_attempted=snipes_attempted,
+            snipes_placed=res._snipes_placed_cum,
+            shadow_signals_total=shadow_total,
+            schema_version=1,
+            git_commit=self._git_commit,
+        )
+        write_snapshot(snapshot)

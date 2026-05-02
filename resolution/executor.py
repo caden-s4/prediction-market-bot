@@ -661,6 +661,18 @@ class ResolutionBot:
         # stabilization guard to delay new trade entry until the first full
         # scan cycle has completed and in-memory state is populated.
         self._startup_time: float = time.time()
+
+        # ── TUI snapshot state ─────────────────────────────────────────────────
+        # Written to data/runtime/tui_state.json at end of every cycle by
+        # BotCoordinator via _post_cycle_hook.  Never crash the bot if unset.
+        self._pipeline_stage: str = "idle"
+        self._last_cycle_start_ts: Optional[str] = None
+        self._last_cycle_duration_s: Optional[float] = None
+        self._signals_total_cum: int = 0
+        self._fills_total_cum: int = 0
+        self._snipes_placed_cum: int = 0
+        self._post_cycle_hook: Optional[callable] = None
+
         self._load_positions()
         self._reconcile_with_exchange()
         self._validate_open_positions()
@@ -720,6 +732,8 @@ class ResolutionBot:
         self._kalshi_backend_down = False   # reset circuit breaker each cycle
         cycle_start = time.monotonic()
         self._cycle_start_monotonic = cycle_start  # stash for sub-methods
+        self._last_cycle_start_ts = datetime.now(timezone.utc).isoformat()
+        self._pipeline_stage = "scanning"
         logger.info("[CYCLE_TIMING] phase=cycle_total event=start elapsed_since_cycle_start=0.0s")
         now_mono = time.monotonic()
         summary: dict = {
@@ -743,6 +757,8 @@ class ResolutionBot:
             summary["exits_triggered"] = exits
             elapsed = (time.monotonic() - cycle_start) * 1000
             summary["cycle_ms"] = round(elapsed)
+            self._pipeline_stage = "idle"
+            self._call_post_cycle_hook()
             return summary
 
         # ── Startup stabilization: monitor only, no new trades ────────────
@@ -759,6 +775,8 @@ class ResolutionBot:
             summary["exits_triggered"] = exits
             elapsed = (time.monotonic() - cycle_start) * 1000
             summary["cycle_ms"] = round(elapsed)
+            self._pipeline_stage = "idle"
+            self._call_post_cycle_hook()
             return summary
 
         # ── Calendar: once-daily schedule refresh ──────────────────────────
@@ -999,6 +1017,7 @@ class ResolutionBot:
                             )
 
         # ── Cross-platform gap detection (Tier 1 + all Tier 2) ─────────────
+        self._pipeline_stage = "gap_detect"
         # Use ALL Tier 2 entries (not just the batch) so cross-platform pairs
         # across tiers are detected even when only one side was refreshed.
         all_t2_markets = [e.market for e in self._registry.get_tier(2)]
@@ -1092,6 +1111,7 @@ class ResolutionBot:
             )
 
         # ── Information signals (GT fetch for active markets) ───────────────
+        self._pipeline_stage = "gt_fetch"
         logger.info("[CYCLE_TIMING] phase=gt_fetch_loop event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
         try:
             info_signals = self._fetch_info_signals(active_markets)
@@ -1166,6 +1186,7 @@ class ResolutionBot:
                     )
 
         # ── Confidence gate pre-screen (for display/logging only) ───────────
+        self._pipeline_stage = "scoring"
         logger.info("[CYCLE_TIMING] phase=signal_eval event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
         display_signals: List[GapSignal] = []
         confidence_blocked = 0
@@ -1215,6 +1236,7 @@ class ResolutionBot:
         ]
 
         # ── Execute signals ──────────────────────────────────────────────────
+        self._pipeline_stage = "executing"
         for signal in all_signals:
             detail = self._try_execute(signal)
             if detail is not None:
@@ -1223,6 +1245,7 @@ class ResolutionBot:
         logger.info("[CYCLE_TIMING] phase=signal_eval event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
 
         # ── Monitor open positions ───────────────────────────────────────────
+        self._pipeline_stage = "decay_monitor"
         logger.info("[CYCLE_TIMING] phase=cycle_summary_write event=start elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
         exits = self._monitor_positions()
         summary["exits_triggered"] = exits
@@ -1256,7 +1279,20 @@ class ResolutionBot:
         logger.info("[CYCLE_TIMING] phase=cycle_summary_write event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
         logger.info("[CYCLE_TIMING] phase=cycle_total event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
 
+        self._last_cycle_duration_s = elapsed / 1000
+        self._signals_total_cum += summary.get("signals_flagged", 0)
+        self._fills_total_cum += summary.get("trades_fired", 0)
+        self._pipeline_stage = "idle"
+        self._call_post_cycle_hook()
+
         return summary
+
+    def _call_post_cycle_hook(self) -> None:
+        if self._post_cycle_hook is not None:
+            try:
+                self._post_cycle_hook()
+            except Exception as _h:
+                logger.warning("ResolutionBot: post_cycle_hook failed: %s", _h)
 
     # ── Tiered scan helpers ───────────────────────────────────────────────────
 
@@ -3157,6 +3193,7 @@ class ResolutionBot:
                 entry_time=self._positions[mid].entry_time,
             )
 
+        self._snipes_placed_cum += 1
         self._save_positions()
         logger.info(
             "ResolutionBot: SNIPE %s %s @ %.4f size=$%.2f (order=%s) — %s",

@@ -73,6 +73,15 @@ _WEATHER_SNIPE_WINDOW = timedelta(minutes=60)
 # window would produce more actionable signals.
 _WEATHER_SNIPE_SHADOW_WINDOW = timedelta(minutes=240)
 
+# Process-lifetime counters for TUI state snapshot.
+_SNIPES_ATTEMPTED: int = 0   # real-window candidates evaluated (0-60 min)
+_SHADOW_SIGNALS: int = 0     # shadow-window evaluations that produced a signal
+
+
+def get_snipe_stats() -> tuple:
+    """Return (snipes_attempted, shadow_signals) cumulative since process start."""
+    return _SNIPES_ATTEMPTED, _SHADOW_SIGNALS
+
 
 def _is_weather_snipe_candidate(market: Market) -> bool:
     """Return True if `market` is a Kalshi weather market in its final 60 min.
@@ -138,6 +147,8 @@ def _dispatch_weather_snipe(
     with SHADOW_ prefixed lines. Used for window-tuning diagnostics.
     """
     if _is_weather_snipe_candidate(market):
+        global _SNIPES_ATTEMPTED
+        _SNIPES_ATTEMPTED += 1
         try:
             signal = evaluate_snipe(market, datetime.now(timezone.utc))
         except Exception:
@@ -188,6 +199,8 @@ def _dispatch_weather_snipe(
                 mid, minutes_to_close,
             )
             return
+        global _SHADOW_SIGNALS
+        _SHADOW_SIGNALS += 1
         logger.info(
             "ResolutionBot: SHADOW_SIGNAL %s action=%s target_price=%.4f "
             "edge=%.4f minutes_to_close=%d",
