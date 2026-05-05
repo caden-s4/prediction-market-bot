@@ -163,6 +163,27 @@ class KalshiWebSocket:
                 self._tickers.pop(t, None)
         logger.info("Queued unsubscribe for %d tickers", len(removed))
 
+    def sync_subscriptions(self, target_tickers: list[str]) -> None:
+        """Bring WS subscriptions in sync with *target_tickers*.
+
+        Subscribes to any ticker absent from the current set and unsubscribes
+        any ticker present in the current set but absent from *target_tickers*.
+        An empty *target_tickers* list unsubscribes everything currently held.
+        """
+        target = set(target_tickers)
+        with self._sub_lock:
+            currently = set(self._subscribed)
+        new_subs = target - currently
+        to_remove = currently - target
+        if new_subs:
+            self.subscribe(list(new_subs))
+        if to_remove:
+            self.unsubscribe(list(to_remove))
+        logger.info(
+            "KalshiWebSocket: sync_subscriptions added=%d removed=%d total=%d",
+            len(new_subs), len(to_remove), len(target),
+        )
+
     def get_book(self, market_id: str) -> Optional[OrderBook]:
         """Return the latest in-memory OrderBook, or None if unavailable."""
         with self._lock:
