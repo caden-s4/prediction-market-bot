@@ -84,7 +84,10 @@ _SHADOW_SIGNALS: int = 0     # shadow-window evaluations that produced a signal
 # the executor freshness gate (gt_age > 60s threshold). Set False after routing
 # to a real-time source (Twelve Data paid tier).
 # DO NOT add KXBRENTD/KXBRENTW — wrong GT source regardless of freshness.
-DISABLE_FINANCIAL_BRACKETS: bool = True
+# LOOSENED for diagnostic visibility (was True) — paired with the 300s freshness
+# bump in data/ground_truth/base.py to let bracket signals flow in ghost mode
+# so we can verify executor mechanics end-to-end.
+DISABLE_FINANCIAL_BRACKETS: bool = False
 _FINANCIAL_BRACKET_PREFIXES: tuple = (
     "KXNASDAQ100U",  # before KXNASDAQ100 — longer prefix wins startswith
     "KXNASDAQ100",

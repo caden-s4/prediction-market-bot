@@ -191,7 +191,9 @@ MIN_EV = 0.02
 # Mirrors MIN_CONFIDENCE_THRESHOLD env var. Used in log messages only —
 # actual gate is set via ConfidenceScorer(threshold=...) in __init__.
 CONFIDENCE_GATE_LIVE                = 0.65
-CONFIDENCE_GATE_GHOST_CROSS_PLATFORM = 0.50
+# LOOSENED for diagnostic visibility (was 0.50) — let cross-platform ghosts
+# fire at low confidence so executor mechanics can be verified end-to-end.
+CONFIDENCE_GATE_GHOST_CROSS_PLATFORM = 0.30
 
 # Per-series exposure cap: all markets sharing a root ticker (e.g. KXPAYROLLS)
 # are driven by the same underlying data point and are 100% correlated.  Without

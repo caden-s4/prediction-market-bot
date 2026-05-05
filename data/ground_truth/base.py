@@ -25,7 +25,10 @@ from data.markets.base import Market
 # Max age of GT data considered fresh for any decisive action (entry or exit).
 # Sources that intentionally omit data_published_at (e.g. FRED) are always
 # treated as fresh — see GroundTruthResult.is_fresh().
-GT_FRESHNESS_SECONDS: int = 60
+# LOOSENED for diagnostic visibility (was 60) — Yahoo Finance quote_ts staleness
+# was blocking 100% of financial bracket signals at 60s. Revert to 60 once a
+# real-time price source (Twelve Data paid tier) is wired in.
+GT_FRESHNESS_SECONDS: int = 300
 
 
 class SourceType(str, Enum):

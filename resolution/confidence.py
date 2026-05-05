@@ -62,8 +62,10 @@ from resolution.gap_detector import GapSignal
 
 logger = logging.getLogger(__name__)
 
-# LOOSENED for ghost-mode edge discovery (was 0.80) — revert if losing
-CONFIDENCE_THRESHOLD = 0.45   # default; overridable via MIN_CONFIDENCE_THRESHOLD env var
+# LOOSENED for diagnostic visibility (was 0.45, originally 0.80) — revert when
+# strategy is validated. NOTE: env var MIN_CONFIDENCE_THRESHOLD overrides this.
+# If your .env has a stricter value, lower it or remove the line.
+CONFIDENCE_THRESHOLD = 0.30   # default; overridable via MIN_CONFIDENCE_THRESHOLD env var
 MARGINAL_THRESHOLD   = 0.85   # below this on both axes → requires_depth_check
 
 # ── Category / tag clarity lookup ─────────────────────────────────────────────
