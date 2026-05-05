@@ -519,6 +519,7 @@ class ResolutionBot:
             poly_window_hours=poly_window_hours,
             priority_scorer=_priority_scorer,
             snipe_callback=self.place_snipe_trade,
+            kalshi_ws=kalshi_ws,
         )
         self._gap_detector = GapDetector(fee_cache, force_test=force_test, slippage_buffer=min_gap)
         self._confidence = ConfidenceScorer(threshold=min_confidence)

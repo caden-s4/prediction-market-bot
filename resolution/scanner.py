@@ -17,6 +17,7 @@ Vague or subjective markets are excluded by the confidence scorer downstream.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from data.markets.base import BaseMarketClient, Market
 from data.markets.kalshi import _GAME_SERIES_PREFIXES, _WEATHER_SERIES_TICKERS
+from data.markets.kalshi_ws import KalshiWebSocket
 from resolution.priority import PriorityScorer
 from shared.exclusion_list import ExclusionList
 from strategies.weather_snipe import SnipeSignal, evaluate_snipe
@@ -232,6 +234,7 @@ class ResolutionScanner:
     exclusions       : shared exclusion list
     window_hours     : resolution window to scan (default 24h)
     max_per_platform : market fetch limit per platform per scan
+    kalshi_ws        : KalshiWebSocket instance for orderbook fast path (optional)
     """
 
     def __init__(
@@ -245,6 +248,7 @@ class ResolutionScanner:
         max_per_platform: int = 500,
         priority_scorer: Optional[PriorityScorer] = None,
         snipe_callback: Optional[SnipeCallback] = None,
+        kalshi_ws: Optional[KalshiWebSocket] = None,
     ) -> None:
         self._kalshi = kalshi_client
         self._poly = poly_client
@@ -254,6 +258,7 @@ class ResolutionScanner:
         self._max = max_per_platform
         self._priority_scorer = priority_scorer
         self._snipe_callback = snipe_callback
+        self._kalshi_ws: Optional[KalshiWebSocket] = kalshi_ws
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -337,6 +342,10 @@ class ResolutionScanner:
         if not markets:
             return []
 
+        _ws_hits = [0]
+        _rest_fallbacks = [0]
+        _counter_lock = threading.Lock()
+
         def _refresh_one(market: Market) -> Market:
             client = self._kalshi if market.platform == "kalshi" else self._poly
             if client is None:
@@ -345,13 +354,30 @@ class ResolutionScanner:
                 fresh = client.get_market(market.market_id)
                 if fresh is None:
                     return market
-                try:
-                    ob = client.get_order_book(market.market_id)
-                    if ob is not None and ob.mid_price is not None:
-                        fresh.yes_price = ob.mid_price
-                except Exception:
-                    # Order book fetch failed; keep fresh.yes_price from get_market().
-                    pass
+
+                # Orderbook resolution: WS cache first (Kalshi only), REST fallback.
+                ws_book = None
+                if self._kalshi_ws is not None and market.platform == "kalshi":
+                    ws_age = self._kalshi_ws.get_book_age(market.market_id)
+                    if ws_age is not None and ws_age < 30.0:
+                        ws_book = self._kalshi_ws.get_book(market.market_id)
+
+                if ws_book is not None and ws_book.mid_price is not None:
+                    fresh.yes_price = ws_book.mid_price
+                    with _counter_lock:
+                        _ws_hits[0] += 1
+                else:
+                    try:
+                        ob = client.get_order_book(market.market_id)
+                        if ob is not None and ob.mid_price is not None:
+                            fresh.yes_price = ob.mid_price
+                    except Exception:
+                        # Order book fetch failed; keep fresh.yes_price from get_market().
+                        pass
+                    if market.platform == "kalshi":
+                        with _counter_lock:
+                            _rest_fallbacks[0] += 1
+
                 return fresh
             except Exception as exc:
                 logger.debug(
@@ -364,7 +390,12 @@ class ResolutionScanner:
         # the historical stagger (keeps behaviour identical when parallelism
         # is disabled for debugging).
         if TIER_REFRESH_MAX_WORKERS <= 1 or len(markets) == 1:
-            return [_refresh_one(m) for m in markets]
+            result = [_refresh_one(m) for m in markets]
+            logger.info(
+                "ResolutionScanner: refresh book sources: ws=%d rest=%d total=%d",
+                _ws_hits[0], _rest_fallbacks[0], _ws_hits[0] + _rest_fallbacks[0],
+            )
+            return result
 
         # Parallel path: preserve input ordering by indexing futures.
         refreshed: List[Market] = [markets[0]] * len(markets)  # placeholder
@@ -386,6 +417,10 @@ class ResolutionScanner:
                         markets[idx].platform, markets[idx].market_id, exc,
                     )
                     refreshed[idx] = markets[idx]
+        logger.info(
+            "ResolutionScanner: refresh book sources: ws=%d rest=%d total=%d",
+            _ws_hits[0], _rest_fallbacks[0], _ws_hits[0] + _rest_fallbacks[0],
+        )
         return refreshed
 
     # ── Internal ──────────────────────────────────────────────────────────────
