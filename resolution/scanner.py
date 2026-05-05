@@ -77,6 +77,19 @@ _WEATHER_SNIPE_SHADOW_WINDOW = timedelta(minutes=240)
 _SNIPES_ATTEMPTED: int = 0   # real-window candidates evaluated (0-60 min)
 _SHADOW_SIGNALS: int = 0     # shadow-window evaluations that produced a signal
 
+# ── Financial bracket disable switch ──────────────────────────────────────────
+# Yahoo Finance quote_ts staleness blocks 100% of financial bracket signals at
+# the executor freshness gate (gt_age > 60s threshold). Set False after routing
+# to a real-time source (Twelve Data paid tier).
+# DO NOT add KXBRENTD/KXBRENTW — wrong GT source regardless of freshness.
+DISABLE_FINANCIAL_BRACKETS: bool = True
+_FINANCIAL_BRACKET_PREFIXES: tuple = (
+    "KXNASDAQ100U",  # before KXNASDAQ100 — longer prefix wins startswith
+    "KXNASDAQ100",
+    "KXGOLDD",
+    "KXTNOTED",
+)
+
 
 def get_snipe_stats() -> tuple:
     """Return (snipes_attempted, shadow_signals) cumulative since process start."""
@@ -542,6 +555,10 @@ class ResolutionScanner:
         """Return a rejection reason string, or None if the market is a valid candidate."""
         if self._exclusions.is_excluded(market.platform, market.market_id):
             return "excluded"
+        if DISABLE_FINANCIAL_BRACKETS and any(
+            market.market_id.startswith(p) for p in _FINANCIAL_BRACKET_PREFIXES
+        ):
+            return "financial_bracket_disabled"
         if market.category.lower() in EXCLUDED_CATEGORIES or market.is_weather_market():
             return "category"
         hours_left = market.hours_to_resolution   # uses fixed timezone-aware property
@@ -550,13 +567,9 @@ class ResolutionScanner:
         # - Game markets (48h): same-day, quick turnaround
         # - Financial brackets (72h): daily/weekly, need longer scan window for weekend discovery
         #   (e.g. Monday 4pm brackets discovered Saturday afternoon are ~48h away)
-        # DISABLED 2026-04-23: Yahoo quote_ts staleness blocks 100% of financial bracket signals
-        # at freshness gate. Re-enable individual prefixes only after routing to Twelve Data paid
-        # tier or equivalent fresh-timestamp source. See commit history for prior contents.
-        # KXBRENTD/KXBRENTW: DO NOT re-enable even after Twelve Data upgrade. CL=F (WTI) is the
-        # wrong GT source for Brent markets. Brent requires its own feed (BZ=F or equivalent).
-        # Phase 0b showed 44.4% accuracy on 54 trades — structurally broken routing.
-        _FINANCIAL_BRACKET_PREFIXES = ()
+        # When DISABLE_FINANCIAL_BRACKETS is True, bracket markets are caught by the early
+        # return above and never reach this branch.
+        # KXBRENTD/KXBRENTW: DO NOT add to _FINANCIAL_BRACKET_PREFIXES — wrong GT source.
         _GAME_SERIES_PREFIXES = ("KXNBAGAME", "KXNCAAMBGAME", "KXNFLGAME", "KXNCAAWBGAME")
 
         if any(market.market_id.startswith(p) for p in _GAME_SERIES_PREFIXES):
