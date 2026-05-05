@@ -842,6 +842,27 @@ class ResolutionBot:
         self._ws.sync_subscriptions(t1_ids)
         logger.info("[CYCLE_TIMING] phase=ws_subscribe_drain event=end elapsed_since_cycle_start=%.1fs", time.monotonic() - cycle_start)
 
+        # Sync Kalshi WebSocket subscriptions with current T1+T2 set so the
+        # WS orderbook fast path in scanner.refresh_markets() can actually hit.
+        if self._kalshi_ws is not None:
+            kalshi_t1_t2 = [
+                e.market_id
+                for tier in (1, 2)
+                for e in self._registry.get_tier(tier)
+                if e.platform == "kalshi"
+            ]
+            logger.info(
+                "[CYCLE_TIMING] phase=kalshi_ws_sync event=start "
+                "elapsed_since_cycle_start=%.1fs target_count=%d",
+                time.monotonic() - cycle_start, len(kalshi_t1_t2),
+            )
+            self._kalshi_ws.sync_subscriptions(kalshi_t1_t2)
+            logger.info(
+                "[CYCLE_TIMING] phase=kalshi_ws_sync event=end "
+                "elapsed_since_cycle_start=%.1fs",
+                time.monotonic() - cycle_start,
+            )
+
         # ── Tier 1: refresh all active-watch markets (every cycle) ─────────
         # Sort by priority_score so the highest-priority markets are evaluated
         # first within the cycle.  Scores are preserved through the refresh so
