@@ -26,6 +26,8 @@ from typing import Callable, Dict, List, Optional, Tuple
 from data.markets.base import BaseMarketClient, Market
 from data.markets.kalshi import _GAME_SERIES_PREFIXES, _WEATHER_SERIES_TICKERS
 from data.markets.kalshi_ws import KalshiWebSocket
+from monitoring import gate_names as gn
+from monitoring.gate_events import log_gate_event
 from resolution.priority import PriorityScorer
 from shared.exclusion_list import ExclusionList
 from strategies.weather_snipe import SnipeSignal, evaluate_snipe
@@ -84,10 +86,7 @@ _SHADOW_SIGNALS: int = 0     # shadow-window evaluations that produced a signal
 # the executor freshness gate (gt_age > 60s threshold). Set False after routing
 # to a real-time source (Twelve Data paid tier).
 # DO NOT add KXBRENTD/KXBRENTW — wrong GT source regardless of freshness.
-# LOOSENED for diagnostic visibility (was True) — paired with the 300s freshness
-# bump in data/ground_truth/base.py to let bracket signals flow in ghost mode
-# so we can verify executor mechanics end-to-end.
-DISABLE_FINANCIAL_BRACKETS: bool = False
+DISABLE_FINANCIAL_BRACKETS: bool = True
 _FINANCIAL_BRACKET_PREFIXES: tuple = (
     "KXNASDAQ100U",  # before KXNASDAQ100 — longer prefix wins startswith
     "KXNASDAQ100",
@@ -212,6 +211,14 @@ def _dispatch_weather_snipe(
             )
             return
         if signal is None:
+            log_gate_event(
+                ticker=mid,
+                gate=gn.GATE_SNIPE,
+                decision="reject",
+                reason=gn.REASON_NO_SIGNAL,
+                platform="kalshi",
+                extra={"shadow": True, "minutes_to_close": minutes_to_close},
+            )
             logger.info(
                 "ResolutionBot: SHADOW_REJECT %s reject_reason=no_signal minutes_to_close=%d",
                 mid, minutes_to_close,
@@ -468,6 +475,13 @@ class ResolutionScanner:
                 for m in all_markets:
                     reason = self._reject_reason(m, window_hours)
                     if reason:
+                        log_gate_event(
+                            ticker=m.market_id,
+                            gate=gn.GATE_SCANNER_REJECT,
+                            decision="reject",
+                            reason=reason,
+                            platform=m.platform,
+                        )
                         rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
                     elif m.market_id not in seen:
                         seen.add(m.market_id)
@@ -494,6 +508,13 @@ class ResolutionScanner:
                         if m.market_id not in seen:
                             reason = self._reject_reason(m, window_hours)
                             if reason:
+                                log_gate_event(
+                                    ticker=m.market_id,
+                                    gate=gn.GATE_SCANNER_REJECT,
+                                    decision="reject",
+                                    reason=reason,
+                                    platform=m.platform,
+                                )
                                 rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
                             else:
                                 seen.add(m.market_id)
@@ -522,6 +543,13 @@ class ResolutionScanner:
                         if m.market_id not in seen:
                             reason = self._reject_reason(m, window_hours)
                             if reason:
+                                log_gate_event(
+                                    ticker=m.market_id,
+                                    gate=gn.GATE_SCANNER_REJECT,
+                                    decision="reject",
+                                    reason=reason,
+                                    platform=m.platform,
+                                )
                                 rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
                             else:
                                 seen.add(m.market_id)
@@ -546,6 +574,13 @@ class ResolutionScanner:
                             seen.add(m.market_id)
                             results.append(m)
                         elif reason:
+                            log_gate_event(
+                                ticker=m.market_id,
+                                gate=gn.GATE_SCANNER_REJECT,
+                                decision="reject",
+                                reason=reason,
+                                platform=m.platform,
+                            )
                             rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
                 except Exception as exc:
                     logger.warning(
@@ -576,6 +611,13 @@ class ResolutionScanner:
                                     results.append(m)
                                     added += 1
                                 elif reason:
+                                    log_gate_event(
+                                        ticker=m.market_id,
+                                        gate=gn.GATE_SCANNER_REJECT,
+                                        decision="reject",
+                                        reason=reason,
+                                        platform=m.platform,
+                                    )
                                     rejected_reasons[reason] = rejected_reasons.get(reason, 0) + 1
                     except Exception as exc:
                         logger.debug(
