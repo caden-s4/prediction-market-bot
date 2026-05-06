@@ -334,14 +334,14 @@ class KalshiWebSocket:
             backoff = min(backoff * 2, self._BACKOFF_MAX)
 
     async def _resubscribe_all(self, ws: Any) -> None:
-        """Re-send one subscribe per ticker for all tracked markets after reconnect."""
+        """Re-subscribe to all tracked markets after reconnect, in 100-ticker chunks."""
         with self._sub_lock:
             tickers = list(self._subscribed)
         if not tickers:
             return
-        for ticker in tickers:
-            await self._send_subscribe(ws, ticker)
-            await asyncio.sleep(0.01)
+        for i in range(0, len(tickers), 100):
+            await self._send_subscribe(ws, tickers[i:i + 100])
+            await asyncio.sleep(0.05)
         logger.info("Re-subscribed to %d tickers after reconnect", len(tickers))
 
     async def _run_connection(self, ws: Any) -> None:
@@ -385,9 +385,9 @@ class KalshiWebSocket:
                     break
 
                 if cmd.action == "subscribe":
-                    for ticker in cmd.tickers:
-                        await self._send_subscribe(ws, ticker)
-                        await asyncio.sleep(0.01)
+                    for i in range(0, len(cmd.tickers), 100):
+                        await self._send_subscribe(ws, cmd.tickers[i:i + 100])
+                        await asyncio.sleep(0.05)
                 elif cmd.action == "unsubscribe":
                     for ticker in cmd.tickers:
                         await self._send_unsubscribe(ws, ticker)
@@ -395,18 +395,18 @@ class KalshiWebSocket:
 
     # ── WS frame helpers ─────────────────────────────────────────────────────
 
-    async def _send_subscribe(self, ws: Any, ticker: str) -> None:
-        """Send a single subscribe frame for *ticker* on the orderbook_delta channel."""
+    async def _send_subscribe(self, ws: Any, tickers: List[str]) -> None:
+        """Send one subscribe frame for *tickers* (up to 100) on orderbook_delta."""
         msg = {
             "id": self._next_id(),
             "cmd": "subscribe",
             "params": {
                 "channels": ["orderbook_delta"],
-                "market_ticker": ticker,
+                "market_tickers": tickers,
             },
         }
         await ws.send(json.dumps(msg))
-        logger.debug("WS subscribe sent: %s", ticker)
+        logger.debug("WS subscribe sent: %d tickers", len(tickers))
 
     async def _send_unsubscribe(self, ws: Any, ticker: str) -> None:
         """Send a single unsubscribe frame for *ticker* on the orderbook_delta channel."""
