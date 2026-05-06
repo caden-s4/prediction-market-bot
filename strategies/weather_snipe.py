@@ -46,6 +46,12 @@ class SnipeSignal:
     edge: float          # actual_prob - market_implied_prob (cost basis)
     confidence: float    # always >= 0.95 for snipes (decisive)
     rationale: str       # human-readable explanation
+    # Diagnostic fields — used for shadow-window analysis logging.
+    gt_prob: float = 0.99              # ground truth YES probability (_DECISIVE_PROB)
+    asos_temp_f: Optional[float] = None
+    bracket_low: Optional[float] = None
+    bracket_high: Optional[float] = None
+    market_mid: Optional[float] = None
 
 
 def evaluate_snipe(
@@ -186,6 +192,8 @@ def _build_signal(
         edge = _DECISIVE_PROB - no_ask
 
     rationale = _format_rationale(wm, temp, decision)
+    bracket_low = wm.bracket_low if wm.threshold_type == "bracket" else None
+    bracket_high = wm.bracket_high if wm.threshold_type == "bracket" else None
     return SnipeSignal(
         market_id=market.market_id,
         action=action,
@@ -193,6 +201,11 @@ def _build_signal(
         edge=edge,
         confidence=_SNIPE_CONFIDENCE,
         rationale=rationale,
+        gt_prob=_DECISIVE_PROB,
+        asos_temp_f=temp,
+        bracket_low=bracket_low,
+        bracket_high=bracket_high,
+        market_mid=(yes_ask + yes_bid) / 2.0,
     )
 
 

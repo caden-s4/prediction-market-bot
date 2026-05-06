@@ -213,16 +213,25 @@ def _dispatch_weather_snipe(
             return
         if signal is None:
             logger.info(
-                "ResolutionBot: SHADOW_REJECT %s — no signal minutes_to_close=%d",
+                "ResolutionBot: SHADOW_REJECT %s reject_reason=no_signal minutes_to_close=%d",
                 mid, minutes_to_close,
             )
             return
         global _SHADOW_SIGNALS
         _SHADOW_SIGNALS += 1
+        _br = (
+            f"[{signal.bracket_low:.2f},{signal.bracket_high:.2f}]"
+            if signal.bracket_low is not None
+            else "N/A"
+        )
+        _tmp = f"{signal.asos_temp_f:.1f}" if signal.asos_temp_f is not None else "N/A"
+        _mm = f"{signal.market_mid:.4f}" if signal.market_mid is not None else "N/A"
         logger.info(
             "ResolutionBot: SHADOW_SIGNAL %s action=%s target_price=%.4f "
-            "edge=%.4f minutes_to_close=%d",
-            mid, signal.action, signal.target_price, signal.edge, minutes_to_close,
+            "edge=%.4f gt_prob=%.4f bracket=%s asos_temp_f=%s "
+            "market_mid=%s minutes_to_close=%d",
+            mid, signal.action, signal.target_price, signal.edge,
+            signal.gt_prob, _br, _tmp, _mm, minutes_to_close,
         )
 
 
