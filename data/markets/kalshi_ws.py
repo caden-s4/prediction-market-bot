@@ -50,10 +50,6 @@ class _BookEntry:
     """Internal wrapper around an OrderBook with a timestamp."""
     book: OrderBook
     last_updated: float = field(default_factory=time.time)
-    # Sequence tracking for stream-health-based validity (Phase 2B.4).
-    snapshot_seq: Optional[int] = None  # seq of the snapshot that initialized this book
-    last_seq: Optional[int] = None      # seq of the most recent delta applied; None = no deltas yet
-    valid: bool = True                  # False after a sequence gap; healed by next snapshot
 
 
 # ── WS command envelope ──────────────────────────────────────────────────────
@@ -189,12 +185,10 @@ class KalshiWebSocket:
         )
 
     def get_book(self, market_id: str) -> Optional[OrderBook]:
-        """Return the latest in-memory OrderBook, or None if unavailable or invalidated."""
+        """Return the latest in-memory OrderBook, or None if unavailable."""
         with self._lock:
             entry = self._books.get(market_id)
-            if entry is None or not entry.valid:
-                return None
-            return entry.book
+            return entry.book if entry else None
 
     def get_book_age(self, market_id: str) -> Optional[float]:
         """Seconds since the last update for *market_id*, or None if no data."""
@@ -500,18 +494,12 @@ class KalshiWebSocket:
             yes_asks=yes_asks,
             timestamp=datetime.now(timezone.utc),
         )
-        seq = data.get("seq")
         with self._lock:
-            self._books[market_id] = _BookEntry(
-                book=book,
-                snapshot_seq=seq,
-                last_seq=seq,
-                valid=True,
-            )
+            self._books[market_id] = _BookEntry(book=book)
 
         logger.info(
-            "Received orderbook_snapshot for %s (%d bids, %d asks) seq=%s",
-            market_id, len(yes_bids), len(yes_asks), seq,
+            "Received orderbook_snapshot for %s (%d bids, %d asks)",
+            market_id, len(yes_bids), len(yes_asks),
         )
 
     def _handle_delta(self, data: dict) -> None:
@@ -548,26 +536,11 @@ class KalshiWebSocket:
         price_dec = float(price_str)   # already decimal in [0,1]
         delta_size = float(delta_str)  # signed dollar amount
 
-        incoming_seq = data.get("seq")
-
         with self._lock:
             entry = self._books.get(market_id)
             if entry is None:
-                logger.debug("WS delta for %s before snapshot — ignored", market_id)
+                # No snapshot yet; cannot apply delta — skip silently.
                 return
-
-            if not entry.valid:
-                return
-
-            if entry.last_seq is not None and incoming_seq is not None:
-                if incoming_seq != entry.last_seq + 1:
-                    entry.valid = False
-                    logger.warning(
-                        "WS sequence gap on %s: expected seq=%d, got seq=%d "
-                        "(book invalidated, will recover on next snapshot)",
-                        market_id, entry.last_seq + 1, incoming_seq,
-                    )
-                    return
 
             book = entry.book
             now = datetime.now(timezone.utc)
@@ -586,8 +559,6 @@ class KalshiWebSocket:
 
             book.timestamp = now
             entry.last_updated = time.time()
-            if incoming_seq is not None:
-                entry.last_seq = incoming_seq
 
     def _handle_ticker(self, data: dict) -> None:
         """Update the ticker cache from a ticker channel message.
