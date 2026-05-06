@@ -455,30 +455,33 @@ class KalshiWebSocket:
     def _handle_snapshot(self, data: dict) -> None:
         """Replace the full order book for a market from a snapshot message.
 
-        Kalshi snapshot format::
+        Kalshi WS v2 snapshot format::
 
             {
                 "type": "orderbook_snapshot",
-                "market_ticker": "TICKER",
-                "yes": [[price_cents, size], ...],
-                "no":  [[price_cents, size], ...],
-                "seq": 123
+                "msg": {
+                    "market_ticker": "TICKER",
+                    "yes_dollars_fp": [["0.6500", "120.00"], ...],
+                    "no_dollars_fp":  [["0.3500", "80.00"], ...],
+                }
             }
 
-        ``yes`` = YES bid levels (what buyers of YES will pay).
-        ``no``  = NO bid levels  (equivalent to YES asks at 100 - price).
+        ``yes_dollars_fp`` = YES bid levels [price_decimal_str, size_dollars_str].
+        ``no_dollars_fp``  = NO bid levels  (equivalent to YES asks at 1 - price).
         """
-        market_id = data.get("market_ticker", "")
+        msg = data.get("msg") or {}
+        market_id = msg.get("market_ticker", "")
         if not market_id:
+            logger.warning("WS snapshot missing market_ticker: %s", list(data.keys()))
             return
 
-        yes_bids = self._parse_levels(data.get("yes") or [])
+        yes_bids = self._parse_levels(msg.get("yes_dollars_fp") or [])
         yes_bids.sort(key=lambda lv: -lv.price)
 
-        # NO bids at price p => YES asks at (100-p)/100
-        no_bids_raw = data.get("no") or []
+        # NO bids at decimal price p => YES asks at (1 - p)
+        no_bids_raw = msg.get("no_dollars_fp") or []
         yes_asks = [
-            PriceLevel(price=(100.0 - lvl[0]) / 100.0, size=float(lvl[1]))
+            PriceLevel(price=1.0 - float(lvl[0]), size=float(lvl[1]))
             for lvl in no_bids_raw
             if len(lvl) >= 2
         ]
@@ -502,33 +505,36 @@ class KalshiWebSocket:
     def _handle_delta(self, data: dict) -> None:
         """Apply an incremental update to an existing order book.
 
-        Kalshi delta format::
+        Kalshi WS v2 delta format::
 
             {
                 "type": "orderbook_delta",
-                "market_ticker": "TICKER",
-                "price": 65,          # cents
-                "delta": 100,         # signed size change (+ or -)
-                "side": "yes" | "no",
-                "seq": 124
+                "msg": {
+                    "market_ticker": "TICKER",
+                    "price_dollars": "0.6500",   # decimal in [0,1]
+                    "delta_fp": "-115.00",        # signed dollar amount
+                    "side": "yes" | "no",
+                }
             }
 
-        A delta with size landing at 0 means the level should be removed.
+        A delta with resulting size <= 0 means the level should be removed.
         """
-        market_id = data.get("market_ticker", "")
+        msg = data.get("msg") or {}
+        market_id = msg.get("market_ticker", "")
         if not market_id:
+            logger.warning("WS delta missing market_ticker: %s", list(data.keys()))
             return
 
-        price_cents = data.get("price")
-        delta_size = data.get("delta")
-        side = data.get("side", "")
+        price_str = msg.get("price_dollars")
+        delta_str = msg.get("delta_fp")
+        side = msg.get("side", "")
 
-        if price_cents is None or delta_size is None:
-            logger.debug("WS delta missing price/delta for %s: %s", market_id, data)
+        if price_str is None or delta_str is None:
+            logger.debug("WS delta missing price/delta for %s: %s", market_id, msg)
             return
 
-        price_cents = float(price_cents)
-        delta_size = float(delta_size)
+        price_dec = float(price_str)   # already decimal in [0,1]
+        delta_size = float(delta_str)  # signed dollar amount
 
         with self._lock:
             entry = self._books.get(market_id)
@@ -541,13 +547,12 @@ class KalshiWebSocket:
 
             if side == "yes":
                 # Delta on the YES side affects bids.
-                price_dec = price_cents / 100.0
                 book.yes_bids = self._apply_delta_to_levels(
                     book.yes_bids, price_dec, delta_size, descending=True
                 )
             elif side == "no":
-                # NO bid delta at price_cents => YES ask at (100 - price_cents).
-                ask_price_dec = (100.0 - price_cents) / 100.0
+                # NO bid delta at decimal price p => YES ask at (1 - p).
+                ask_price_dec = 1.0 - price_dec
                 book.yes_asks = self._apply_delta_to_levels(
                     book.yes_asks, ask_price_dec, delta_size, descending=False
                 )
@@ -588,14 +593,14 @@ class KalshiWebSocket:
 
     @staticmethod
     def _parse_levels(raw: list) -> List[PriceLevel]:
-        """Parse ``[[price_cents, size], ...]`` into PriceLevel list."""
+        """Parse ``[[price_decimal_str, size_dollars_str], ...]`` into PriceLevel list."""
         levels: List[PriceLevel] = []
         for entry in raw:
             if not isinstance(entry, (list, tuple)) or len(entry) < 2:
                 continue
             try:
                 levels.append(
-                    PriceLevel(price=float(entry[0]) / 100.0, size=float(entry[1]))
+                    PriceLevel(price=float(entry[0]), size=float(entry[1]))
                 )
             except (TypeError, ValueError):
                 continue
