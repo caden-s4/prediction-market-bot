@@ -32,6 +32,15 @@ from .base import OrderBook, PriceLevel
 
 logger = logging.getLogger(__name__)
 
+# ── TEMPORARY PROBE: PHASE 2B.3a-PROBE ───────────────────────────────────────
+# Captures all incoming WS messages for diagnosis of zero
+# orderbook_snapshot / orderbook_delta delivery. REVERT THIS
+# COMMIT after diagnosis is complete.
+_probe_lock = threading.Lock()
+_probe_counts: Dict[str, int] = {}
+_probe_window_start: float = 0.0
+# ─────────────────────────────────────────────────────────────────────────────
+
 # ── Ticker cache entry ───────────────────────────────────────────────────────
 
 @dataclass
@@ -365,7 +374,27 @@ class KalshiWebSocket:
             except json.JSONDecodeError:
                 logger.warning("Kalshi WS: non-JSON message: %.200s", raw)
                 continue
+            # ── PROBE ──────────────────────────────────────────────────────
+            global _probe_window_start
             msg_type = data.get("type")
+            logger.info(
+                "[WS_PROBE] type=%s sid=%s seq=%s keys=%s raw_first_500=%s",
+                msg_type,
+                data.get("sid"),
+                data.get("seq"),
+                sorted(data.keys()),
+                json.dumps(data)[:500],
+            )
+            with _probe_lock:
+                _probe_counts[msg_type or "None"] = _probe_counts.get(msg_type or "None", 0) + 1
+                now = time.monotonic()
+                if _probe_window_start == 0.0:
+                    _probe_window_start = now
+                elif now - _probe_window_start >= 60.0:
+                    logger.info("[WS_PROBE] message counts last 60s: %s", dict(_probe_counts))
+                    _probe_counts.clear()
+                    _probe_window_start = now
+            # ── END PROBE ──────────────────────────────────────────────────
             logger.debug(
                 "WS recv type=%s market=%s",
                 msg_type,
