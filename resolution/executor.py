@@ -52,7 +52,9 @@ from data.sports.resolution_detector import ResolutionSignal, drain_ghost_exits 
 from data.markets.base import BaseMarketClient, Market, Order, Side
 from data.markets.kalshi import _is_game_market, _is_financial_bracket_market
 from data.markets.polymarket_ws import PolymarketWSManager
+from monitoring import gate_names as gn
 from monitoring.alerts import AlertManager
+from monitoring.gate_events import log_gate_event
 from resolution.confidence import ConfidenceScorer
 from resolution.decay_monitor import (
     DecayAction, DecayMonitor, OpenResolutionPosition,
@@ -2331,6 +2333,13 @@ class ResolutionBot:
                 if self._dry_run:
                     # Ghost mode: placing into an empty book produces unfillable
                     # PENDING orders that distort the ghost dataset.  Skip entirely.
+                    log_gate_event(
+                        ticker=mid,
+                        gate=gn.GATE_EXECUTOR_PRETRADE,
+                        decision="skip",
+                        reason=gn.REASON_EMPTY_BOOK_GHOST,
+                        platform=market.platform,
+                    )
                     logger.info(
                         "ResolutionBot: SKIP_EMPTY_BOOK_GHOST %s — "
                         "game/bracket book empty, not placing ghost trade "
@@ -2414,6 +2423,18 @@ class ResolutionBot:
                 self._confidence_fail_count[mid] = _conf_count
                 if _conf_count >= 3:
                     self._unfilled_timeout_perm_skipped.add(mid)
+                    log_gate_event(
+                        ticker=mid,
+                        gate=gn.GATE_EXECUTOR_PRETRADE,
+                        decision="skip",
+                        reason=gn.REASON_PERM_SKIP_CONFIDENCE_FAILURES,
+                        platform=market.platform,
+                        extra={
+                            "source_confidence": score.source_confidence,
+                            "confidence_gate": CONFIDENCE_GATE_LIVE,
+                            "consecutive_failures": _conf_count,
+                        },
+                    )
                     logger.info(
                         "ResolutionBot: perm-skipping %s after %d consecutive "
                         "confidence failures (source=%.2f clarity=%.2f vs gate=%.2f)",
@@ -2458,6 +2479,18 @@ class ResolutionBot:
         # timestamp that is older than GT_FRESHNESS_SECONDS.
         if not gt.is_fresh(GT_FRESHNESS_SECONDS):
             _gt_age = gt.gt_age_seconds()
+            log_gate_event(
+                ticker=mid,
+                gate=gn.GATE_EXECUTOR_PRETRADE,
+                decision="skip",
+                reason=gn.REASON_GT_STALE_AT_ENTRY,
+                platform=market.platform,
+                extra={
+                    "gt_age_seconds": _gt_age,
+                    "threshold_seconds": GT_FRESHNESS_SECONDS,
+                    "gt_source": gt.source_name,
+                },
+            )
             logger.info(
                 "ResolutionBot: SKIP %s gt_stale_at_entry "
                 "gt_age=%.0fs threshold=%ds "
@@ -2551,6 +2584,18 @@ class ResolutionBot:
                 market.yes_price <= EXTREME_CONVICTION_LOW
                 or market.yes_price >= EXTREME_CONVICTION_HIGH
             ):
+                log_gate_event(
+                    ticker=mid,
+                    gate=gn.GATE_EXECUTOR_PRETRADE,
+                    decision="skip",
+                    reason=gn.REASON_LARGE_DIVERGENCE_EXTREME,
+                    platform=market.platform,
+                    extra={
+                        "gap_pct": gap_pct,
+                        "market_price": market.yes_price,
+                        "gt_prob": gt.ground_truth_prob if gt else None,
+                    },
+                )
                 logger.info(
                     "ResolutionBot: SKIP %s large_divergence_extreme_market "
                     "yes_price=%.4f gt_prob=%.4f gt_source=%s "
@@ -2807,6 +2852,18 @@ class ResolutionBot:
             max_series    = self._bankroll.total_usd * _cap_fraction
             existing_pct  = series_exposure / self._bankroll.total_usd * 100
             if series_exposure + size_usd > max_series:
+                log_gate_event(
+                    ticker=mid,
+                    gate=gn.GATE_EXECUTOR_PRETRADE,
+                    decision="skip",
+                    reason=gn.REASON_SERIES_CAP,
+                    platform=market.platform,
+                    extra={
+                        "series_root": series_root,
+                        "existing_pct": existing_pct,
+                        "cap_pct": round(_cap_fraction * 100),
+                    },
+                )
                 logger.info(
                     "ResolutionBot: SKIP %s — series exposure cap reached "
                     "(%.0f%% already in %s, max %d%%)",
@@ -3078,6 +3135,13 @@ class ResolutionBot:
             logger.info("ResolutionBot: SKIP_SNIPE %s — on exclusion list", mid)
             return None
         if mid in self._positions:
+            log_gate_event(
+                ticker=mid,
+                gate=gn.GATE_SNIPE,
+                decision="skip",
+                reason=gn.REASON_DEDUP,
+                platform=market.platform,
+            )
             logger.info(
                 "ResolutionBot: SKIP_SNIPE %s — already holding position", mid,
             )
@@ -3092,6 +3156,13 @@ class ResolutionBot:
         # Empty-book guard (snipe variant: skip rather than place PENDING).
         ob_live = self._get_live_book(market)
         if ob_live is None:
+            log_gate_event(
+                ticker=mid,
+                gate=gn.GATE_SNIPE,
+                decision="skip",
+                reason=gn.REASON_EMPTY_BOOK_SNIPE,
+                platform=market.platform,
+            )
             logger.info(
                 "ResolutionBot: SKIP_EMPTY_BOOK_SNIPE %s — book empty in "
                 "final-hour window; refusing to place PENDING (would be "
@@ -3105,6 +3176,13 @@ class ResolutionBot:
             limit_price = ob_live.best_yes_bid
             side_label = "YES bid"
         if limit_price is None:
+            log_gate_event(
+                ticker=mid,
+                gate=gn.GATE_SNIPE,
+                decision="skip",
+                reason=gn.REASON_EMPTY_BOOK_SNIPE,
+                platform=market.platform,
+            )
             logger.info(
                 "ResolutionBot: SKIP_EMPTY_BOOK_SNIPE %s — no %s in book",
                 mid, side_label,
@@ -3161,6 +3239,14 @@ class ResolutionBot:
             )
             max_series = self._bankroll.total_usd * cap_fraction
             if series_exposure + size_usd > max_series:
+                log_gate_event(
+                    ticker=mid,
+                    gate=gn.GATE_SNIPE,
+                    decision="skip",
+                    reason=gn.REASON_SERIES_CAP,
+                    platform=market.platform,
+                    extra={"series_root": series_root},
+                )
                 logger.info(
                     "ResolutionBot: SKIP_SNIPE %s — series exposure cap "
                     "($%.2f in %s, max $%.2f)",
@@ -3169,6 +3255,13 @@ class ResolutionBot:
                 return None
 
         if not self._bankroll.reserve(mid, size_usd):
+            log_gate_event(
+                ticker=mid,
+                gate=gn.GATE_SNIPE,
+                decision="skip",
+                reason=gn.REASON_BANKROLL,
+                platform=market.platform,
+            )
             logger.info(
                 "ResolutionBot: SKIP_SNIPE %s — bankroll reserve failed", mid,
             )

@@ -25,13 +25,14 @@ REASON_SOURCE_BELOW_GATE          = "source_below_gate"
 REASON_FRESHNESS_BELOW_GATE       = "freshness_below_gate"
 
 # Executor pre-trade
-REASON_GT_STALE_AT_ENTRY          = "gt_stale_at_entry"
-REASON_LARGE_DIVERGENCE_EXTREME   = "large_divergence_extreme_market"
-REASON_BANKROLL                   = "bankroll"
-REASON_DEDUP                      = "dedup"
-REASON_SERIES_CAP                 = "series_cap"
-REASON_EMPTY_BOOK_GHOST           = "empty_book_ghost"
-REASON_EMPTY_BOOK_SNIPE           = "empty_book_snipe"
+REASON_GT_STALE_AT_ENTRY                  = "gt_stale_at_entry"
+REASON_LARGE_DIVERGENCE_EXTREME           = "large_divergence_extreme_market"
+REASON_BANKROLL                           = "bankroll"
+REASON_DEDUP                              = "dedup"
+REASON_SERIES_CAP                         = "series_cap"
+REASON_EMPTY_BOOK_GHOST                   = "empty_book_ghost"
+REASON_EMPTY_BOOK_SNIPE                   = "empty_book_snipe"
+REASON_PERM_SKIP_CONFIDENCE_FAILURES      = "perm_skip_confidence_failures"
 
 # Snipe
 REASON_NO_SIGNAL                  = "no_signal"
