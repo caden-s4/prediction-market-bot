@@ -58,6 +58,8 @@ from typing import Optional
 
 from data.ground_truth.base import GroundTruthResult, SourceType
 from data.markets.base import Market
+from monitoring import gate_names as gn
+from monitoring.gate_events import log_gate_event
 from resolution.gap_detector import GapSignal
 
 logger = logging.getLogger(__name__)
@@ -194,6 +196,14 @@ class ConfidenceScorer:
             ground_truth is not None
             and ground_truth.directional_confidence == "ambiguous"
         ):
+            log_gate_event(
+                ticker=market.market_id,
+                gate=gn.GATE_CONFIDENCE,
+                decision="skip",
+                reason=gn.REASON_DIRECTION_AMBIGUOUS,
+                platform=market.platform,
+                extra={"gt_source": ground_truth.source_name},
+            )
             logger.info(
                 "ConfidenceScorer: SKIP %s – ground truth direction is ambiguous",
                 market.market_id,
@@ -292,6 +302,31 @@ class ConfidenceScorer:
             source_conf, resolution_clarity, freshness_mult,
             f" – {skip_reason}" if skip_reason else "",
         )
+
+        if not passes:
+            _src_fail = source_conf < self._threshold
+            _clr_fail = resolution_clarity < self._threshold
+            if _src_fail and _clr_fail:
+                _gate_reason = gn.REASON_BOTH_BELOW_GATE
+            elif _src_fail:
+                _gate_reason = gn.REASON_SOURCE_BELOW_GATE
+            else:
+                _gate_reason = gn.REASON_CLARITY_BELOW_GATE
+            log_gate_event(
+                ticker=market.market_id,
+                gate=gn.GATE_CONFIDENCE,
+                decision="skip",
+                reason=_gate_reason,
+                platform=market.platform,
+                extra={
+                    "source_confidence": source_conf,
+                    "clarity": resolution_clarity,
+                    "freshness": freshness_mult,
+                    "gate_threshold": self._threshold,
+                    "has_hard_dispute": has_hard_dispute,
+                    "has_soft_dispute": has_soft_dispute,
+                },
+            )
 
         return ConfidenceScore(
             source_confidence=source_conf,

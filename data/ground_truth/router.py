@@ -34,6 +34,8 @@ from dataclasses import replace as dc_replace
 from typing import List, Optional, TYPE_CHECKING
 
 from data.markets.base import Market
+from monitoring import gate_names as gn
+from monitoring.gate_events import log_gate_event
 from .base import DataSource, GroundTruthResult
 from .congress import CongressSource
 from .economic import EconomicDataSource
@@ -351,6 +353,13 @@ class GroundTruthRouter:
             s for s in self._sources if self._is_source_allowed(type(s).__name__)
         ]
         if not any(s.can_handle(market) for s in active_sources):
+            log_gate_event(
+                ticker=market.market_id,
+                gate=gn.GATE_GT_ROUTING,
+                decision="skip",
+                reason=gn.REASON_NO_SOURCE_MATCHED,
+                platform=market.platform,
+            )
             logger.debug("GroundTruthRouter: no source can handle %s", market.market_id)
             return None
 
@@ -422,12 +431,31 @@ class GroundTruthRouter:
         # gt_prob from this result into ghost_trades.jsonl.
         if candidates:
             best = max(candidates, key=lambda r: r.confidence)
+            log_gate_event(
+                ticker=market.market_id,
+                gate=gn.GATE_GT_ROUTING,
+                decision="skip",
+                reason=gn.REASON_SOURCE_NOT_TRADEABLE,
+                platform=market.platform,
+                extra={
+                    "source_name": best.source_name,
+                    "confidence": best.confidence,
+                },
+            )
             logger.info(
                 "GroundTruthRouter: best non-tradeable result confidence=%.2f for %s",
                 best.confidence, market.market_id,
             )
             return self._validate_result(best, market)
 
+        log_gate_event(
+            ticker=market.market_id,
+            gate=gn.GATE_GT_ROUTING,
+            decision="skip",
+            reason=gn.REASON_SOURCE_RETURNED_NONE,
+            platform=market.platform,
+            extra={"none_reasons": none_reasons[:3] if none_reasons else None},
+        )
         logger.debug("GroundTruthRouter: no source could handle %s", market.market_id)
         if none_reasons:
             logger.debug(

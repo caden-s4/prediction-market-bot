@@ -23,6 +23,14 @@ REASON_PRICE                      = "price"
 # Confidence
 REASON_SOURCE_BELOW_GATE          = "source_below_gate"
 REASON_FRESHNESS_BELOW_GATE       = "freshness_below_gate"
+REASON_CLARITY_BELOW_GATE         = "clarity_below_gate"
+REASON_BOTH_BELOW_GATE            = "both_below_gate"
+REASON_DIRECTION_AMBIGUOUS        = "direction_ambiguous"
+
+# GT routing
+REASON_NO_SOURCE_MATCHED          = "no_source_matched"
+REASON_SOURCE_NOT_TRADEABLE       = "source_not_tradeable"
+REASON_SOURCE_RETURNED_NONE       = "source_returned_none"
 
 # Executor pre-trade
 REASON_GT_STALE_AT_ENTRY                  = "gt_stale_at_entry"
