@@ -6,13 +6,19 @@ ticker via get_market(), computes directional accuracy overall and per
 market series / GT source.
 
 Usage:
-    python scripts/phase0_accuracy.py
+    python scripts/phase0_accuracy.py [--include-pre-fix]
+
+Flags:
+    --include-pre-fix   Include pre-fix ResolutionDetector rows (entry_ts <
+                        2026-04-15T18:26:42Z, before commit 0450f21) in
+                        accuracy stats. Default: excluded from Report C.
 
 Cache: data/runtime/settlement_cache.json  (skip API call on re-run)
 CSV:   data/runtime/phase0_accuracy_results.csv
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import json
 import math
@@ -33,6 +39,16 @@ CACHE_FILE = ROOT / "data" / "runtime" / "settlement_cache.json"
 CSV_OUT = ROOT / "data" / "runtime" / "phase0_accuracy_results.csv"
 
 LOW_VOL_THRESHOLD = 10
+
+# Commit 0450f21 (2026-04-15 11:26:42 -0700 = 18:26:42 UTC) fixed the
+# ResolutionDetector YES-team assumption. Trades before this commit used
+# buggy code (correct_prob = 1.0 if winner == "home" else 0.0).
+PRE_FIX_CUTOFF = "2026-04-15T18:26:42+00:00"
+PRE_FIX_SOURCE = "ResolutionDetector/ConfirmedFinal"
+
+
+def is_pre_fix(source: str, entry_ts: str) -> bool:
+    return source == PRE_FIX_SOURCE and entry_ts < PRE_FIX_CUTOFF
 
 
 # ── Wilson score 95% CI ───────────────────────────────────────────────────────
@@ -181,6 +197,15 @@ def _bucket_report(label: str, groups: dict[str, list[bool]]) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Phase 0b directional accuracy scraper")
+    parser.add_argument(
+        "--include-pre-fix",
+        action="store_true",
+        default=False,
+        help="Include pre-fix ResolutionDetector rows in accuracy stats",
+    )
+    args = parser.parse_args()
+
     print("Loading entries from ghost_trades.jsonl...")
     entries = load_entries()
     print(f"  {len(entries)} unique entry tickers found")
@@ -237,6 +262,8 @@ def main() -> None:
             continue
 
         action = entry.get("action", "")
+        source = entry.get("source", "unknown")
+        entry_ts = entry.get("ts", "")
         correct = (
             (action == "buy_yes" and result == "yes") or
             (action == "buy_no" and result == "no")
@@ -244,15 +271,16 @@ def main() -> None:
         finalized.append({
             "market_id": mid,
             "series": classify_series(mid),
-            "source": entry.get("source", "unknown"),
+            "source": source,
             "action": action,
             "gt_prob": entry.get("gt_prob", ""),
             "entry_price": entry.get("entry_price", ""),
             "confidence": entry.get("confidence", ""),
-            "entry_ts": entry.get("ts", ""),
+            "entry_ts": entry_ts,
             "result": result,
             "settlement_ts": cached.get("settlement_ts", ""),
             "correct": correct,
+            "pre_fix": is_pre_fix(source, entry_ts),
         })
 
     # ── Report A: Overall ─────────────────────────────────────────────────────
@@ -287,12 +315,18 @@ def main() -> None:
 
     # ── Report C: Per source ──────────────────────────────────────────────────
     source_groups: dict[str, list[bool]] = {}
+    n_pre_fix_excluded = 0
     for r in finalized:
+        if r["pre_fix"] and not args.include_pre_fix:
+            n_pre_fix_excluded += 1
+            continue
         source_groups.setdefault(r["source"], []).append(r["correct"])
 
     print("\n" + "=" * 70)
     print("REPORT C — PER GT SOURCE")
     print("=" * 70)
+    if n_pre_fix_excluded:
+        print(f"  (excluded {n_pre_fix_excluded} pre-fix ResolutionDetector rows; use --include-pre-fix to include)")
     _bucket_report("Source breakdown", source_groups)
 
     # ── Save CSV ──────────────────────────────────────────────────────────────
@@ -300,6 +334,7 @@ def main() -> None:
     fieldnames = [
         "market_id", "series", "source", "action", "gt_prob",
         "entry_price", "confidence", "entry_ts", "result", "settlement_ts", "correct",
+        "pre_fix",
     ]
     with open(CSV_OUT, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=fieldnames)
