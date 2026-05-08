@@ -36,6 +36,19 @@ SnipeCallback = Callable[[Market, SnipeSignal], Optional[str]]
 
 logger = logging.getLogger(__name__)
 
+
+def _check_ws_rest_agreement(ws_mid: float, rest_mid: float, ticker: str) -> None:
+    """Log a gate event if WS and REST mids disagree by more than 0.05."""
+    if ws_mid is None or rest_mid is None:
+        return
+    if abs(ws_mid - rest_mid) > 0.05:
+        log_gate_event(
+            ticker=ticker,
+            gate="invariant_violation",
+            decision="ws_rest_mid_disagreement",
+            extra={"ws_mid": ws_mid, "rest_mid": rest_mid, "delta": round(ws_mid - rest_mid, 4)},
+        )
+
 # Scan all these categories (weather removed, crypto excluded in filter)
 SCAN_CATEGORIES = [
     "politics",
@@ -382,6 +395,7 @@ class ResolutionScanner:
                         ws_book = self._kalshi_ws.get_book(market.market_id)
 
                 if ws_book is not None and ws_book.mid_price is not None:
+                    _check_ws_rest_agreement(ws_book.mid_price, fresh.yes_price, market.market_id)
                     fresh.yes_price = ws_book.mid_price
                     with _counter_lock:
                         _ws_hits[0] += 1

@@ -29,8 +29,24 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from .base import OrderBook, PriceLevel
+from monitoring.gate_events import log_gate_event
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_kalshi_mid(mid: float, ticker: str, source: str) -> bool:
+    """Return True if mid is in [0.0, 1.0], False and log on anomaly."""
+    if mid is None:
+        return False
+    if not (0.0 <= mid <= 1.0):
+        log_gate_event(
+            ticker=ticker,
+            gate="invariant_violation",
+            decision="kalshi_mid_out_of_range",
+            extra={"mid": mid, "source": source},
+        )
+        return False
+    return True
 
 # ── Ticker cache entry ───────────────────────────────────────────────────────
 
@@ -580,10 +596,18 @@ class KalshiWebSocket:
         # The API uses cents; normalise to [0-1].
         yes_bid_raw = data.get("yes_bid")
         yes_ask_raw = data.get("yes_ask")
+        yes_bid_val = float(yes_bid_raw) / 100.0 if yes_bid_raw is not None else None
+        yes_ask_val = float(yes_ask_raw) / 100.0 if yes_ask_raw is not None else None
+
+        if yes_bid_val is not None and yes_ask_val is not None:
+            mid = (yes_bid_val + yes_ask_val) / 2.0
+            if not _validate_kalshi_mid(mid, market_id, "ws_ticker"):
+                return
+
         snap = TickerSnapshot(
             market_id=market_id,
-            yes_bid=float(yes_bid_raw) / 100.0 if yes_bid_raw is not None else None,
-            yes_ask=float(yes_ask_raw) / 100.0 if yes_ask_raw is not None else None,
+            yes_bid=yes_bid_val,
+            yes_ask=yes_ask_val,
             last_updated=time.time(),
         )
         with self._lock:

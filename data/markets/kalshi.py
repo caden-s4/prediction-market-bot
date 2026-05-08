@@ -30,8 +30,24 @@ from .base import (
     PriceLevel,
     Side,
 )
+from monitoring.gate_events import log_gate_event
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_kalshi_mid(mid: float, ticker: str, source: str) -> bool:
+    """Return True if mid is in [0.0, 1.0], False and log on anomaly."""
+    if mid is None:
+        return False
+    if not (0.0 <= mid <= 1.0):
+        log_gate_event(
+            ticker=ticker,
+            gate="invariant_violation",
+            decision="kalshi_mid_out_of_range",
+            extra={"mid": mid, "source": source},
+        )
+        return False
+    return True
 
 _WEATHER_SERIES = re.compile(
     r"^KXWEATHER|^KXPRECIP|^KXSNOW|^KXRAIN|^KXTEMP|^KXWIND|^KXHURR|^KXHIGHS|^KXLOWS",
@@ -690,6 +706,9 @@ class KalshiClient(BaseMarketClient):
 
             yes_price = (yes_bid + yes_ask) / 2.0
             no_price  = (no_bid + no_ask)  / 2.0
+
+            if not _validate_kalshi_mid(yes_price, ticker, "rest_parser"):
+                return None
 
             # Infer category from series ticker or question keywords
             category = self._infer_category(ticker, question, is_weather)

@@ -60,5 +60,8 @@ logs/*.log.*
 diagnostics/diagnostic_*.txt
 diagnostics/archive/*.txt
 
+# ── Scratch / one-off diagnostic scripts ──────────────────────────────────────
+scripts/scratch/
+
 # ── Misc ──────────────────────────────────────────────────────────────────────
 *.docx

@@ -38,6 +38,7 @@ from typing import List, Optional, Tuple
 from data.ground_truth.base import GroundTruthResult, SourceType
 from data.ground_truth.cross_platform import CrossPlatformSource
 from data.markets.base import Market
+from monitoring.gate_events import log_gate_event
 from shared.fee_cache import FeeCache, kalshi_fee_per_contract
 
 logger = logging.getLogger(__name__)
@@ -217,6 +218,14 @@ class GapDetector:
         round_trip_fee = one_way_fee * 2
         raw_gap = abs(ground_truth_prob - market.yes_price)
         effective_gap = raw_gap - round_trip_fee
+
+        if raw_gap > 0.40:
+            log_gate_event(
+                ticker=market.market_id,
+                gate="invariant_violation",
+                decision="implausible_gap",
+                extra={"market_price": market.yes_price, "gt_prob": ground_truth_prob, "gap": round(raw_gap, 4)},
+            )
 
         _buffer = self._slippage_buffer
         if release_window == "hunt":
