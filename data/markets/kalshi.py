@@ -789,8 +789,9 @@ class KalshiClient(BaseMarketClient):
             # API returns "orderbook_fp" (fingerprint), not "orderbook"
             book = data.get("orderbook_fp", {})
             # Kalshi order book: "yes_dollars" = YES bid levels, "no_dollars" = NO bid levels.
-            # NO bids at price p cents are equivalent to YES asks at (100 - p) cents,
-            # because a NO buyer willing to pay p for NO is offering 100-p for YES.
+            # Prices are decimal fractions [0.0, 1.0] in the orderbook_fp response.
+            # NO bids at decimal price p are equivalent to YES asks at (1 - p),
+            # because a NO buyer willing to pay p for NO is offering (1-p) for YES.
 
             def _parse_level(level, side_label: str):
                 """Parse [price, size] level, skipping non-numeric entries."""
@@ -812,7 +813,7 @@ class KalshiClient(BaseMarketClient):
                 if parsed is not None:
                     yes_bid_levels.append(parsed)
             yes_bid_levels.sort(key=lambda x: -x[0])
-            yes_bids = [PriceLevel(price=p / 100.0, size=s) for p, s in yes_bid_levels]
+            yes_bids = [PriceLevel(price=p, size=s) for p, s in yes_bid_levels]
 
             yes_ask_levels = []
             for a in book.get("no_dollars") or []:
@@ -820,7 +821,7 @@ class KalshiClient(BaseMarketClient):
                 if parsed is not None:
                     yes_ask_levels.append(parsed)
             yes_ask_levels.sort(key=lambda x: -x[0])
-            yes_asks = [PriceLevel(price=(100.0 - p) / 100.0, size=s) for p, s in yes_ask_levels]
+            yes_asks = [PriceLevel(price=1.0 - p, size=s) for p, s in yes_ask_levels]
 
             return OrderBook(
                 market_id=market_id,
