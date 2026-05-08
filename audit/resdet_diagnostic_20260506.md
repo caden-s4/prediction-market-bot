@@ -759,3 +759,12 @@ Report C (default, pre-fix excluded) now shows `ResolutionDetector/ConfirmedFina
 3. Only then reproduce behavior — using the historical code, not the current code
 
 **End of Diagnostic**
+
+---
+
+## Phase 5 — Closed
+
+- Bug confirmed fixed in commit 0450f21 (2026-04-15 11:26:42 -0700 / 18:26:42 UTC).
+- Pre-fix rows now tagged (`pre_fix=True`) in `data/runtime/phase0_accuracy_results.csv`; accuracy script excludes them from Report C by default. Use `--include-pre-fix` to restore historical view.
+- Post-fix ResolutionDetector sample: **N=3**, accuracy **100.0%**, Wilson 95% CI [43.8%, 100.0%]. Insufficient post-fix sample (need ≥30 trades). Fix presumed working, not statistically validated.
+- When investigating historical trades, git blame the relevant code BEFORE running current code as if it represents history. Phase 3 missed this and chased a phantom second writer for one extra phase.
