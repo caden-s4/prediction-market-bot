@@ -104,7 +104,11 @@ _FINANCIAL_BRACKET_PREFIXES: tuple = (
     "KXNASDAQ100U",  # before KXNASDAQ100 — longer prefix wins startswith
     "KXNASDAQ100",
     "KXGOLDD",
+    "KXGOLDW",       # GC=F (Gold weekly) — Yahoo, TD free tier blocks GC/GC1!
     "KXTNOTED",
+    "KXTNOTEW",      # ^TNX (10-yr Treasury weekly) — Yahoo, TD free tier blocks TNX
+    "KXINX",         # ES=F (S&P 500) — Yahoo, TD free tier blocks SPX
+    "KXWTI",         # CL=F (WTI Crude) — Yahoo, TD blocks CL1!. Matches daily KXWTI-* and weekly KXWTIW-*
 )
 
 
