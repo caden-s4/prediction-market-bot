@@ -31,6 +31,12 @@ from monitoring.gate_events import log_gate_event
 from resolution.priority import PriorityScorer
 from shared.exclusion_list import ExclusionList
 from strategies.weather_snipe import SnipeSignal, evaluate_snipe
+from strategies.weather_peak_snipe import (
+    WeatherPeakSnipeSignal,
+    evaluate_event_signals as evaluate_peak_snipe_event_signals,
+    group_markets_by_event as group_peak_snipe_markets,
+    is_peak_snipe_candidate,
+)
 
 SnipeCallback = Callable[[Market, SnipeSignal], Optional[str]]
 
@@ -160,6 +166,81 @@ def _is_weather_shadow_candidate(market: Market) -> bool:
     if delta > _WEATHER_SNIPE_SHADOW_WINDOW:
         return False
     return any(mid.startswith(p) for p in _WEATHER_SERIES_TICKERS)
+
+
+def _dispatch_weather_peak_snipe_batch(
+    candidates: List[Market],
+    snipe_callback: Optional[SnipeCallback] = None,
+) -> None:
+    """Phase 14b weather peak-snipe batch dispatch (event-driven).
+
+    Unlike the per-market `_dispatch_weather_snipe`, this strategy fires once
+    per (series, event_date) per cycle: it groups candidate markets, evaluates
+    the post-peak monotonic-trend trigger per group, and emits up to 5 signals
+    per event (winner YES + ±2 adjacent NO) which the existing snipe placement
+    callback handles.
+
+    Hard-coded ``dry_run=True`` for Phase 14b v1 — the strategy is ghost-only
+    until the per-signal-class PnL gate (pending) is in place. The executor
+    has a defense-in-depth guard for the same.
+
+    Any exception per event group is logged with traceback and swallowed; this
+    hook must never crash the scan loop.
+    """
+    if not candidates:
+        return
+    groups = group_peak_snipe_markets(candidates)
+    if not groups:
+        return
+    logger.info(
+        "WeatherPeakSnipe: evaluating %d event group(s) (candidates=%d)",
+        len(groups), len(candidates),
+    )
+    for event_id, event_markets in groups.items():
+        try:
+            signals = evaluate_peak_snipe_event_signals(
+                event_markets,
+                now_utc=datetime.now(timezone.utc),
+                dry_run=True,
+            )
+        except Exception:
+            logger.exception(
+                "WeatherPeakSnipe batch eval failed for %s", event_id,
+            )
+            continue
+        if not signals:
+            continue
+        if snipe_callback is None:
+            for sig in signals:
+                logger.info(
+                    "WeatherPeakSnipe candidate (no callback): %s -> %s",
+                    sig.market_id, sig,
+                )
+            continue
+        # Build a fast lookup so we can pass the right Market into the
+        # callback per signal — the strategy returns signals keyed by
+        # market_id only.
+        by_id = {m.market_id: m for m in event_markets}
+        for sig in signals:
+            market = by_id.get(sig.market_id)
+            if market is None:
+                logger.warning(
+                    "WeatherPeakSnipe: signal market_id %s not in event group %s",
+                    sig.market_id, event_id,
+                )
+                continue
+            try:
+                order_id = snipe_callback(market, sig)
+            except Exception:
+                logger.exception(
+                    "WeatherPeakSnipe placement failed for %s", sig.market_id,
+                )
+                continue
+            if order_id is not None:
+                logger.info(
+                    "WeatherPeakSnipe trade placed: %s order=%s",
+                    sig.market_id, order_id,
+                )
 
 
 def _dispatch_weather_snipe(
@@ -468,6 +549,9 @@ class ResolutionScanner:
         results: List[Market] = []
         seen: set = set()
         rejected_reasons: dict = {"excluded": 0, "category": 0, "hours": 0, "price": 0}
+        # Phase 14b weather peak-snipe candidate accumulator. Filled during
+        # the kalshi loop; flushed via batch dispatcher at the end.
+        peak_snipe_candidates: List[Market] = []
 
         # Kalshi has no server-side category filter – one paginated call covers all
         # open markets and we filter client-side. Polymarket supports per-category
@@ -509,6 +593,8 @@ class ResolutionScanner:
                     # so they appear here as reason="category" — the snipe
                     # strategy intentionally bypasses that exclusion.
                     _dispatch_weather_snipe(m, self._snipe_callback)
+                    if is_peak_snipe_candidate(m.market_id):
+                        peak_snipe_candidates.append(m)
             except Exception as exc:
                 logger.warning(
                     "ResolutionScanner: failed fetching kalshi markets: %s", exc
@@ -582,6 +668,17 @@ class ResolutionScanner:
                     logger.debug(
                         "ResolutionScanner: kalshi financial bracket supplement failed: %s", exc
                     )
+
+            # Phase 14b weather peak-snipe batch dispatch. Runs once per cycle
+            # after all kalshi markets are discovered. Ghost-only by spec.
+            try:
+                _dispatch_weather_peak_snipe_batch(
+                    peak_snipe_candidates, self._snipe_callback,
+                )
+            except Exception:
+                logger.exception(
+                    "WeatherPeakSnipe batch dispatch failed (top-level guard)",
+                )
         else:
             for category in SCAN_CATEGORIES:
                 try:

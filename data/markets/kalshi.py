@@ -57,11 +57,19 @@ _WEATHER_SERIES = re.compile(
 # All known Kalshi weather series tickers — queried directly via series_ticker
 # to avoid scanning thousands of unrelated markets. Generic prefixes
 # (KXHIGHS, KXLOWS, etc.) return 0 markets; the live series are city-specific.
+#
+# Naming evolution (Phase 14a inventory): newer high-temp series use
+# `KXHIGHT<CITY>`; older ones for NY/CHI/MIA/DEN/AUS/LAX/PHIL still use
+# `KXHIGH<CITY>` (no T). Lows are uniformly `KXLOWT<CITY>`. The Phase 14b
+# weather-peak-snipe strategy needs the older `KXHIGH<CITY>` form for
+# NY/CHI/MIA/DEN — added below.
 _WEATHER_SERIES_TICKERS = [
-    # Daily high temperature — 13 cities
+    # Daily high temperature — 13 cities (newer KXHIGHT<CITY> form)
     "KXHIGHTPHX", "KXHIGHTLV", "KXHIGHTHOU", "KXHIGHTSATX", "KXHIGHTNOLA",
     "KXHIGHTATL", "KXHIGHTDAL", "KXHIGHTDC", "KXHIGHTSFO", "KXHIGHTSEA",
     "KXHIGHTOKC", "KXHIGHTBOS", "KXHIGHTMIN",
+    # Daily high temperature — older KXHIGH<CITY> form (Phase 14b cities)
+    "KXHIGHNY", "KXHIGHCHI", "KXHIGHMIA", "KXHIGHDEN",
     # Daily low temperature — 20 cities
     "KXLOWTMIA", "KXLOWTNOLA", "KXLOWTAUS", "KXLOWTSATX", "KXLOWTHOU",
     "KXLOWTATL", "KXLOWTDAL", "KXLOWTPHX", "KXLOWTLV", "KXLOWTLAX",

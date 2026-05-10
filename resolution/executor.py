@@ -3126,10 +3126,33 @@ class ResolutionBot:
         attribution paths off of `signal.ground_truth_result.source_name`.
         """
         mid = market.market_id
+        # Signal-class metadata — threaded into all gate_events so the
+        # gate_funnel can categorize per-strategy. Defaults to "weather_snipe"
+        # for legacy SnipeSignal objects which don't carry this attribute.
+        signal_class = getattr(signal, "signal_class", "weather_snipe")
         logger.info(
-            "ResolutionBot: SNIPE_ENTRY %s action=%s target_price=%.4f edge=%.4f",
-            mid, signal.action, signal.target_price, signal.edge,
+            "ResolutionBot: SNIPE_ENTRY %s action=%s target_price=%.4f edge=%.4f class=%s",
+            mid, signal.action, signal.target_price, signal.edge, signal_class,
         )
+
+        # Phase 14b ghost-only guard (defense in depth — strategy module also
+        # gates on its own dry_run flag). Refuses live placement of the new
+        # weather_peak_snipe class until the per-signal-class PnL gate is in
+        # place.
+        if signal_class == "weather_peak_snipe" and not self._dry_run:
+            log_gate_event(
+                ticker=mid,
+                gate=gn.GATE_SNIPE,
+                decision="skip",
+                reason="ghost_only",
+                platform=market.platform,
+                extra={"signal_class": signal_class},
+            )
+            logger.info(
+                "ResolutionBot: SKIP_SNIPE %s — weather_peak_snipe is "
+                "ghost-only in Phase 14b v1", mid,
+            )
+            return None
 
         if self._exclusions.is_excluded(market.platform, mid):
             logger.info("ResolutionBot: SKIP_SNIPE %s — on exclusion list", mid)
@@ -3141,6 +3164,7 @@ class ResolutionBot:
                 decision="skip",
                 reason=gn.REASON_DEDUP,
                 platform=market.platform,
+                extra={"signal_class": signal_class},
             )
             logger.info(
                 "ResolutionBot: SKIP_SNIPE %s — already holding position", mid,
@@ -3162,6 +3186,7 @@ class ResolutionBot:
                 decision="skip",
                 reason=gn.REASON_EMPTY_BOOK_SNIPE,
                 platform=market.platform,
+                extra={"signal_class": signal_class},
             )
             logger.info(
                 "ResolutionBot: SKIP_EMPTY_BOOK_SNIPE %s — book empty in "
@@ -3182,6 +3207,7 @@ class ResolutionBot:
                 decision="skip",
                 reason=gn.REASON_EMPTY_BOOK_SNIPE,
                 platform=market.platform,
+                extra={"signal_class": signal_class},
             )
             logger.info(
                 "ResolutionBot: SKIP_EMPTY_BOOK_SNIPE %s — no %s in book",
@@ -3214,9 +3240,20 @@ class ResolutionBot:
         )
 
         size_usd = self._compute_size(snipe_gap, signal.confidence)
+        # Strategy-supplied per-bracket risk ceiling (Phase 14b weather peak
+        # snipe sets max_risk_usd=$5). Legacy SnipeSignal objects don't carry
+        # this attribute; getattr default of None disables the ceiling.
+        max_risk_usd = getattr(signal, "max_risk_usd", None)
+        if max_risk_usd is not None and size_usd > max_risk_usd:
+            logger.info(
+                "ResolutionBot: SNIPE_SIZE %s clamped $%.2f → $%.2f "
+                "(strategy max_risk_usd, class=%s)",
+                mid, size_usd, max_risk_usd, signal_class,
+            )
+            size_usd = float(max_risk_usd)
         logger.info(
-            "ResolutionBot: SNIPE_SIZE %s computed=$%.2f (confidence=%.3f bankroll=$%.2f)",
-            mid, size_usd, signal.confidence, self._bankroll.total_usd,
+            "ResolutionBot: SNIPE_SIZE %s computed=$%.2f (confidence=%.3f bankroll=$%.2f class=%s)",
+            mid, size_usd, signal.confidence, self._bankroll.total_usd, signal_class,
         )
         if size_usd < 1.0:
             logger.info(
@@ -3245,7 +3282,7 @@ class ResolutionBot:
                     decision="skip",
                     reason=gn.REASON_SERIES_CAP,
                     platform=market.platform,
-                    extra={"series_root": series_root},
+                    extra={"series_root": series_root, "signal_class": signal_class},
                 )
                 logger.info(
                     "ResolutionBot: SKIP_SNIPE %s — series exposure cap "
@@ -3261,6 +3298,7 @@ class ResolutionBot:
                 decision="skip",
                 reason=gn.REASON_BANKROLL,
                 platform=market.platform,
+                extra={"signal_class": signal_class},
             )
             logger.info(
                 "ResolutionBot: SKIP_SNIPE %s — bankroll reserve failed", mid,
@@ -3295,6 +3333,10 @@ class ResolutionBot:
 
         if self._paper_log is not None:
             _tier = getattr(self._registry._entries.get(mid), "tier", 0)
+            _source = (
+                "WeatherPeakSnipe" if signal_class == "weather_peak_snipe"
+                else "WeatherSnipe"
+            )
             self._paper_log.log_entry(
                 market_id=mid,
                 platform=market.platform,
@@ -3304,7 +3346,7 @@ class ResolutionBot:
                 gt_prob=gt_prob_for_kelly,
                 gap=signal.edge,
                 confidence=signal.confidence,
-                source="WeatherSnipe",
+                source=_source,
                 tier=_tier,
                 question=market.question,
                 entry_time=self._positions[mid].entry_time,
