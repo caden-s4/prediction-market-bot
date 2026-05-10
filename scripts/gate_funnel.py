@@ -136,7 +136,12 @@ def main() -> None:
 
     for e in filtered:
         gate = e.get("gate") or "unknown"
-        reason = e.get("reason") or "(none)"
+        # invariant_violation emits the reason code via `decision` (e.g.
+        # ws_rest_mid_disagreement); reason is null. Read decision instead.
+        if gate == "invariant_violation":
+            reason = e.get("reason") or e.get("decision") or "(none)"
+        else:
+            reason = e.get("reason") or "(none)"
         ticker = e.get("ticker") or ""
         extra = e.get("extra")
 
