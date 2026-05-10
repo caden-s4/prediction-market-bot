@@ -428,6 +428,66 @@ def test_price_gate_skip_event_records_bracket_prices(monkeypatch):
     assert e["extra"]["obs_temp_f"] == 76.0
 
 
+def test_dedup_suppresses_repeat_evaluated_and_price_gate_events(monkeypatch):
+    """Phase 14c: repeat cycles against the same ASOS obs must not re-emit
+    `evaluated` or `skip/price_gate` events.  Triggered by re-running the
+    full evaluation against the same fetcher (which returns the same obs)
+    and the same now_utc."""
+    captured = _capture_gate_events(monkeypatch)
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 5, 9, 19, 30, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.0, 78.0, 77.0, 76.5, 76.0, 76.0, 76.0])
+    bands = [
+        ("75° to 75°", 0.50),
+        ("76° to 76°", 0.50),  # winner — too cheap, will hit price_gate
+        ("77° to 77°", 0.50),
+    ]
+    markets = _series_brackets("KXHIGHNY", "26MAY09", bands)
+
+    # Three consecutive evaluations against the same obs (same trigger_obs_ts).
+    for _ in range(3):
+        wps.evaluate_event_signals(
+            markets, now_utc=now_utc,
+            asos_fetcher=_stub_fetcher(obs), dry_run=True,
+        )
+
+    evaluated = [e for e in captured if e.get("decision") == "evaluated"]
+    skipped = [e for e in captured if e.get("reason") == "price_gate"]
+    assert len(evaluated) == 1, f"expected 1 evaluated event, got {len(evaluated)}"
+    assert len(skipped) == 1, f"expected 1 price_gate skip event, got {len(skipped)}"
+
+
+def test_dedup_re_emits_on_new_obs_timestamp(monkeypatch):
+    """A fresh ASOS observation (different cur_ts) is a new trigger and must
+    log again, even within the same process."""
+    captured = _capture_gate_events(monkeypatch)
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 5, 9, 19, 30, tzinfo=timezone.utc)
+    obs_first = _hour_obs(base, [80.0, 79.0, 78.0, 77.0, 76.5, 76.0, 76.0, 76.0])
+    # Same shape but extra hourly obs appended → cur_ts changes.
+    obs_second = obs_first + [(base + timedelta(hours=8), 75.5)]
+    bands = [
+        ("75° to 75°", 0.50),
+        ("76° to 76°", 0.50),
+        ("77° to 77°", 0.50),
+    ]
+    markets = _series_brackets("KXHIGHNY", "26MAY09", bands)
+
+    wps.evaluate_event_signals(
+        markets, now_utc=now_utc,
+        asos_fetcher=_stub_fetcher(obs_first), dry_run=True,
+    )
+    wps.evaluate_event_signals(
+        markets, now_utc=now_utc,
+        asos_fetcher=_stub_fetcher(obs_second), dry_run=True,
+    )
+
+    evaluated = [e for e in captured if e.get("decision") == "evaluated"]
+    skipped = [e for e in captured if e.get("reason") == "price_gate"]
+    assert len(evaluated) == 2
+    assert len(skipped) == 2
+
+
 def test_price_gate_skip_event_handles_missing_adjacent(monkeypatch):
     """If the winner is at an end of the bracket grid, off-array adjacents
     are recorded as None, not omitted."""

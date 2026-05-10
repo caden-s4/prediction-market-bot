@@ -254,6 +254,10 @@ class _TriggerOutcome:
     fired: bool
     observed_temp_f: Optional[float] = None
     reason: str = ""
+    # Timestamp of the ASOS observation that satisfied the trigger.  Stable
+    # across cycles while a new obs has not yet arrived (METAR cadence is
+    # ~hourly), so it is used as the dedup key for log emission below.
+    trigger_obs_ts: Optional[datetime] = None
 
 
 def _within_trigger_window(now_utc: datetime, cfg: _CityConfig, direction: str) -> bool:
@@ -333,7 +337,7 @@ def _evaluate_trigger(
                     reason=f"rebound(post_max={post_ext:.1f},obs={t:.1f})",
                 )
 
-    return _TriggerOutcome(fired=True, observed_temp_f=cur_temp)
+    return _TriggerOutcome(fired=True, observed_temp_f=cur_temp, trigger_obs_ts=cur_ts)
 
 
 def _filter_to_local_day(
@@ -483,6 +487,14 @@ def _enforce_contract_cap(
 _FIRED_TODAY: Dict[str, set] = {}
 _FIRED_DAY_LOCAL: Dict[str, str] = {}
 
+# Per-process log dedup: (winner_ticker, trigger_obs_ts_iso).  Once an
+# `evaluated` event has been logged for a given key, neither `evaluated`
+# nor `skip/price_gate` is emitted again for that key in this process
+# lifetime.  Trigger evaluation and signal emission are unaffected — this
+# only suppresses noisy duplicate log entries across cycles that share the
+# same ASOS observation.  Cleared on process restart only.
+_LOGGED_TRIGGERS: set = set()
+
 
 def _local_day_key(now_utc: datetime, tz_name: str) -> str:
     try:
@@ -605,21 +617,36 @@ def evaluate_event_signals(
     # for fire-rate accounting. Fires regardless of whether the price-gate
     # filter ultimately passes any bracket; the price-gate evidence is
     # captured separately below.
+    #
+    # Dedup: trigger_time_utc is the ASOS observation timestamp (stable across
+    # cycles until a new obs arrives, ~hourly), so (winner_ticker, trigger_ts)
+    # collapses the per-cycle re-fires that Phase 14b produced (13 events for
+    # 1 trigger). Once the key is recorded, the matching `skip/price_gate`
+    # event below is also suppressed.
     winner_bracket = brackets[winner_idx]
-    log_gate_event(
-        ticker=winner_bracket.market_id,
-        gate="snipe",
-        decision="evaluated",
-        reason=None,
-        platform="kalshi",
-        extra={
-            "signal_class": SIGNAL_CLASS,
-            "ticker": winner_bracket.market_id,
-            "winner_idx": winner_idx,
-            "obs_temp_f": float(observed_temp_f),
-            "trigger_time_utc": now_utc.isoformat(),
-        },
+    trigger_obs_iso = (
+        outcome.trigger_obs_ts.isoformat()
+        if outcome.trigger_obs_ts is not None
+        else now_utc.isoformat()
     )
+    log_key = (winner_bracket.market_id, trigger_obs_iso)
+    already_logged = log_key in _LOGGED_TRIGGERS
+    if not already_logged:
+        log_gate_event(
+            ticker=winner_bracket.market_id,
+            gate="snipe",
+            decision="evaluated",
+            reason=None,
+            platform="kalshi",
+            extra={
+                "signal_class": SIGNAL_CLASS,
+                "ticker": winner_bracket.market_id,
+                "winner_idx": winner_idx,
+                "obs_temp_f": float(observed_temp_f),
+                "trigger_time_utc": trigger_obs_iso,
+            },
+        )
+        _LOGGED_TRIGGERS.add(log_key)
 
     candidate_signals: List[WeatherPeakSnipeSignal] = []
     winner_sig = _signal_for_winner(brackets[winner_idx], observed_temp_f, event_id)
@@ -645,20 +672,21 @@ def evaluate_event_signals(
                 adjacent_asks.append(float(brackets[adj_idx].yes_ask))
             else:
                 adjacent_asks.append(None)
-        log_gate_event(
-            ticker=winner_bracket.market_id,
-            gate="snipe",
-            decision="skip",
-            reason="price_gate",
-            platform="kalshi",
-            extra={
-                "signal_class": SIGNAL_CLASS,
-                "winner_yes_ask": float(winner_bracket.yes_ask),
-                "adjacent_yes_asks": adjacent_asks,
-                "winner_idx": winner_idx,
-                "obs_temp_f": float(observed_temp_f),
-            },
-        )
+        if not already_logged:
+            log_gate_event(
+                ticker=winner_bracket.market_id,
+                gate="snipe",
+                decision="skip",
+                reason="price_gate",
+                platform="kalshi",
+                extra={
+                    "signal_class": SIGNAL_CLASS,
+                    "winner_yes_ask": float(winner_bracket.yes_ask),
+                    "adjacent_yes_asks": adjacent_asks,
+                    "winner_idx": winner_idx,
+                    "obs_temp_f": float(observed_temp_f),
+                },
+            )
         logger.info(
             "WeatherPeakSnipe: %s — trigger fired (obs=%.1fF, winner_idx=%d) "
             "but no bracket passed price gates "
@@ -724,3 +752,4 @@ def _clear_dedup_for_test() -> None:
     """Test-only: clear in-memory dedup state."""
     _FIRED_TODAY.clear()
     _FIRED_DAY_LOCAL.clear()
+    _LOGGED_TRIGGERS.clear()
