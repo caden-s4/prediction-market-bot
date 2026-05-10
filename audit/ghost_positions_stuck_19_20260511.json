@@ -1,0 +1,423 @@
+{
+  "saved_at": "2026-05-10T19:43:43.668753+00:00",
+  "positions": {
+    "KXLOWTOKC-26MAY09-T56": {
+      "market_id": "KXLOWTOKC-26MAY09-T56",
+      "platform": "kalshi",
+      "action": "buy_yes",
+      "entry_price": 0.010000000000000009,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.99,
+      "source_confidence": 0.99,
+      "entry_time": 1778391355.1455488,
+      "order_id": "ghost_KXLOWTOKC-26MAY09-T56_1778391355",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the minimum temperature be  >56\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXLOWTOKC-26MAY09-B53.5": {
+      "market_id": "KXLOWTOKC-26MAY09-B53.5",
+      "platform": "kalshi",
+      "action": "buy_no",
+      "entry_price": 0.91,
+      "size_usd": 58.75,
+      "ground_truth_prob": 0.01,
+      "source_confidence": 0.99,
+      "entry_time": 1778391356.0876546,
+      "order_id": "ghost_KXLOWTOKC-26MAY09-B53.5_1778391356",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the minimum temperature be  53-54\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXHIGHTOKC-26MAY09-T83": {
+      "market_id": "KXHIGHTOKC-26MAY09-T83",
+      "platform": "kalshi",
+      "action": "buy_yes",
+      "entry_price": 0.010000000000000009,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.99,
+      "source_confidence": 0.99,
+      "entry_time": 1778391370.6468108,
+      "order_id": "ghost_KXHIGHTOKC-26MAY09-T83_1778391370",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the maximum temperature be  <83\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXHIGHTOKC-26MAY09-B83.5": {
+      "market_id": "KXHIGHTOKC-26MAY09-B83.5",
+      "platform": "kalshi",
+      "action": "buy_no",
+      "entry_price": 0.99,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.01,
+      "source_confidence": 0.99,
+      "entry_time": 1778391371.8615644,
+      "order_id": "ghost_KXHIGHTOKC-26MAY09-B83.5_1778391371",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the maximum temperature be  83-84\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXLOWTNOLA-26MAY09-T67": {
+      "market_id": "KXLOWTNOLA-26MAY09-T67",
+      "platform": "kalshi",
+      "action": "buy_no",
+      "entry_price": 0.99,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.01,
+      "source_confidence": 0.99,
+      "entry_time": 1778392346.3874376,
+      "order_id": "ghost_KXLOWTNOLA-26MAY09-T67_1778392346",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the minimum temperature be  <67\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXLOWTNOLA-26MAY09-B69.5": {
+      "market_id": "KXLOWTNOLA-26MAY09-B69.5",
+      "platform": "kalshi",
+      "action": "buy_yes",
+      "entry_price": 0.010000000000000009,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.99,
+      "source_confidence": 0.99,
+      "entry_time": 1778392347.4146216,
+      "order_id": "ghost_KXLOWTNOLA-26MAY09-B69.5_1778392347",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the minimum temperature be  69-70\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXLOWTCHI-26MAY09-B48.5": {
+      "market_id": "KXLOWTCHI-26MAY09-B48.5",
+      "platform": "kalshi",
+      "action": "buy_yes",
+      "entry_price": 0.89,
+      "size_usd": 54.0,
+      "ground_truth_prob": 0.99,
+      "source_confidence": 0.99,
+      "entry_time": 1778392354.9112432,
+      "order_id": "ghost_KXLOWTCHI-26MAY09-B48.5_1778392354",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the minimum temperature be  48-49\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXHIGHTSATX-26MAY09-T90": {
+      "market_id": "KXHIGHTSATX-26MAY09-T90",
+      "platform": "kalshi",
+      "action": "buy_no",
+      "entry_price": 0.99,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.01,
+      "source_confidence": 0.99,
+      "entry_time": 1778392358.4074354,
+      "order_id": "ghost_KXHIGHTSATX-26MAY09-T90_1778392358",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the maximum temperature be  >90\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXHIGHTSATX-26MAY09-T83": {
+      "market_id": "KXHIGHTSATX-26MAY09-T83",
+      "platform": "kalshi",
+      "action": "buy_yes",
+      "entry_price": 0.010000000000000009,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.99,
+      "source_confidence": 0.99,
+      "entry_time": 1778392358.7851734,
+      "order_id": "ghost_KXHIGHTSATX-26MAY09-T83_1778392358",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the maximum temperature be  <83\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXHIGHTMIN-26MAY09-T60": {
+      "market_id": "KXHIGHTMIN-26MAY09-T60",
+      "platform": "kalshi",
+      "action": "buy_yes",
+      "entry_price": 0.010000000000000009,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.99,
+      "source_confidence": 0.99,
+      "entry_time": 1778392364.9506986,
+      "order_id": "ghost_KXHIGHTMIN-26MAY09-T60_1778392364",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the maximum temperature be  <60\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXHIGHTMIN-26MAY09-B62.5": {
+      "market_id": "KXHIGHTMIN-26MAY09-B62.5",
+      "platform": "kalshi",
+      "action": "buy_no",
+      "entry_price": 0.99,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.01,
+      "source_confidence": 0.99,
+      "entry_time": 1778392366.0440483,
+      "order_id": "ghost_KXHIGHTMIN-26MAY09-B62.5_1778392366",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the maximum temperature be  62-63\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXHIGHTHOU-26MAY09-T88": {
+      "market_id": "KXHIGHTHOU-26MAY09-T88",
+      "platform": "kalshi",
+      "action": "buy_no",
+      "entry_price": 0.99,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.01,
+      "source_confidence": 0.99,
+      "entry_time": 1778392366.7974029,
+      "order_id": "ghost_KXHIGHTHOU-26MAY09-T88_1778392366",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the maximum temperature be  >88\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXHIGHTHOU-26MAY09-T81": {
+      "market_id": "KXHIGHTHOU-26MAY09-T81",
+      "platform": "kalshi",
+      "action": "buy_yes",
+      "entry_price": 0.010000000000000009,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.99,
+      "source_confidence": 0.99,
+      "entry_time": 1778392367.204182,
+      "order_id": "ghost_KXHIGHTHOU-26MAY09-T81_1778392367",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the maximum temperature be  <81\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXHIGHTDAL-26MAY09-T84": {
+      "market_id": "KXHIGHTDAL-26MAY09-T84",
+      "platform": "kalshi",
+      "action": "buy_yes",
+      "entry_price": 0.010000000000000009,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.99,
+      "source_confidence": 0.99,
+      "entry_time": 1778392369.370813,
+      "order_id": "ghost_KXHIGHTDAL-26MAY09-T84_1778392369",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the maximum temperature be  <84\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXHIGHTDAL-26MAY09-B90.5": {
+      "market_id": "KXHIGHTDAL-26MAY09-B90.5",
+      "platform": "kalshi",
+      "action": "buy_no",
+      "entry_price": 0.99,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.01,
+      "source_confidence": 0.99,
+      "entry_time": 1778392369.8552346,
+      "order_id": "ghost_KXHIGHTDAL-26MAY09-B90.5_1778392369",
+      "resolution_date_iso": "2026-05-10T06:00:00+00:00",
+      "question": "Will the maximum temperature be  90-91\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXLOWTSEA-26MAY09-T50": {
+      "market_id": "KXLOWTSEA-26MAY09-T50",
+      "platform": "kalshi",
+      "action": "buy_yes",
+      "entry_price": 0.010000000000000009,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.99,
+      "source_confidence": 0.99,
+      "entry_time": 1778399094.363733,
+      "order_id": "ghost_KXLOWTSEA-26MAY09-T50_1778399094",
+      "resolution_date_iso": "2026-05-10T08:00:00+00:00",
+      "question": "Will the minimum temperature be  >50\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXLOWTSEA-26MAY09-B47.5": {
+      "market_id": "KXLOWTSEA-26MAY09-B47.5",
+      "platform": "kalshi",
+      "action": "buy_no",
+      "entry_price": 0.91,
+      "size_usd": 58.75,
+      "ground_truth_prob": 0.01,
+      "source_confidence": 0.99,
+      "entry_time": 1778399095.3513765,
+      "order_id": "ghost_KXLOWTSEA-26MAY09-B47.5_1778399095",
+      "resolution_date_iso": "2026-05-10T08:00:00+00:00",
+      "question": "Will the minimum temperature be  47-48\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXLOWTLAX-26MAY09-B58.5": {
+      "market_id": "KXLOWTLAX-26MAY09-B58.5",
+      "platform": "kalshi",
+      "action": "buy_yes",
+      "entry_price": 0.010000000000000009,
+      "size_usd": 58.8,
+      "ground_truth_prob": 0.99,
+      "source_confidence": 0.99,
+      "entry_time": 1778399100.0314798,
+      "order_id": "ghost_KXLOWTLAX-26MAY09-B58.5_1778399100",
+      "resolution_date_iso": "2026-05-10T08:00:00+00:00",
+      "question": "Will the minimum temperature be  58-59\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXLOWTLAX-26MAY09-B56.5": {
+      "market_id": "KXLOWTLAX-26MAY09-B56.5",
+      "platform": "kalshi",
+      "action": "buy_no",
+      "entry_price": 0.87,
+      "size_usd": 58.72,
+      "ground_truth_prob": 0.01,
+      "source_confidence": 0.99,
+      "entry_time": 1778399100.380676,
+      "order_id": "ghost_KXLOWTLAX-26MAY09-B56.5_1778399100",
+      "resolution_date_iso": "2026-05-10T08:00:00+00:00",
+      "question": "Will the minimum temperature be  56-57\u00b0 on May 9, 2026?",
+      "category": "weather",
+      "tags": [
+        "weather",
+        "weather"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXAAAGASD-26MAY11-4.485": {
+      "market_id": "KXAAAGASD-26MAY11-4.485",
+      "platform": "kalshi",
+      "action": "buy_no",
+      "entry_price": 0.95,
+      "size_usd": 50.54,
+      "ground_truth_prob": 0.02,
+      "source_confidence": 0.86,
+      "entry_time": 1778417455.9578269,
+      "order_id": "ghost_KXAAAGASD-26MAY11-4.485_1778417455",
+      "resolution_date_iso": "2026-05-11T03:59:00+00:00",
+      "question": "Will average **gas prices** be above $4.485?",
+      "category": "general",
+      "tags": [
+        "general"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    },
+    "KXAAAGASD-26MAY11-4.515": {
+      "market_id": "KXAAAGASD-26MAY11-4.515",
+      "platform": "kalshi",
+      "action": "buy_no",
+      "entry_price": 0.85,
+      "size_usd": 50.42,
+      "ground_truth_prob": 0.02,
+      "source_confidence": 0.86,
+      "entry_time": 1778442223.6674914,
+      "order_id": "ghost_KXAAAGASD-26MAY11-4.515_1778442223",
+      "resolution_date_iso": "2026-05-11T03:59:00+00:00",
+      "question": "Will average **gas prices** be above $4.515?",
+      "category": "general",
+      "tags": [
+        "general"
+      ],
+      "fill_status": "filled",
+      "limit_price_used": null
+    }
+  }
+}
