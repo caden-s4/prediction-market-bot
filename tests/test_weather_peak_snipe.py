@@ -355,6 +355,103 @@ def test_group_markets_by_event():
     assert all(len(v) == 2 for v in groups.values())
 
 
+# ── observability: gate_events ────────────────────────────────────────────────
+
+def _capture_gate_events(monkeypatch):
+    """Patch log_gate_event in strategies.weather_peak_snipe and return a list
+    that accumulates each call's kwargs."""
+    captured: List[dict] = []
+
+    def fake(**kwargs):
+        captured.append(kwargs)
+
+    monkeypatch.setattr(wps, "log_gate_event", fake)
+    return captured
+
+
+def test_evaluated_event_emitted_when_trigger_fires(monkeypatch):
+    captured = _capture_gate_events(monkeypatch)
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 5, 9, 19, 30, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.0, 78.0, 77.0, 76.5, 76.0, 76.0, 76.0])
+    bands = [
+        ("75° to 75°", 0.05),
+        ("76° to 76°", 0.92),
+        ("77° to 77°", 0.05),
+    ]
+    markets = _series_brackets("KXHIGHNY", "26MAY09", bands)
+    wps.evaluate_event_signals(
+        markets, now_utc=now_utc,
+        asos_fetcher=_stub_fetcher(obs), dry_run=True,
+    )
+    evaluated = [e for e in captured if e.get("decision") == "evaluated"]
+    assert len(evaluated) == 1
+    e = evaluated[0]
+    assert e["gate"] == "snipe"
+    assert e["reason"] is None
+    assert e["extra"]["signal_class"] == "weather_peak_snipe"
+    assert e["extra"]["winner_idx"] == 1
+    assert e["extra"]["obs_temp_f"] == 76.0
+    assert e["extra"]["ticker"].endswith("-B01")
+    assert "trigger_time_utc" in e["extra"]
+
+
+def test_price_gate_skip_event_records_bracket_prices(monkeypatch):
+    captured = _capture_gate_events(monkeypatch)
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 5, 9, 19, 30, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.0, 78.0, 77.0, 76.5, 76.0, 76.0, 76.0])
+    # All brackets fail price gates: winner=0.50 (<0.85), adjacents=0.50 (>0.15).
+    bands = [
+        ("74° to 74°", 0.50),
+        ("75° to 75°", 0.50),
+        ("76° to 76°", 0.50),  # winner — too cheap
+        ("77° to 77°", 0.50),
+        ("78° to 78°", 0.50),
+    ]
+    markets = _series_brackets("KXHIGHNY", "26MAY09", bands)
+    sigs = wps.evaluate_event_signals(
+        markets, now_utc=now_utc,
+        asos_fetcher=_stub_fetcher(obs), dry_run=True,
+    )
+    assert sigs == []
+    skips = [e for e in captured if e.get("reason") == "price_gate"]
+    assert len(skips) == 1
+    e = skips[0]
+    assert e["gate"] == "snipe"
+    assert e["decision"] == "skip"
+    assert e["extra"]["signal_class"] == "weather_peak_snipe"
+    assert e["extra"]["winner_yes_ask"] == 0.50
+    # ADJACENT_OFFSETS = (-2, -1, +1, +2) → indices 0, 1, 3, 4.
+    assert e["extra"]["adjacent_yes_asks"] == [0.50, 0.50, 0.50, 0.50]
+    assert e["extra"]["winner_idx"] == 2
+    assert e["extra"]["obs_temp_f"] == 76.0
+
+
+def test_price_gate_skip_event_handles_missing_adjacent(monkeypatch):
+    """If the winner is at an end of the bracket grid, off-array adjacents
+    are recorded as None, not omitted."""
+    captured = _capture_gate_events(monkeypatch)
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 5, 9, 19, 30, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.0, 78.0, 77.0, 76.5, 76.0, 76.0, 76.0])
+    bands = [
+        ("76° to 76°", 0.50),  # winner at idx 0; idx -2 and -1 are off-array
+        ("77° to 77°", 0.50),
+        ("78° to 78°", 0.50),
+    ]
+    markets = _series_brackets("KXHIGHNY", "26MAY09", bands)
+    wps.evaluate_event_signals(
+        markets, now_utc=now_utc,
+        asos_fetcher=_stub_fetcher(obs), dry_run=True,
+    )
+    skips = [e for e in captured if e.get("reason") == "price_gate"]
+    assert len(skips) == 1
+    # winner_idx = 0; offsets (-2, -1, +1, +2) → indices (-2, -1, 1, 2).
+    # Only +1 and +2 are valid; -2 and -1 are out of bounds → None.
+    assert skips[0]["extra"]["adjacent_yes_asks"] == [None, None, 0.50, 0.50]
+
+
 # ── contract cap ──────────────────────────────────────────────────────────────
 
 def test_enforce_contract_cap_truncates_to_max():

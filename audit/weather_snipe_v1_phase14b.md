@@ -9,7 +9,7 @@
 | Component | File:line | Notes |
 |---|---|---|
 | ASOS timeseries fetcher | `data/ground_truth/asos_timeseries.py:1` | IEM `mesonet.agron.iastate.edu` endpoint. 5-min TTL cache + 6s inter-request throttle. |
-| Strategy module | `strategies/weather_peak_snipe.py:1` | `evaluate_event_signals()` is the entry point. `WeatherPeakSnipeSignal` dataclass mirrors the existing `SnipeSignal` shape so `place_snipe_trade` accepts it unchanged. Class constant `SIGNAL_CLASS = "weather_peak_snipe"`. |
+| Strategy module | `strategies/weather_peak_snipe.py:1` | `evaluate_event_signals()` is the entry point. `WeatherPeakSnipeSignal` dataclass mirrors the existing `SnipeSignal` shape so `place_snipe_trade` accepts it unchanged. Class constant `SIGNAL_CLASS = "weather_peak_snipe"`. Emits two `gate=snipe` events to `gate_events.jsonl` per evaluation — one `decision=evaluated` (ticker + winner_idx + obs_temp_f + trigger_time_utc) when the trigger fires and a winner bracket is identified, and one `decision=skip, reason=price_gate` (winner_yes_ask + adjacent_yes_asks list with nulls for off-array offsets) when no bracket passes the price gate. This is the live price-gate evidence channel Phase 14a deferred. |
 | Series ticker registry | `data/markets/kalshi.py:60-77` | Added `KXHIGHNY/CHI/MIA/DEN` (older `KXHIGH<CITY>` form per Phase 14a inventory). 33 → 37 series. |
 | Scanner batch dispatcher | `resolution/scanner.py:_dispatch_weather_peak_snipe_batch` | Runs ONCE per cycle after the kalshi loop completes. Groups candidates by `(series, event_date)`, evaluates trigger per group, dispatches signals via the existing `snipe_callback`. Hard-codes `dry_run=True`. |
 | Scanner accumulation hook | `resolution/scanner.py` (kalshi loop) | Per-market `is_peak_snipe_candidate(m.market_id)` check appends to in-cycle list; flushed after the loop. |
@@ -75,6 +75,7 @@ Results:
 - ✅ LOW triggers correctly suppressed — late-evening obs are at or near today's running min, so post-peak conditions don't hold.
 - ✅ No bracket passed price gates — expected at ~6 hours to close (Phase 14a flagged this as the open question; we are now collecting price-gate evidence empirically).
 - ✅ No exceptions, no regressions in existing `weather_snipe` SHADOW logs.
+- ✅ `gate_events.jsonl` captured both event types live: `evaluated` (1) + `skip/price_gate` (1) on a follow-up cycle, with full structured fields. Sample skip event: `KXHIGHCHI-26MAY09-T70 winner_yes_ask=0.01 adjacent_yes_asks=[null,null,0.01,0.01] obs_temp_f=52.0`. The market priced the winner at 1¢ — the bot's trigger and the market disagree by 84¢, exactly the kind of evidence the price gate is meant to filter on.
 
 Standalone IEM verification: 4-station fetch took ~24s with the 6s throttle (NYC/ORD/MIA/DEN, 12/13/12/14 obs respectively). No 429 errors after throttle was added.
 

@@ -40,6 +40,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from data.markets.base import Market
+from monitoring.gate_events import log_gate_event
 
 logger = logging.getLogger(__name__)
 
@@ -600,6 +601,26 @@ def evaluate_event_signals(
         )
         return []
 
+    # Trigger fired AND winner bracket identified — record an evaluated event
+    # for fire-rate accounting. Fires regardless of whether the price-gate
+    # filter ultimately passes any bracket; the price-gate evidence is
+    # captured separately below.
+    winner_bracket = brackets[winner_idx]
+    log_gate_event(
+        ticker=winner_bracket.market_id,
+        gate="snipe",
+        decision="evaluated",
+        reason=None,
+        platform="kalshi",
+        extra={
+            "signal_class": SIGNAL_CLASS,
+            "ticker": winner_bracket.market_id,
+            "winner_idx": winner_idx,
+            "obs_temp_f": float(observed_temp_f),
+            "trigger_time_utc": now_utc.isoformat(),
+        },
+    )
+
     candidate_signals: List[WeatherPeakSnipeSignal] = []
     winner_sig = _signal_for_winner(brackets[winner_idx], observed_temp_f, event_id)
     if winner_sig is not None:
@@ -613,10 +634,37 @@ def evaluate_event_signals(
                 candidate_signals.append(adj_sig)
 
     if not candidate_signals:
+        # Capture which prices failed the gate so future audits can decide
+        # whether 0.85/0.15 are too tight. adjacent_yes_asks is fixed-length
+        # 4 corresponding to ADJACENT_OFFSETS = (-2, -1, +1, +2); entries
+        # are None if the offset falls outside the bracket array.
+        adjacent_asks: List[Optional[float]] = []
+        for offset in ADJACENT_OFFSETS:
+            adj_idx = winner_idx + offset
+            if 0 <= adj_idx < len(brackets):
+                adjacent_asks.append(float(brackets[adj_idx].yes_ask))
+            else:
+                adjacent_asks.append(None)
+        log_gate_event(
+            ticker=winner_bracket.market_id,
+            gate="snipe",
+            decision="skip",
+            reason="price_gate",
+            platform="kalshi",
+            extra={
+                "signal_class": SIGNAL_CLASS,
+                "winner_yes_ask": float(winner_bracket.yes_ask),
+                "adjacent_yes_asks": adjacent_asks,
+                "winner_idx": winner_idx,
+                "obs_temp_f": float(observed_temp_f),
+            },
+        )
         logger.info(
             "WeatherPeakSnipe: %s — trigger fired (obs=%.1fF, winner_idx=%d) "
-            "but no bracket passed price gates",
+            "but no bracket passed price gates "
+            "(winner_yes_ask=%.3f, adjacent_yes_asks=%s)",
             event_id, observed_temp_f, winner_idx,
+            winner_bracket.yes_ask, adjacent_asks,
         )
         return []
 
