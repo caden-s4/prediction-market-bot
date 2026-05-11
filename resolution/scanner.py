@@ -117,6 +117,13 @@ _FINANCIAL_BRACKET_PREFIXES: tuple = (
     "KXWTI",         # CL=F (WTI Crude) — Yahoo, TD blocks CL1!. Matches daily KXWTI-* and weekly KXWTIW-*
 )
 
+# ── Legacy weather_snipe disable switch (Phase 15e) ───────────────────────────
+# 27 trades over Phase 15b + 15b-bis settled at 1W-26L / -$1,521.19. Paired-bet
+# logic fires near-max premium on both sides of a bracket, guaranteeing losses
+# on most resolutions. No edge thesis intact. Disabled at scanner dispatch.
+# Does NOT affect Phase 14b weather_peak_snipe (separate dispatch path).
+DISABLE_LEGACY_WEATHER_SNIPE: bool = True
+
 
 def get_snipe_stats() -> tuple:
     """Return (snipes_attempted, shadow_signals) cumulative since process start."""
@@ -592,7 +599,24 @@ class ResolutionScanner:
                     # Weather markets are filtered out by EXCLUDED_CATEGORIES,
                     # so they appear here as reason="category" — the snipe
                     # strategy intentionally bypasses that exclusion.
-                    _dispatch_weather_snipe(m, self._snipe_callback)
+                    # Phase 15e: legacy weather_snipe disabled. Emit a
+                    # scanner_reject event only for markets that would have
+                    # actually entered the dispatch (real or shadow window),
+                    # to keep the funnel signal-bearing.
+                    if DISABLE_LEGACY_WEATHER_SNIPE:
+                        if (
+                            _is_weather_snipe_candidate(m)
+                            or _is_weather_shadow_candidate(m)
+                        ):
+                            log_gate_event(
+                                ticker=m.market_id,
+                                gate=gn.GATE_SCANNER_REJECT,
+                                decision="reject",
+                                reason=gn.REASON_LEGACY_WEATHER_SNIPE_DISABLED,
+                                platform=m.platform,
+                            )
+                    else:
+                        _dispatch_weather_snipe(m, self._snipe_callback)
                     if is_peak_snipe_candidate(m.market_id):
                         peak_snipe_candidates.append(m)
             except Exception as exc:

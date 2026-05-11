@@ -14,11 +14,12 @@ GATE_SNIPE            = "snipe"
 # ── Reason codes — namespaced by gate to avoid collisions ─────────────────────
 
 # Scanner reject
-REASON_FINANCIAL_BRACKET_DISABLED = "financial_bracket_disabled"
-REASON_EXCLUDED                   = "excluded"
-REASON_CATEGORY                   = "category"
-REASON_HOURS                      = "hours"
-REASON_PRICE                      = "price"
+REASON_FINANCIAL_BRACKET_DISABLED   = "financial_bracket_disabled"
+REASON_LEGACY_WEATHER_SNIPE_DISABLED = "legacy_weather_snipe_disabled"
+REASON_EXCLUDED                     = "excluded"
+REASON_CATEGORY                     = "category"
+REASON_HOURS                        = "hours"
+REASON_PRICE                        = "price"
 
 # Confidence
 REASON_SOURCE_BELOW_GATE          = "source_below_gate"
