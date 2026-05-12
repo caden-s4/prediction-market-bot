@@ -35,6 +35,17 @@ Sorted by total P&L, most-bleeding first. Rows marked `low-power` have N<10.
 
 Window: trades with exit_ts >= 2026-05-05T05:58:33.712777+00:00
 
+**Note:** This window filters by exit_ts, not entry_ts. Trades exited via
+the Phase 15b retro-settlement sweep (commit 6c66e88 or successors)
+have exit_ts clustered in the sweep window even when the corresponding
+entries occurred weeks earlier. For WeatherSnipe (disabled at scanner
+per commit 36d79dc) and WeatherPeakSnipe, every exit in this 7-day view
+is retro-settled — these buckets reflect the settlement-sweep date, not
+current trading activity. For "what's currently active," check both
+exit_ts and entry_ts; if entry_ts is also in the window, the trade is
+current. Otherwise the bucket is showing historical positions that
+recently settled.
+
 | Source | Signal Class | N | Total P&L | WR | Loss% | Flat% | Avg | EV/$ | Note |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | WeatherSnipe | unknown | 34 | $-1594.47 | 2.9% | 97.1% | 0.0% | $-46.90 | -0.8168 |  |
