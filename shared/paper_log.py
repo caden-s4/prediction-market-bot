@@ -7,7 +7,7 @@ JSON object with an "event" field: "entry" or "exit".
 
 Entry fields:
   event, ts, market_id, platform, action, entry_price, size_usd,
-  gt_prob, gap, confidence, source, tier, question
+  gt_prob, gap, confidence, source, tier, question, signal_class
 
 Exit fields:
   event, ts, market_id, exit_price, pnl, pnl_pct,
@@ -50,6 +50,7 @@ class PaperTradeLog:
         tier: int,
         question: str,
         entry_time: Optional[float] = None,
+        signal_class: Optional[str] = None,
     ) -> None:
         """Append an entry event to the log."""
         import time as _time
@@ -72,6 +73,7 @@ class PaperTradeLog:
             "source": source,
             "tier": tier,
             "question": question,
+            "signal_class": signal_class,
         }
         self._append(record)
 
