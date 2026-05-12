@@ -3072,7 +3072,7 @@ class ResolutionBot:
                 tier=_tier,
                 question=market.question,
                 entry_time=self._positions[mid].entry_time,
-                signal_class=getattr(signal, "signal_class", "unknown"),
+                signal_class="baseline",
             )
         self._save_positions()
         _entry = limit_price
