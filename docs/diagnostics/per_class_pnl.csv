@@ -1,0 +1,13 @@
+window,source,signal_class,n,pnl_total_usd,win_rate,loss_rate,flat_rate,avg_pnl_usd,ev_per_dollar_risked,low_power
+all_time,WeatherSnipe,unknown,34,-1594.4659,0.029412,0.970588,0.000000,-46.8961,-0.816824,false
+all_time,Yahoo Finance/GC=F,unknown,40,-685.4366,0.000000,0.900000,0.100000,-17.1359,-0.459988,false
+all_time,WeatherPeakSnipe,unknown,4,-0.8879,0.000000,1.000000,0.000000,-0.2220,-0.044395,true
+all_time,Yahoo Finance/NQ=F,unknown,371,0.0000,0.000000,0.000000,1.000000,0.0000,0.000000,false
+all_time,Yahoo Finance/^TNX,unknown,56,0.0000,0.000000,0.000000,1.000000,0.0000,0.000000,false
+all_time,Yahoo Finance/ES=F,unknown,3,0.0000,0.000000,0.000000,1.000000,0.0000,0.000000,true
+all_time,ResolutionDetector/ConfirmedFinal,unknown,6,0.0000,0.000000,0.000000,1.000000,0.0000,0.000000,true
+all_time,FRED/GASREGCOVW,unknown,30,1146.9709,0.500000,0.466667,0.033333,38.2324,0.274885,false
+all_time,Yahoo Finance/CL=F,unknown,311,24024.3422,0.025723,0.289389,0.684887,77.2487,0.480899,false
+last_7d,WeatherSnipe,unknown,34,-1594.4659,0.029412,0.970588,0.000000,-46.8961,-0.816824,false
+last_7d,WeatherPeakSnipe,unknown,4,-0.8879,0.000000,1.000000,0.000000,-0.2220,-0.044395,true
+last_7d,FRED/GASREGCOVW,unknown,29,1153.9983,0.517241,0.448276,0.034483,39.7930,0.939027,false
