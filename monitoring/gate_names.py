@@ -9,6 +9,8 @@ GATE_SCANNER_REJECT   = "scanner_reject"
 GATE_GT_ROUTING       = "gt_routing"
 GATE_CONFIDENCE       = "confidence"
 GATE_EXECUTOR_PRETRADE = "executor_pretrade"
+GATE_FILL_CAP         = "fill_cap"
+GATE_EXECUTOR_EXIT    = "executor_exit"
 GATE_SNIPE            = "snipe"
 
 # ── Reason codes — namespaced by gate to avoid collisions ─────────────────────
@@ -42,6 +44,9 @@ REASON_SERIES_CAP                         = "series_cap"
 REASON_EMPTY_BOOK_GHOST                   = "empty_book_ghost"
 REASON_EMPTY_BOOK_SNIPE                   = "empty_book_snipe"
 REASON_PERM_SKIP_CONFIDENCE_FAILURES      = "perm_skip_confidence_failures"
+
+# Executor exit (trader-initiated exit blocked by book state)
+REASON_BOOK_INSUFFICIENT_ON_EXIT  = "book_insufficient_on_exit"
 
 # Snipe
 REASON_NO_SIGNAL                  = "no_signal"

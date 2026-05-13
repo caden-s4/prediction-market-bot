@@ -116,6 +116,9 @@ def _make_bot(
     bot.place_snipe_trade = types.MethodType(
         ResolutionBot.place_snipe_trade, bot,
     )
+    bot._walk_entry_book = types.MethodType(
+        ResolutionBot._walk_entry_book, bot,
+    )
     return bot
 
 

@@ -69,27 +69,76 @@ class OrderBook:
             return (ask + bid) / 2.0
         return ask or bid
 
-    def slippage_adjusted_price(self, side: Side, size_usd: float) -> float:
+    def slippage_adjusted_price(self, side: Side, size_usd: float) -> "FillResult":
         """
-        Estimate the volume-weighted average fill price for a given USD notional,
-        accounting for order-book depth.  Returns the ask/bid price if depth
-        exceeds size (no slippage).
+        Walk the book level-by-level for the requested side and clamp at
+        exhausted depth.  Returns a FillResult describing how much actually
+        filled, the volume-weighted average price across consumed levels, the
+        number of levels touched, and whether the request was clamped.
+
+        Side semantics:
+          Side.YES → walk yes_asks ascending (cheapest seller first; buying YES)
+          Side.NO  → walk yes_bids descending (highest bidder first; selling
+                     YES is equivalent to buying NO)
+
+        Units: size_usd and level.size are interpreted in the same units; the
+        existing convention (matched by the legacy stage2 pipeline and the
+        gap-detector calls) treats them as USD-equivalent depth.
+
+        Edge cases:
+          - Empty book on the requested side → FillResult(0.0, 0.0, 0, True).
+          - size_usd <= 0 → FillResult(0.0, 0.0, 0, False) (trivially full).
+          - Requested size exceeds total depth → fills everything available,
+            clamped=True. Residual is NOT charged at the worst-level price
+            (that was the historical over-fill bug).
         """
-        levels = self.yes_asks if side == Side.YES else list(reversed(self.yes_bids))
+        if size_usd <= 0:
+            return FillResult(filled_size_usd=0.0, vwap=0.0,
+                              levels_consumed=0, clamped=False)
+
+        # Asks are stored ascending (best ask first); bids are stored descending
+        # (best bid first). Either walk in natural order — best-priced first.
+        levels = self.yes_asks if side == Side.YES else self.yes_bids
+        if not levels:
+            return FillResult(filled_size_usd=0.0, vwap=0.0,
+                              levels_consumed=0, clamped=True)
+
         remaining = size_usd
         total_cost = 0.0
+        filled = 0.0
+        consumed = 0
         for level in levels:
-            available_usd = level.size
-            fill = min(remaining, available_usd)
-            total_cost += fill * level.price
-            remaining -= fill
             if remaining <= 0:
                 break
-        if remaining > 0:
-            # Not enough depth; fill the rest at worst level price
-            last_price = levels[-1].price if levels else 1.0
-            total_cost += remaining * last_price
-        return total_cost / size_usd
+            fill = min(remaining, level.size)
+            if fill <= 0:
+                continue
+            total_cost += fill * level.price
+            filled += fill
+            remaining -= fill
+            consumed += 1
+
+        clamped = remaining > 0
+        vwap = (total_cost / filled) if filled > 0 else 0.0
+        return FillResult(filled_size_usd=filled, vwap=vwap,
+                          levels_consumed=consumed, clamped=clamped)
+
+
+@dataclass(frozen=True)
+class FillResult:
+    """
+    Outcome of walking an order book against a requested fill.
+
+    filled_size_usd : how much of the request actually fills given book depth
+    vwap            : volume-weighted average YES price across consumed levels
+                      (0.0 when nothing filled)
+    levels_consumed : number of price levels touched (0 when empty / no fill)
+    clamped         : True iff requested size exceeded available depth
+    """
+    filled_size_usd: float
+    vwap: float
+    levels_consumed: int
+    clamped: bool
 
 
 @dataclass

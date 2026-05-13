@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,11 @@ from typing import Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PATH = "data/runtime/ghost_trades.jsonl"
+
+# Optional verification tag stamped into every JSONL record when set in env.
+# Convention: set BOT_VERIFICATION_TAG before a --once cycle to make that
+# cycle's records identifiable for after-the-fact filtering. Unset → no field.
+_VERIFICATION_TAG_ENV = "BOT_VERIFICATION_TAG"
 
 
 class PaperTradeLog:
@@ -142,6 +148,9 @@ class PaperTradeLog:
         self._append(record)
 
     def _append(self, record: dict) -> None:
+        tag = os.environ.get(_VERIFICATION_TAG_ENV)
+        if tag:
+            record["verification_tag"] = tag
         try:
             with self._path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")

@@ -105,6 +105,10 @@ class Stage2Market:
         )
 
         # ── Slippage-adjusted prices ───────────────────────────────────────
+        # TODO: slippage_adjusted_price() now returns FillResult, not float.
+        # This legacy pipeline is not imported by the active bot (verified
+        # 2026-05-13). If it is ever resurrected, read fill.vwap from the
+        # returned FillResult and check fill.clamped before trading.
         if order_book.yes_asks:
             analysis.slippage_yes = order_book.slippage_adjusted_price(
                 Side.YES, target_size_usd

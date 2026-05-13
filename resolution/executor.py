@@ -49,7 +49,7 @@ from data.sports.live_game_monitor import refresh_if_stale as refresh_sports_cac
 from data.sports.shock_detector import run_shock_detection
 from data.sports import resolution_detector as _res_det
 from data.sports.resolution_detector import ResolutionSignal, drain_ghost_exits as _drain_ghost_exits
-from data.markets.base import BaseMarketClient, Market, Order, Side
+from data.markets.base import BaseMarketClient, FillResult, Market, Order, OrderBook, Side
 from data.markets.kalshi import _is_game_market, _is_financial_bracket_market
 from data.markets.polymarket_ws import PolymarketWSManager
 from monitoring import gate_names as gn
@@ -314,6 +314,27 @@ def _is_us_market_hours() -> bool:
     if _now.weekday() >= 5:       # Saturday=5, Sunday=6
         return False
     return _time(9, 30) <= _now.time() <= _time(16, 0)
+
+
+# Map trader-initiated exit reasons to fill_cap path tags. Resolution exits
+# (game_final) and order cancels (unfilled_timeout) are exempt — they do not
+# consume book depth and never reach the fill cap.
+_FILL_CAP_EXIT_PATHS = {
+    "early_exit":   "exit_early",
+    "stop_loss":    "exit_stoploss",
+    "resolution":   "exit_approach",
+    "hard_stop":    "exit_hardstop",
+}
+
+
+def _book_top3_snapshot(ob: OrderBook, side: Side) -> List[dict]:
+    """Top 3 levels of the consumed book side as JSON-serializable dicts.
+    Used as `book_snapshot` in fill_cap gate event payloads."""
+    levels = ob.yes_asks if side == Side.YES else ob.yes_bids
+    return [
+        {"price": round(lvl.price, 4), "size": round(lvl.size, 2)}
+        for lvl in levels[:3]
+    ]
 
 
 @dataclass
@@ -2974,6 +2995,19 @@ class ResolutionBot:
             mid,
         )
 
+        # ── Walk-with-clamp: cap fill to live book depth ──────────────────────
+        # Replaces the best-level read with a level-by-level walk and clamps
+        # size_usd to what the book can actually absorb. Vaccine against the
+        # ghost-mode phantom-P&L class (e.g. 763-contract fills at 0.06¢ on
+        # KXAAAGASD where the book held a small fraction of that depth).
+        _fill = self._walk_entry_book(
+            ob_live, signal.action, size_usd, limit_price, mid, market, "entry_main",
+        )
+        if _fill is None:
+            return None
+        size_usd = _fill[0]
+        limit_price = _fill[1]
+
         # ── Extreme-price guard ───────���──────────────────────────────��───────
         # When the cost per contract is below MIN_EFFECTIVE_ENTRY_PRICE the
         # resulting contract count (size_usd / cost) explodes, creating
@@ -3268,6 +3302,17 @@ class ResolutionBot:
             )
             return None
 
+        # ── Walk-with-clamp: cap fill to live book depth ──────────────────────
+        # Snipe path reaches this only when ob_live is non-None and limit_price
+        # is set (empty-book SKIP_SNIPE branches at the top return early).
+        _fill = self._walk_entry_book(
+            ob_live, signal.action, size_usd, limit_price, mid, market, "entry_snipe",
+        )
+        if _fill is None:
+            return None
+        size_usd = _fill[0]
+        limit_price = _fill[1]
+
         # Per-series exposure cap (same logic as _try_execute).
         series_root = _series_root(mid)
         if series_root is not None:
@@ -3411,6 +3456,258 @@ class ResolutionBot:
 
         self._try_execute(signal)
         return True
+
+    # ── Fill-cap (walk-with-clamp) ────────────────────────────────────────────
+
+    def _walk_entry_book(
+        self,
+        ob_live: Optional[OrderBook],
+        action: str,
+        size_usd: float,
+        requested_price: float,
+        mid: str,
+        market: Market,
+        path: str,
+    ) -> Optional[Tuple[float, float]]:
+        """Walk the live book for an entry; clamp size_usd to fillable depth.
+
+        Returns (clamped_size_usd, vwap_price) on success, or None when the
+        clamp drops the size below the $1 minimum (caller should abort).
+
+        Emits a fill_cap gate event in every case.  When ob_live is None
+        (force-test or game/bracket live-mode bypass), the call is a no-op:
+        the event records `no_book=True` and the requested size/price pass
+        through unchanged.
+        """
+        walk_side = Side.YES if action == "buy_yes" else Side.NO
+
+        if ob_live is None:
+            log_gate_event(
+                ticker=mid,
+                gate=gn.GATE_FILL_CAP,
+                decision="full",
+                platform=market.platform,
+                extra={
+                    "path": path,
+                    "action": action,
+                    "requested_size_usd": round(size_usd, 2),
+                    "filled_size_usd": round(size_usd, 2),
+                    "requested_price": round(requested_price, 4),
+                    "filled_vwap": round(requested_price, 4),
+                    "levels_consumed": 0,
+                    "clamped": False,
+                    "no_book": True,
+                    "book_snapshot": [],
+                },
+            )
+            return size_usd, requested_price
+
+        fill = ob_live.slippage_adjusted_price(walk_side, size_usd)
+        log_gate_event(
+            ticker=mid,
+            gate=gn.GATE_FILL_CAP,
+            decision="clamp" if fill.clamped else "full",
+            platform=market.platform,
+            extra={
+                "path": path,
+                "action": action,
+                "requested_size_usd": round(size_usd, 2),
+                "filled_size_usd": round(fill.filled_size_usd, 2),
+                "requested_price": round(requested_price, 4),
+                "filled_vwap": round(fill.vwap, 4),
+                "levels_consumed": fill.levels_consumed,
+                "clamped": fill.clamped,
+                "book_snapshot": _book_top3_snapshot(ob_live, walk_side),
+            },
+        )
+
+        if fill.filled_size_usd < 1.0:
+            logger.info(
+                "ResolutionBot: SKIP %s — fill_cap clamp $%.2f → $%.2f below "
+                "$1 minimum (action=%s book thin)",
+                mid, size_usd, fill.filled_size_usd, action,
+            )
+            return None
+
+        clamped_size = round(fill.filled_size_usd, 2)
+        if fill.clamped:
+            logger.info(
+                "ResolutionBot: FILL_CAP_CLAMP %s %s requested=$%.2f filled=$%.2f "
+                "vwap=%.4f levels=%d (was limit=%.4f)",
+                mid, action, size_usd, clamped_size, fill.vwap,
+                fill.levels_consumed, requested_price,
+            )
+        return clamped_size, fill.vwap
+
+    def _apply_fill_cap_exit(
+        self,
+        rec: "TradeRecord",
+        exit_reason: str,
+        capture: Optional[float] = None,
+        dynamic_exit_threshold: Optional[float] = None,
+        exit_was_decisive_gt: bool = False,
+    ) -> int:
+        """Walk the opposite-side book and dispatch full / partial / block.
+
+        Returns 1 when the position fully closed, 0 when it stayed open
+        (partial fill or book-insufficient block).  Block events use the
+        executor_exit gate; partial and full fills emit fill_cap events.
+        """
+        mid = rec.market_id
+        exit_path = _FILL_CAP_EXIT_PATHS.get(exit_reason, "exit_unknown")
+        # Exit walks the opposite side to entry.
+        exit_side = Side.NO if rec.action == "buy_yes" else Side.YES
+        ob_live = self._get_live_book(rec.market)
+
+        if ob_live is None:
+            log_gate_event(
+                ticker=mid,
+                gate=gn.GATE_EXECUTOR_EXIT,
+                decision="skip",
+                reason=gn.REASON_BOOK_INSUFFICIENT_ON_EXIT,
+                platform=rec.platform,
+                extra={
+                    "exit_reason": exit_reason,
+                    "position_size_usd": round(rec.size_usd, 2),
+                    "action": rec.action,
+                    "no_book": True,
+                },
+            )
+            logger.info(
+                "ResolutionBot: BLOCK_EXIT %s — book unavailable; position "
+                "held (size=$%.2f reason=%s)",
+                mid, rec.size_usd, exit_reason,
+            )
+            return 0
+
+        fill = ob_live.slippage_adjusted_price(exit_side, rec.size_usd)
+
+        if fill.filled_size_usd <= 0:
+            log_gate_event(
+                ticker=mid,
+                gate=gn.GATE_EXECUTOR_EXIT,
+                decision="skip",
+                reason=gn.REASON_BOOK_INSUFFICIENT_ON_EXIT,
+                platform=rec.platform,
+                extra={
+                    "exit_reason": exit_reason,
+                    "position_size_usd": round(rec.size_usd, 2),
+                    "action": rec.action,
+                    "book_snapshot": _book_top3_snapshot(ob_live, exit_side),
+                },
+            )
+            logger.info(
+                "ResolutionBot: BLOCK_EXIT %s — no depth on %s side; position "
+                "held (size=$%.2f reason=%s)",
+                mid, exit_side.value, rec.size_usd, exit_reason,
+            )
+            return 0
+
+        # Emit fill_cap for every reachable exit (clamped or not).
+        log_gate_event(
+            ticker=mid,
+            gate=gn.GATE_FILL_CAP,
+            decision="clamp" if fill.clamped else "full",
+            platform=rec.platform,
+            extra={
+                "path": exit_path,
+                "action": rec.action,
+                "exit_reason": exit_reason,
+                "requested_size_usd": round(rec.size_usd, 2),
+                "filled_size_usd": round(fill.filled_size_usd, 2),
+                "filled_vwap": round(fill.vwap, 4),
+                "levels_consumed": fill.levels_consumed,
+                "clamped": fill.clamped,
+                "remaining_size_usd": round(
+                    max(0.0, rec.size_usd - fill.filled_size_usd), 2,
+                ),
+                "book_snapshot": _book_top3_snapshot(ob_live, exit_side),
+            },
+        )
+
+        if not fill.clamped:
+            # Full exit — compute pnl at the realistic vwap, then dispatch.
+            if rec.action == "buy_yes":
+                nc = rec.size_usd / rec.entry_price if rec.entry_price > 1e-9 else 0.0
+                pnl = (fill.vwap - rec.entry_price) * nc
+            else:
+                no_entry = 1.0 - rec.entry_price
+                nc = rec.size_usd / no_entry if no_entry > 1e-9 else 0.0
+                pnl = (rec.entry_price - fill.vwap) * nc
+            self._exit_position(
+                mid, pnl, current_price=fill.vwap,
+                capture=capture,
+                dynamic_exit_threshold=dynamic_exit_threshold,
+                exit_reason=exit_reason,
+                exit_was_decisive_gt=exit_was_decisive_gt,
+            )
+            return 1
+
+        # Partial exit — bank the filled portion, keep remainder open.
+        self._partial_exit(rec, fill.filled_size_usd, fill.vwap, exit_reason)
+        return 0
+
+    def _partial_exit(
+        self,
+        rec: "TradeRecord",
+        filled_size_usd: float,
+        exit_vwap: float,
+        exit_reason: str,
+    ) -> None:
+        """Exit the filled portion of a position at exit_vwap; keep the
+        remainder open at the original entry_price.  Bankroll is released
+        with the partial realized pnl and re-reserved for the remainder.
+        """
+        mid = rec.market_id
+        if filled_size_usd <= 0 or filled_size_usd >= rec.size_usd:
+            return  # caller routed wrong; full or zero exit belongs elsewhere
+
+        if rec.action == "buy_yes":
+            nc_total = rec.size_usd / rec.entry_price if rec.entry_price > 1e-9 else 0.0
+        else:
+            no_entry = 1.0 - rec.entry_price
+            nc_total = rec.size_usd / no_entry if no_entry > 1e-9 else 0.0
+        filled_fraction = filled_size_usd / rec.size_usd
+        nc_filled = nc_total * filled_fraction
+        if rec.action == "buy_yes":
+            pnl = (exit_vwap - rec.entry_price) * nc_filled
+        else:
+            pnl = (rec.entry_price - exit_vwap) * nc_filled
+
+        remaining_size = round(rec.size_usd - filled_size_usd, 2)
+
+        # Bankroll: release full reservation with partial pnl, re-reserve the
+        # remainder. release() also adjusts _total_usd by realized pnl, which
+        # is the right semantics — the filled portion's P&L is realized.
+        self._bankroll.release(mid, realized_pnl_usd=pnl)
+        residual_flushed = False
+        if remaining_size >= 1.0 and self._bankroll.reserve(mid, remaining_size):
+            rec.size_usd = remaining_size
+            self._save_positions()
+        else:
+            # Remainder too small (or bankroll re-reserve failed); flush it.
+            self._positions.pop(mid, None)
+            self._save_positions()
+            residual_flushed = True
+
+        if self._paper_log is not None:
+            hold_min = (time.time() - rec.entry_time) / 60.0
+            pnl_pct = pnl / filled_size_usd if filled_size_usd > 0 else 0.0
+            self._paper_log.log_exit(
+                market_id=mid,
+                exit_price=exit_vwap,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                exit_reason=f"{exit_reason}_partial",
+                hold_duration_minutes=hold_min,
+            )
+
+        logger.info(
+            "ResolutionBot: PARTIAL_EXIT %s reason=%s filled=$%.2f at vwap=%.4f "
+            "pnl=$%.2f remaining=$%.2f%s",
+            mid, exit_reason, filled_size_usd, exit_vwap, pnl, remaining_size,
+            " (residual flushed)" if residual_flushed else "",
+        )
 
     def _place_order(
         self, market: Market, signal: GapSignal, size_usd: float, fee: float,
@@ -3711,34 +4008,23 @@ class ResolutionBot:
             if move < FINANCIAL_HARD_STOP_THRESHOLD:
                 continue
 
-            # Compute realised P&L using correct Kalshi contract economics.
-            # For buy_yes: entry_price is the YES price paid per contract.
-            # For buy_no:  entry_price is the YES BID; NO cost = 1 - entry_price.
-            #   P&L = (entry_YES - current_YES) × nc — negative when YES rises
-            #   (adverse for buy_no), which is the correct loss sign.
-            if rec.action == "buy_yes":
-                nc = rec.size_usd / rec.entry_price if rec.entry_price > 1e-9 else 0.0
-                pnl = (current_price - rec.entry_price) * nc
-            else:
-                no_entry = 1.0 - rec.entry_price
-                nc = rec.size_usd / no_entry if no_entry > 1e-9 else 0.0
-                pnl = (rec.entry_price - current_price) * nc
-
             src_name = rec.signal.ground_truth_result.source_name  # guaranteed non-None here
             logger.warning(
                 "ResolutionBot: FINANCIAL_HARD_STOP %s [%s] — "
-                "entry=%.4f current=%.4f move=%.4f >= threshold=%.4f "
-                "contracts=%.2f pnl=$%.2f",
+                "entry=%.4f current=%.4f move=%.4f >= threshold=%.4f size=$%.2f",
                 mid, src_name,
                 rec.entry_price, current_price, move, FINANCIAL_HARD_STOP_THRESHOLD,
-                nc, pnl,
+                rec.size_usd,
             )
-            self._exit_position(mid, pnl, current_price=current_price,
-                                exit_reason="hard_stop")
-            exits += 1
-            # Prevent immediate re-entry: 30-min cooldown on this exact market.
-            _set_orderbook_cooldown(mid, minutes=30)
-            # Track consecutive hard stops; perm-skip after 3.
+            # Walk-with-clamp dispatch: full exit at vwap, partial-fill keeps
+            # remainder open, book-insufficient blocks the exit entirely.
+            fully_exited = self._apply_fill_cap_exit(rec, exit_reason="hard_stop")
+            exits += fully_exited
+            if fully_exited:
+                # Prevent immediate re-entry: 30-min cooldown on this exact market.
+                _set_orderbook_cooldown(mid, minutes=30)
+            # Track consecutive hard-stop triggers regardless of fill outcome.
+            # A partial fill is still a hard-stop event; three in a row → perm-skip.
             _hs_count = self._hard_stop_count.get(mid, 0) + 1
             self._hard_stop_count[mid] = _hs_count
             if _hs_count >= 3:
@@ -3790,20 +4076,21 @@ class ResolutionBot:
                     DecayAction.STOP_LOSS:     "stop_loss",
                     DecayAction.APPROACH_EXIT: "resolution",
                 }.get(decision.action, "unknown")
-                # exit_price always reflects the live market price at the moment
-                # of exit.  Settlement-prediction semantics are tracked separately
-                # via exit_was_decisive_gt to keep records auditable even when GT
-                # is stale or wrong.
-                _exit_price = decision.position.current_price
-                self._exit_position(
-                    mid, decision.current_gain_usd,
-                    current_price=_exit_price,
+                # Walk-with-clamp dispatch: full exit fills at the live-book
+                # VWAP, partial fills bank the filled portion and keep the rest
+                # open for the next cycle, and a fully-empty exit side blocks
+                # the exit entirely (executor_exit:book_insufficient_on_exit).
+                rec = self._positions.get(mid)
+                if rec is None:
+                    continue
+                fully_exited = self._apply_fill_cap_exit(
+                    rec,
+                    exit_reason=_decay_reason,
                     capture=decision.capture_ratio,
                     dynamic_exit_threshold=decision.dynamic_exit_threshold,
-                    exit_reason=_decay_reason,
                     exit_was_decisive_gt=decision.decisive_gt,
                 )
-                exits += 1
+                exits += fully_exited
         return exits
 
     def _exit_ghost_positions_for_finals(self, ghost_exits: list) -> int:

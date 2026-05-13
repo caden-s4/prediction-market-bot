@@ -25,6 +25,8 @@ PIPELINE_ORDER = [
     "gt_routing",
     "confidence",
     "executor_pretrade",
+    "fill_cap",
+    "executor_exit",
     "snipe",
 ]
 
