@@ -760,6 +760,7 @@ class ResolutionBot:
             )
             exits = self._monitor_positions()
             summary["exits_triggered"] = exits
+            summary["positions_monitored"] = len(self._positions)
             elapsed = (time.monotonic() - cycle_start) * 1000
             summary["cycle_ms"] = round(elapsed)
             self._pipeline_stage = "idle"
@@ -778,6 +779,7 @@ class ResolutionBot:
             )
             exits = self._monitor_positions()
             summary["exits_triggered"] = exits
+            summary["positions_monitored"] = len(self._positions)
             elapsed = (time.monotonic() - cycle_start) * 1000
             summary["cycle_ms"] = round(elapsed)
             self._pipeline_stage = "idle"
@@ -1280,6 +1282,9 @@ class ResolutionBot:
         summary["registry"] = self._registry.stats()
         summary["sports_games_active"] = _sports_games_active
         summary["gt_coverage"] = self._last_gt_coverage
+        # Refresh post-cycle so ghost-reset, sports-final exits, and decay
+        # exits that ran during the cycle are reflected in the printed count.
+        summary["positions_monitored"] = len(self._positions)
 
         elapsed = (time.monotonic() - cycle_start) * 1000
         summary["cycle_ms"] = round(elapsed)
