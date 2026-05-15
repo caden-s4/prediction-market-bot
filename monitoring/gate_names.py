@@ -17,6 +17,7 @@ GATE_SNIPE            = "snipe"
 
 # Scanner reject
 REASON_FINANCIAL_BRACKET_DISABLED   = "financial_bracket_disabled"
+REASON_ECONOMIC_BRACKET_DISABLED    = "economic_bracket_disabled"
 REASON_LEGACY_WEATHER_SNIPE_DISABLED = "legacy_weather_snipe_disabled"
 REASON_EXCLUDED                     = "excluded"
 REASON_CATEGORY                     = "category"

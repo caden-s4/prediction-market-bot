@@ -117,6 +117,21 @@ _FINANCIAL_BRACKET_PREFIXES: tuple = (
     "KXWTI",         # CL=F (WTI Crude) — Yahoo, TD blocks CL1!. Matches daily KXWTI-* and weekly KXWTIW-*
 )
 
+# ── Economic bracket disable switch (KXAAAGAS* — Phase Gas-Disable) ───────────
+# KXAAAGASD / KXAAAGASW are routed by EconomicDataSource to FRED GASREGCOVW
+# (EIA Regular Conventional weekly), but Kalshi settles these on AAA's
+# all-formulations daily/weekly national average. Formulation mismatch on the
+# weekly; formulation plus cadence mismatch on the daily. The LARGE_DIVERGENCE
+# gate caught 918 phantom-edge trades on these series in a 45h gate_funnel
+# window (KXAAAGASW 556x, KXAAAGASD 322x). Disabling at scanner cuts CPU spend
+# on routing, gap detection, and confidence scoring upstream of that gate.
+# EconomicDataSource and its GASREGCOVW routing remain unchanged.
+DISABLE_ECONOMIC_BRACKETS: bool = True
+_ECONOMIC_BRACKET_DISABLED_PREFIXES: tuple = (
+    "KXAAAGASD",     # AAA daily national average — wrong cadence + formulation
+    "KXAAAGASW",     # AAA weekly national average — wrong formulation
+)
+
 # ── Legacy weather_snipe disable switch (Phase 15e) ───────────────────────────
 # 27 trades over Phase 15b + 15b-bis settled at 1W-26L / -$1,521.19. Paired-bet
 # logic fires near-max premium on both sides of a bracket, guaranteeing losses
@@ -787,6 +802,10 @@ class ResolutionScanner:
             market.market_id.startswith(p) for p in _FINANCIAL_BRACKET_PREFIXES
         ):
             return "financial_bracket_disabled"
+        if DISABLE_ECONOMIC_BRACKETS and any(
+            market.market_id.startswith(p) for p in _ECONOMIC_BRACKET_DISABLED_PREFIXES
+        ):
+            return gn.REASON_ECONOMIC_BRACKET_DISABLED
         if market.category.lower() in EXCLUDED_CATEGORIES or market.is_weather_market():
             return "category"
         hours_left = market.hours_to_resolution   # uses fixed timezone-aware property
