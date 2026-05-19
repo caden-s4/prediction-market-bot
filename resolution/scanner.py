@@ -483,6 +483,10 @@ class ResolutionScanner:
 
         _ws_hits = [0]
         _rest_fallbacks = [0]
+        # Per-fallback reason counters (Phase 2B-1, scoped Kalshi-only to mirror
+        # _rest_fallbacks). For each Kalshi market that takes the REST fallback
+        # path, exactly one bucket increments — sum(_rest_reasons) == _rest_fallbacks.
+        _rest_reasons = {"no_ws_entry": 0, "stale_age": 0, "empty_book": 0, "ws_disabled": 0}
         _counter_lock = threading.Lock()
 
         def _refresh_one(market: Market) -> Market:
@@ -496,10 +500,23 @@ class ResolutionScanner:
 
                 # Orderbook resolution: WS cache first (Kalshi only), REST fallback.
                 ws_book = None
-                if self._kalshi_ws is not None and market.platform == "kalshi":
-                    ws_age = self._kalshi_ws.get_book_age(market.market_id)
-                    if ws_age is not None and ws_age < 30.0:
-                        ws_book = self._kalshi_ws.get_book(market.market_id)
+                rest_reason: Optional[str] = None  # set only for Kalshi markets
+                if market.platform == "kalshi":
+                    if self._kalshi_ws is None:
+                        rest_reason = "ws_disabled"
+                    else:
+                        ws_age = self._kalshi_ws.get_book_age(market.market_id)
+                        if ws_age is None:
+                            rest_reason = "no_ws_entry"
+                        elif ws_age >= 30.0:
+                            rest_reason = "stale_age"
+                        else:
+                            ws_book = self._kalshi_ws.get_book(market.market_id)
+                            if ws_book is None or ws_book.mid_price is None:
+                                # Includes the race where the entry was evicted between
+                                # get_book_age() and get_book(), and the common case of
+                                # a cached snapshot with empty bid/ask levels.
+                                rest_reason = "empty_book"
 
                 if ws_book is not None and ws_book.mid_price is not None:
                     _check_ws_rest_agreement(ws_book.mid_price, fresh.yes_price, market.market_id)
@@ -517,6 +534,8 @@ class ResolutionScanner:
                     if market.platform == "kalshi":
                         with _counter_lock:
                             _rest_fallbacks[0] += 1
+                            if rest_reason is not None:
+                                _rest_reasons[rest_reason] += 1
 
                 return fresh
             except Exception as exc:
@@ -532,8 +551,11 @@ class ResolutionScanner:
         if TIER_REFRESH_MAX_WORKERS <= 1 or len(markets) == 1:
             result = [_refresh_one(m) for m in markets]
             logger.info(
-                "ResolutionScanner: refresh book sources: ws=%d rest=%d total=%d",
+                "ResolutionScanner: refresh book sources: ws=%d rest=%d total=%d "
+                "(rest: no_entry=%d stale=%d empty=%d disabled=%d)",
                 _ws_hits[0], _rest_fallbacks[0], _ws_hits[0] + _rest_fallbacks[0],
+                _rest_reasons["no_ws_entry"], _rest_reasons["stale_age"],
+                _rest_reasons["empty_book"], _rest_reasons["ws_disabled"],
             )
             return result
 
@@ -558,8 +580,11 @@ class ResolutionScanner:
                     )
                     refreshed[idx] = markets[idx]
         logger.info(
-            "ResolutionScanner: refresh book sources: ws=%d rest=%d total=%d",
+            "ResolutionScanner: refresh book sources: ws=%d rest=%d total=%d "
+            "(rest: no_entry=%d stale=%d empty=%d disabled=%d)",
             _ws_hits[0], _rest_fallbacks[0], _ws_hits[0] + _rest_fallbacks[0],
+            _rest_reasons["no_ws_entry"], _rest_reasons["stale_age"],
+            _rest_reasons["empty_book"], _rest_reasons["ws_disabled"],
         )
         return refreshed
 
