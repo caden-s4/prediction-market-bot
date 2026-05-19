@@ -112,8 +112,15 @@ class KalshiWebSocket:
         self._books: Dict[str, _BookEntry] = {}
         self._tickers: Dict[str, TickerSnapshot] = {}
 
-        # Subscription state.
+        # Subscription state.  Server-authoritative: only mutated on confirmed acks.
         self._subscribed: Set[str] = set()
+        # Tickers for which a subscribe frame has been sent but no ok ack has
+        # arrived yet — prevents duplicate subscribes during the ack window.
+        self._subscribing_in_flight: Set[str] = set()
+        # Kalshi v2 unsubscribe requires params.sids (array); track ticker -> sid
+        # from ok/subscribed acks so we can address the right server-side sub.
+        self._ticker_to_sid: Dict[str, Any] = {}
+        self._sid_to_tickers: Dict[Any, Set[str]] = {}
         self._sub_lock = threading.Lock()
 
         # Command queue (main thread -> WS thread).
@@ -149,35 +156,40 @@ class KalshiWebSocket:
         new_tickers: list[str] = []
         with self._sub_lock:
             for t in market_tickers:
-                if t not in self._subscribed:
-                    self._subscribed.add(t)
-                    new_tickers.append(t)
+                if t in self._subscribed or t in self._subscribing_in_flight:
+                    continue
+                # In-flight only; _subscribed is populated by the ok ack handler.
+                self._subscribing_in_flight.add(t)
+                new_tickers.append(t)
         if not new_tickers:
             return
         self._cmd_queue.put(
             _WsCommand("subscribe", "orderbook_delta", new_tickers)
         )
-        logger.info("Queued subscribe for %d tickers (already_had=%d)", len(new_tickers), len(self._subscribed) - len(new_tickers))
+        logger.info(
+            "Queued subscribe for %d tickers (confirmed=%d in_flight=%d)",
+            len(new_tickers), len(self._subscribed), len(self._subscribing_in_flight),
+        )
 
     def unsubscribe(self, market_tickers: list[str]) -> None:
-        """Unsubscribe from the orderbook_delta channel."""
-        removed: list[str] = []
+        """Queue an unsubscribe for confirmed tickers.
+
+        _subscribed and the book caches are NOT mutated here — they are cleared
+        only when the server acks the unsubscribe (audit §8.2). If the server
+        rejects the unsubscribe, state is preserved so the next sync retries.
+        """
+        to_send: list[str] = []
         with self._sub_lock:
             for t in market_tickers:
+                # Only unsubscribe tickers the server has confirmed for us.
                 if t in self._subscribed:
-                    self._subscribed.discard(t)
-                    removed.append(t)
-        if not removed:
+                    to_send.append(t)
+        if not to_send:
             return
         self._cmd_queue.put(
-            _WsCommand("unsubscribe", "orderbook_delta", removed)
+            _WsCommand("unsubscribe", "orderbook_delta", to_send)
         )
-        # Clean up cached data.
-        with self._lock:
-            for t in removed:
-                self._books.pop(t, None)
-                self._tickers.pop(t, None)
-        logger.info("Queued unsubscribe for %d tickers", len(removed))
+        logger.info("Queued unsubscribe for %d tickers", len(to_send))
 
     def sync_subscriptions(self, target_tickers: list[str]) -> None:
         """Bring WS subscriptions in sync with *target_tickers*.
@@ -188,9 +200,13 @@ class KalshiWebSocket:
         """
         target = set(target_tickers)
         with self._sub_lock:
-            currently = set(self._subscribed)
-        new_subs = target - currently
-        to_remove = currently - target
+            confirmed = set(self._subscribed)
+            in_flight = set(self._subscribing_in_flight)
+        # Skip subscribe for anything already confirmed OR awaiting an ack.
+        new_subs = target - confirmed - in_flight
+        # Only unsubscribe tickers the server has confirmed; in-flight ones will
+        # be reconciled on the next cycle once their ack arrives.
+        to_remove = confirmed - target
         if new_subs:
             self.subscribe(list(new_subs))
         if to_remove:
@@ -352,7 +368,14 @@ class KalshiWebSocket:
     async def _resubscribe_all(self, ws: Any) -> None:
         """Re-subscribe to all tracked markets after reconnect, in 100-ticker chunks."""
         with self._sub_lock:
-            tickers = list(self._subscribed)
+            # On reconnect server state is gone — old sids are stale. Move all
+            # confirmed tickers back to in-flight; they'll be re-confirmed by
+            # new ok acks under fresh sids.
+            tickers = list(self._subscribed | self._subscribing_in_flight)
+            self._subscribed.clear()
+            self._subscribing_in_flight.update(tickers)
+            self._ticker_to_sid.clear()
+            self._sid_to_tickers.clear()
         if not tickers:
             return
         for i in range(0, len(tickers), 100):
@@ -405,9 +428,11 @@ class KalshiWebSocket:
                         await self._send_subscribe(ws, cmd.tickers[i:i + 100])
                         await asyncio.sleep(0.05)
                 elif cmd.action == "unsubscribe":
-                    for ticker in cmd.tickers:
-                        await self._send_unsubscribe(ws, ticker)
-                        await asyncio.sleep(0.01)
+                    # Batch unsubscribes 100/frame to mirror subscribe batching
+                    # (audit §8.4); v2 sids payload supports a list per frame.
+                    for i in range(0, len(cmd.tickers), 100):
+                        await self._send_unsubscribe(ws, cmd.tickers[i:i + 100])
+                        await asyncio.sleep(0.05)
 
     # ── WS frame helpers ─────────────────────────────────────────────────────
 
@@ -424,18 +449,40 @@ class KalshiWebSocket:
         await ws.send(json.dumps(msg))
         logger.debug("WS subscribe sent: %d tickers", len(tickers))
 
-    async def _send_unsubscribe(self, ws: Any, ticker: str) -> None:
-        """Send a single unsubscribe frame for *ticker* on the orderbook_delta channel."""
+    async def _send_unsubscribe(self, ws: Any, tickers: List[str]) -> None:
+        """Send one unsubscribe frame for a chunk of *tickers* via Kalshi v2 sids.
+
+        v2 requires ``params.sids`` (array of subscription IDs), not
+        ``market_ticker``. Tickers without a known sid are skipped — the next
+        sync cycle will retry them once an ack maps the sid.
+        """
+        sids: List[Any] = []
+        seen_sids: set = set()
+        with self._sub_lock:
+            for t in tickers:
+                sid = self._ticker_to_sid.get(t)
+                if sid is None:
+                    logger.debug(
+                        "WS unsubscribe skipped: no sid known for ticker %s", t,
+                    )
+                    continue
+                # De-dupe: if the server bound several tickers to one sid,
+                # send the sid once.
+                if sid in seen_sids:
+                    continue
+                seen_sids.add(sid)
+                sids.append(sid)
+        if not sids:
+            return
         msg = {
             "id": self._next_id(),
             "cmd": "unsubscribe",
             "params": {
-                "channels": ["orderbook_delta"],
-                "market_ticker": ticker,
+                "sids": sids,
             },
         }
         await ws.send(json.dumps(msg))
-        logger.debug("WS unsubscribe sent: %s", ticker)
+        logger.debug("WS unsubscribe sent: %d sids", len(sids))
 
     # ── Message processing ───────────────────────────────────────────────────
 
@@ -454,20 +501,116 @@ class KalshiWebSocket:
             message = body.get("msg", body.get("message", data.get("message", "")))
             logger.warning("Kalshi WS error (code=%s): %s", code, message)
         elif msg_type == "ok":
-            # Server ack for each per-ticker subscribe command.  The msg.market_tickers
-            # field lists all currently subscribed tickers (cumulative).  Log at DEBUG
-            # only — this fires hundreds of times per cycle and is noisy at INFO.
-            n = len(data.get("msg", {}).get("market_tickers") or [])
-            logger.debug("WS ok id=%s sid=%s seq=%s subscribed_total=%d",
-                         data.get("id"), data.get("sid"), data.get("seq"), n)
+            # Server ack for each subscribe command. Extract sid + ticker(s) and
+            # move them from in-flight to confirmed; cache the sid for later
+            # unsubscribe (audit §A).
+            self._handle_sub_ack(data, source="ok")
         elif msg_type == "subscribed":
-            sid = data.get("msg", {}).get("sid", data.get("sid", "?"))
-            channel = data.get("msg", {}).get("channel", "?")
-            logger.info("WS session subscribed: channel=%s sid=%s", channel, sid)
+            # Session-level confirmation; same parse path as ok ack so any
+            # ticker info present is captured.
+            self._handle_sub_ack(data, source="subscribed")
         elif msg_type == "unsubscribed":
-            logger.info("WS unsubscribed ack: %s", data.get("msg", data))
+            self._handle_unsub_ack(data)
         else:
             logger.warning("WS unknown msg type=%s raw: %.200s", msg_type, data)
+
+    def _handle_sub_ack(self, data: dict, source: str) -> None:
+        """Process a subscribe-side ack (``ok`` or ``subscribed``).
+
+        Confirms in-flight tickers and records the ticker->sid mapping that
+        unsubscribes need (audit §A, §8.2). Only tickers currently in
+        ``_subscribing_in_flight`` are confirmed — defensive against cumulative
+        ack semantics where the server may echo previously-subscribed tickers.
+        """
+        msg_body = data.get("msg") if isinstance(data.get("msg"), dict) else {}
+        # sid may live at top level (ok acks observed in current code path) or
+        # nested under msg (subscribed acks). Try both.
+        sid = data.get("sid")
+        if sid is None:
+            sid = msg_body.get("sid")
+        tickers_in_ack: List[str] = []
+        raw_list = msg_body.get("market_tickers")
+        if isinstance(raw_list, list):
+            tickers_in_ack = [t for t in raw_list if isinstance(t, str)]
+        else:
+            single = msg_body.get("market_ticker")
+            if isinstance(single, str) and single:
+                tickers_in_ack = [single]
+
+        confirmed_now: List[str] = []
+        if sid is not None and tickers_in_ack:
+            with self._sub_lock:
+                for t in tickers_in_ack:
+                    if t in self._subscribing_in_flight:
+                        self._subscribing_in_flight.discard(t)
+                        self._subscribed.add(t)
+                        self._ticker_to_sid[t] = sid
+                        self._sid_to_tickers.setdefault(sid, set()).add(t)
+                        confirmed_now.append(t)
+
+        if source == "subscribed":
+            channel = msg_body.get("channel", "?")
+            logger.info(
+                "WS session subscribed: channel=%s sid=%s tickers=%d confirmed=%d",
+                channel, sid if sid is not None else "?",
+                len(tickers_in_ack), len(confirmed_now),
+            )
+        else:
+            logger.debug(
+                "WS ok id=%s sid=%s seq=%s tickers=%d confirmed=%d",
+                data.get("id"), sid, data.get("seq"),
+                len(tickers_in_ack), len(confirmed_now),
+            )
+
+    def _handle_unsub_ack(self, data: dict) -> None:
+        """Process an ``unsubscribed`` ack: clear state for affected tickers.
+
+        Accepts ack payloads keyed by ``sids`` / ``sid`` (preferred — matches
+        what we send) or ``market_tickers`` / ``market_ticker`` (defensive).
+        """
+        msg_body = data.get("msg") if isinstance(data.get("msg"), dict) else {}
+        sids_in_ack: List[Any] = []
+        raw_sids = msg_body.get("sids")
+        if isinstance(raw_sids, list):
+            sids_in_ack.extend(raw_sids)
+        elif msg_body.get("sid") is not None:
+            sids_in_ack.append(msg_body["sid"])
+
+        affected: Set[str] = set()
+        raw_list = msg_body.get("market_tickers")
+        if isinstance(raw_list, list):
+            for t in raw_list:
+                if isinstance(t, str):
+                    affected.add(t)
+        single = msg_body.get("market_ticker")
+        if isinstance(single, str) and single:
+            affected.add(single)
+
+        with self._sub_lock:
+            for sid in sids_in_ack:
+                tickers_for_sid = self._sid_to_tickers.pop(sid, set())
+                affected.update(tickers_for_sid)
+            for t in affected:
+                self._subscribed.discard(t)
+                self._subscribing_in_flight.discard(t)
+                old_sid = self._ticker_to_sid.pop(t, None)
+                if old_sid is not None:
+                    bucket = self._sid_to_tickers.get(old_sid)
+                    if bucket:
+                        bucket.discard(t)
+                        if not bucket:
+                            self._sid_to_tickers.pop(old_sid, None)
+
+        if affected:
+            with self._lock:
+                for t in affected:
+                    self._books.pop(t, None)
+                    self._tickers.pop(t, None)
+
+        logger.info(
+            "WS unsubscribed ack: sids=%d tickers=%d",
+            len(sids_in_ack), len(affected),
+        )
 
     def _handle_snapshot(self, data: dict) -> None:
         """Replace the full order book for a market from a snapshot message.
