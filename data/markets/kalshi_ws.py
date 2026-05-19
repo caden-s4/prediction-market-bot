@@ -449,8 +449,9 @@ class KalshiWebSocket:
         elif msg_type == "ticker":
             self._handle_ticker(data)
         elif msg_type == "error":
-            code = data.get("code", "?")
-            message = data.get("msg", data.get("message", ""))
+            body = data.get("msg") if isinstance(data.get("msg"), dict) else {}
+            code = body.get("code", data.get("code", "?"))
+            message = body.get("msg", body.get("message", data.get("message", "")))
             logger.warning("Kalshi WS error (code=%s): %s", code, message)
         elif msg_type == "ok":
             # Server ack for each per-ticker subscribe command.  The msg.market_tickers
