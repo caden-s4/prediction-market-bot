@@ -258,6 +258,13 @@ class _TriggerOutcome:
     # across cycles while a new obs has not yet arrived (METAR cadence is
     # ~hourly), so it is used as the dedup key for log emission below.
     trigger_obs_ts: Optional[datetime] = None
+    # Running extremum (max for high, min for low) over the local-day obs
+    # window at the moment the trigger condition was evaluated. Captured
+    # alongside observed_temp_f so the #6 bracket-source divergence audit
+    # can quantify how often the two values cross a bracket boundary.
+    # None when the trigger short-circuits before the running extremum is
+    # computed (insufficient_obs).
+    running_peak_f: Optional[float] = None
 
 
 def _within_trigger_window(now_utc: datetime, cfg: _CityConfig, direction: str) -> bool:
@@ -307,6 +314,7 @@ def _evaluate_trigger(
         return _TriggerOutcome(
             False, observed_temp_f=cur_temp,
             reason=f"ext_too_recent({elapsed_min:.0f}min<{MONOTONIC_MIN_DURATION_MIN})",
+            running_peak_f=ext_temp,
         )
 
     # C: current obs is past the extremum by ≥1°F.
@@ -314,6 +322,7 @@ def _evaluate_trigger(
         return _TriggerOutcome(
             False, observed_temp_f=cur_temp,
             reason=f"not_past_peak(cur={cur_temp:.1f},ext={ext_temp:.1f})",
+            running_peak_f=ext_temp,
         )
 
     # D: post-peak monotonicity (no bounce >1°F from post-peak running ext).
@@ -327,6 +336,7 @@ def _evaluate_trigger(
                 return _TriggerOutcome(
                     False, observed_temp_f=cur_temp,
                     reason=f"rebound(post_min={post_ext:.1f},obs={t:.1f})",
+                    running_peak_f=ext_temp,
                 )
         else:
             if post_ext is None or t > post_ext:
@@ -335,9 +345,13 @@ def _evaluate_trigger(
                 return _TriggerOutcome(
                     False, observed_temp_f=cur_temp,
                     reason=f"rebound(post_max={post_ext:.1f},obs={t:.1f})",
+                    running_peak_f=ext_temp,
                 )
 
-    return _TriggerOutcome(fired=True, observed_temp_f=cur_temp, trigger_obs_ts=cur_ts)
+    return _TriggerOutcome(
+        fired=True, observed_temp_f=cur_temp, trigger_obs_ts=cur_ts,
+        running_peak_f=ext_temp,
+    )
 
 
 def _filter_to_local_day(
@@ -582,6 +596,10 @@ def evaluate_event_signals(
 
     observed_temp_f = outcome.observed_temp_f
     assert observed_temp_f is not None  # fired implies observed temp set
+    # Captured alongside observed_temp for the #6 bracket-source divergence
+    # audit. fired=True path always sets running_peak_f in _evaluate_trigger.
+    running_peak_f = outcome.running_peak_f
+    assert running_peak_f is not None
 
     # Build bracket inventory. Skip markets that don't parse, are already
     # fired today, or have no usable yes_ask.
@@ -643,8 +661,17 @@ def evaluate_event_signals(
                 "ticker": winner_bracket.market_id,
                 "winner_idx": winner_idx,
                 "obs_temp_f": float(observed_temp_f),
+                "running_peak_f": float(running_peak_f),
                 "trigger_time_utc": trigger_obs_iso,
             },
+        )
+        # Grep-friendly divergence trace for the #6 audit. By trigger
+        # condition C, |obs - running_peak| ≥ PAST_PEAK_MIN_DELTA_F (1.0°F),
+        # so delta is always non-trivial when fired.
+        logger.debug(
+            "WPS_TRIGGER_DIVERGENCE ticker=%s cur_temp=%.1f running_peak=%.1f delta=%.1f",
+            winner_bracket.market_id, observed_temp_f, running_peak_f,
+            observed_temp_f - running_peak_f,
         )
         _LOGGED_TRIGGERS.add(log_key)
 
@@ -685,13 +712,14 @@ def evaluate_event_signals(
                     "adjacent_yes_asks": adjacent_asks,
                     "winner_idx": winner_idx,
                     "obs_temp_f": float(observed_temp_f),
+                    "running_peak_f": float(running_peak_f),
                 },
             )
         logger.info(
-            "WeatherPeakSnipe: %s — trigger fired (obs=%.1fF, winner_idx=%d) "
-            "but no bracket passed price gates "
+            "WeatherPeakSnipe: %s — trigger fired (obs=%.1fF, running_peak=%.1fF, "
+            "winner_idx=%d) but no bracket passed price gates "
             "(winner_yes_ask=%.3f, adjacent_yes_asks=%s)",
-            event_id, observed_temp_f, winner_idx,
+            event_id, observed_temp_f, running_peak_f, winner_idx,
             winner_bracket.yes_ask, adjacent_asks,
         )
         return []
@@ -701,9 +729,10 @@ def evaluate_event_signals(
         fired_set.add(s.market_id)
 
     logger.info(
-        "WeatherPeakSnipe: %s FIRED — obs=%.1fF winner_idx=%d "
+        "WeatherPeakSnipe: %s FIRED — obs=%.1fF running_peak=%.1fF winner_idx=%d "
         "signals=%d (after cap, from %d candidates)",
-        event_id, observed_temp_f, winner_idx, len(capped), len(candidate_signals),
+        event_id, observed_temp_f, running_peak_f, winner_idx,
+        len(capped), len(candidate_signals),
     )
     return capped
 

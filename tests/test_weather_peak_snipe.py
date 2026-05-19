@@ -10,9 +10,11 @@ Covers:
 - Per-event 6-contract cap
 - Per-day dedup
 - Ghost-only refusal when dry_run=False
+- #6 instrumentation: running_peak_f captured on _TriggerOutcome and gate events
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Tuple
 
@@ -531,3 +533,206 @@ def test_enforce_contract_cap_truncates_to_max():
     assert len(capped) == wps.PER_EVENT_MAX_CONTRACTS
     # Highest-edge signals retained.
     assert capped[0].market_id == "KXHIGHNY-26MAY09-B00"
+
+
+# ── #6 instrumentation: running_peak_f capture on _TriggerOutcome ────────────
+
+def test_trigger_outcome_carries_running_peak_when_fired_high():
+    """High direction: running peak is the max obs; cur_temp is past it by ≥1°F.
+    delta = cur - running_peak must be ≤ -PAST_PEAK_MIN_DELTA_F (= -1.0)."""
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.0, 78.0, 77.0, 76.0])
+    out = wps._evaluate_trigger(obs, "high", obs[-1][0])
+    assert out.fired is True
+    assert out.observed_temp_f == 76.0
+    assert out.running_peak_f == 80.0
+    # Trigger condition C guarantees divergence ≥ PAST_PEAK_MIN_DELTA_F.
+    assert out.observed_temp_f - out.running_peak_f <= -wps.PAST_PEAK_MIN_DELTA_F
+
+
+def test_trigger_outcome_carries_running_peak_when_fired_low():
+    """Low direction: running peak is the min obs; cur_temp is past it by ≥1°F."""
+    base = datetime(2026, 5, 9, 6, 0, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [30.0, 31.0, 32.0, 33.0, 34.0])
+    out = wps._evaluate_trigger(obs, "low", obs[-1][0])
+    assert out.fired is True
+    assert out.observed_temp_f == 34.0
+    assert out.running_peak_f == 30.0
+    assert out.observed_temp_f - out.running_peak_f >= wps.PAST_PEAK_MIN_DELTA_F
+
+
+def test_trigger_outcome_carries_running_peak_on_not_past_peak():
+    """Non-fired outcome past the extremum-computation point still carries
+    running_peak_f so non-firing context is preserved for the audit."""
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.5, 79.5, 79.5])
+    out = wps._evaluate_trigger(obs, "high", obs[-1][0])
+    assert out.fired is False
+    assert "not_past_peak" in out.reason
+    assert out.running_peak_f == 80.0
+
+
+def test_trigger_outcome_carries_running_peak_on_ext_too_recent():
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [76.0, 77.0, 78.0, 79.0, 80.0])
+    out = wps._evaluate_trigger(obs, "high", obs[-1][0])
+    assert out.fired is False
+    assert "ext_too_recent" in out.reason or "not_past_peak" in out.reason
+    assert out.running_peak_f == 80.0
+
+
+def test_trigger_outcome_carries_running_peak_on_rebound():
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.0, 78.0, 76.0, 78.0])
+    out = wps._evaluate_trigger(obs, "high", obs[-1][0])
+    assert out.fired is False
+    assert "rebound" in out.reason
+    assert out.running_peak_f == 80.0
+
+
+def test_trigger_outcome_running_peak_is_none_on_insufficient_obs():
+    """The short-circuit before the extremum loop leaves the field unset."""
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    obs = [(base, 80.0)]
+    out = wps._evaluate_trigger(obs, "high", obs[-1][0])
+    assert out.fired is False
+    assert out.reason == "insufficient_obs"
+    assert out.running_peak_f is None
+
+
+# ── #6 instrumentation: running_peak_f propagated to gate events + logs ──────
+
+def test_evaluated_event_extra_includes_running_peak_f(monkeypatch):
+    captured = _capture_gate_events(monkeypatch)
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 5, 9, 19, 30, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.0, 78.0, 77.0, 76.5, 76.0, 76.0, 76.0])
+    bands = [
+        ("75° to 75°", 0.05),
+        ("76° to 76°", 0.92),
+        ("77° to 77°", 0.05),
+    ]
+    markets = _series_brackets("KXHIGHNY", "26MAY09", bands)
+    wps.evaluate_event_signals(
+        markets, now_utc=now_utc,
+        asos_fetcher=_stub_fetcher(obs), dry_run=True,
+    )
+    evaluated = [e for e in captured if e.get("decision") == "evaluated"]
+    assert len(evaluated) == 1
+    extra = evaluated[0]["extra"]
+    assert extra["obs_temp_f"] == 76.0
+    assert extra["running_peak_f"] == 80.0
+    # Trigger condition C guarantees divergence ≥ 1°F.
+    assert abs(extra["obs_temp_f"] - extra["running_peak_f"]) >= wps.PAST_PEAK_MIN_DELTA_F
+
+
+def test_price_gate_skip_event_extra_includes_running_peak_f(monkeypatch):
+    captured = _capture_gate_events(monkeypatch)
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 5, 9, 19, 30, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.0, 78.0, 77.0, 76.5, 76.0, 76.0, 76.0])
+    bands = [
+        ("75° to 75°", 0.50),
+        ("76° to 76°", 0.50),  # winner — too cheap, will hit price_gate
+        ("77° to 77°", 0.50),
+    ]
+    markets = _series_brackets("KXHIGHNY", "26MAY09", bands)
+    wps.evaluate_event_signals(
+        markets, now_utc=now_utc,
+        asos_fetcher=_stub_fetcher(obs), dry_run=True,
+    )
+    skips = [e for e in captured if e.get("reason") == "price_gate"]
+    assert len(skips) == 1
+    extra = skips[0]["extra"]
+    assert extra["obs_temp_f"] == 76.0
+    assert extra["running_peak_f"] == 80.0
+
+
+def test_trigger_divergence_debug_log_emitted_with_grep_format(monkeypatch, caplog):
+    captured = _capture_gate_events(monkeypatch)
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 5, 9, 19, 30, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.0, 78.0, 77.0, 76.5, 76.0, 76.0, 76.0])
+    bands = [
+        ("75° to 75°", 0.05),
+        ("76° to 76°", 0.92),
+        ("77° to 77°", 0.05),
+    ]
+    markets = _series_brackets("KXHIGHNY", "26MAY09", bands)
+    with caplog.at_level(logging.DEBUG, logger="strategies.weather_peak_snipe"):
+        wps.evaluate_event_signals(
+            markets, now_utc=now_utc,
+            asos_fetcher=_stub_fetcher(obs), dry_run=True,
+        )
+    # Must appear exactly once; format pinned for downstream grep tooling.
+    matches = [
+        line for line in caplog.text.splitlines()
+        if "WPS_TRIGGER_DIVERGENCE" in line
+    ]
+    assert len(matches) == 1, f"expected one divergence trace, got: {matches}"
+    line = matches[0]
+    # Winner ticker is the middle bracket (idx 1) per the bands above.
+    assert "ticker=KXHIGHNY-26MAY09-B01" in line
+    assert "cur_temp=76.0" in line
+    assert "running_peak=80.0" in line
+    assert "delta=-4.0" in line
+
+
+def test_trigger_divergence_debug_log_dedupes_across_repeat_cycles(monkeypatch, caplog):
+    """Repeat cycles against the same ASOS obs must not re-emit the divergence
+    trace (matches the dedup behaviour of the snipe:evaluated gate event)."""
+    _capture_gate_events(monkeypatch)
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 5, 9, 19, 30, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.0, 78.0, 77.0, 76.5, 76.0, 76.0, 76.0])
+    bands = [
+        ("75° to 75°", 0.05),
+        ("76° to 76°", 0.92),
+        ("77° to 77°", 0.05),
+    ]
+    markets = _series_brackets("KXHIGHNY", "26MAY09", bands)
+    with caplog.at_level(logging.DEBUG, logger="strategies.weather_peak_snipe"):
+        for _ in range(3):
+            wps.evaluate_event_signals(
+                markets, now_utc=now_utc,
+                asos_fetcher=_stub_fetcher(obs), dry_run=True,
+            )
+    divergence_lines = [
+        line for line in caplog.text.splitlines()
+        if "WPS_TRIGGER_DIVERGENCE" in line
+    ]
+    assert len(divergence_lines) == 1
+
+
+# ── #6 instrumentation: behavior is unchanged (winner-bracket selection) ─────
+
+def test_winner_bracket_selection_unchanged_after_instrumentation(monkeypatch):
+    """Pure-observability gate: instrumentation must not alter which bracket
+    is selected as the winner. observed_temp_f remains the bracket-selection
+    input; running_peak_f is captured only for the audit."""
+    captured = _capture_gate_events(monkeypatch)
+    base = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc)
+    now_utc = datetime(2026, 5, 9, 19, 30, tzinfo=timezone.utc)
+    obs = _hour_obs(base, [80.0, 79.0, 78.0, 77.0, 76.5, 76.0, 76.0, 76.0])
+    bands = [
+        ("73° to 73°", 0.05),
+        ("74° to 74°", 0.05),
+        ("75° to 75°", 0.10),
+        ("76° to 76°", 0.92),  # winner — contains observed_temp_f=76.0
+        ("77° to 77°", 0.05),
+        ("78° to 78°", 0.05),
+        ("79° to 79°", 0.05),
+    ]
+    markets = _series_brackets("KXHIGHNY", "26MAY09", bands)
+    sigs = wps.evaluate_event_signals(
+        markets, now_utc=now_utc,
+        asos_fetcher=_stub_fetcher(obs), dry_run=True,
+    )
+    # Winner is bracket index 3 — selected from observed_temp_f, not running_peak_f.
+    # Without this property, the audit's premise (the two values disagree on
+    # boundary cases) wouldn't be measurable.
+    winner_sig = next((s for s in sigs if s.market_id.endswith("-B03")), None)
+    assert winner_sig is not None, f"expected B03 winner; got {[s.market_id for s in sigs]}"
+    assert winner_sig.action == "buy_yes"
+    evaluated = [e for e in captured if e.get("decision") == "evaluated"]
+    assert evaluated[0]["extra"]["winner_idx"] == 3
