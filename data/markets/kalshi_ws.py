@@ -353,9 +353,13 @@ class KalshiWebSocket:
                 websockets.exceptions.ConnectionClosed,
                 websockets.exceptions.WebSocketException,
             ) as exc:
+                close_code = getattr(exc, "code", None)
+                close_reason = getattr(exc, "reason", None)
+                rcvd = getattr(exc, "rcvd", None)
+                sent = getattr(exc, "sent", None)
                 logger.warning(
-                    "Kalshi WS connection lost (%s), retrying in %.0fs",
-                    type(exc).__name__, backoff,
+                    "Kalshi WS connection lost (%s) code=%s reason=%r rcvd=%r sent=%r, retrying in %.0fs",
+                    type(exc).__name__, close_code, close_reason, rcvd, sent, backoff,
                 )
             except Exception:
                 logger.exception(
