@@ -45,6 +45,7 @@ REASON_SERIES_CAP                         = "series_cap"
 REASON_EMPTY_BOOK_GHOST                   = "empty_book_ghost"
 REASON_EMPTY_BOOK_SNIPE                   = "empty_book_snipe"
 REASON_PERM_SKIP_CONFIDENCE_FAILURES      = "perm_skip_confidence_failures"
+REASON_PERM_SKIP_STOP_LOSSES              = "perm_skip_stop_losses"
 
 # Executor exit (trader-initiated exit blocked by book state)
 REASON_BOOK_INSUFFICIENT_ON_EXIT  = "book_insufficient_on_exit"

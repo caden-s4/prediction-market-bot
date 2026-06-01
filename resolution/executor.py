@@ -162,6 +162,12 @@ _NO_SOURCE_STREAK_THRESHOLD = 5
 # handle this market until new GT sources are added.
 FAST_SKIP_PERM_THRESHOLD = 3
 
+# How many consecutive stop_loss exits on the same (market_id, signal_source)
+# pair before the pair is perm-skipped at entry for the process lifetime.
+# Catches the bleed pattern where decay_monitor stop-losses didn't increment
+# the existing confidence-failure counter (Phase Bleed-Fix-1).
+_STOP_LOSS_PERM_SKIP_THRESHOLD = 2
+
 # Stale-price guard: relative + absolute-floor approach.
 # threshold = max(scanner_price × RELATIVE, FLOOR)
 # A 25¢ market allows ~4¢ drift (floor); a 90¢ market allows 13.5¢ drift.
@@ -665,6 +671,13 @@ class ResolutionBot:
         # to stop evaluating markets that can never trade (e.g. pre-game sports with
         # source_confidence=0.65 < gate=0.80).
         self._confidence_fail_count: Dict[str, int] = {}
+        # Consecutive stop_loss counter keyed on (market_id, signal_source).
+        # Incremented on stop_loss / stop_loss_partial exits, reset on any
+        # non-stop_loss exit.  At _STOP_LOSS_PERM_SKIP_THRESHOLD the (ticker,
+        # source) pair is rejected at entry pre-trade for the process lifetime.
+        # In-memory only; restart resets.  Durability deferred to upcoming
+        # SQLite migration phase.  Phase Bleed-Fix-1.
+        self._consecutive_stop_losses: Dict[Tuple[str, str], int] = {}
         # Consecutive financial hard-stop counter per market_id.  After 3 hard stops
         # the market is perm-skipped this session.  A 30-minute orderbook cooldown is
         # also set on each hard stop so the same market cannot be re-entered immediately.
@@ -2283,6 +2296,57 @@ class ResolutionBot:
             )
         return deduped
 
+    @staticmethod
+    def _signal_source_name(rec: "TradeRecord") -> str:
+        """Return the source_name attached to a position's signal, with the
+        same fallback used by _exit_position's resolved-history record."""
+        if rec.signal and rec.signal.ground_truth_result:
+            return rec.signal.ground_truth_result.source_name
+        if rec.signal and rec.signal.signal_type == "cross_platform":
+            return "cross-platform"
+        return "unknown"
+
+    def _update_stop_loss_counter(
+        self, market_id: str, rec: "TradeRecord", exit_reason: str,
+    ) -> None:
+        """Increment counter on stop_loss exits, reset on any other exit.
+        Keyed on (market_id, signal_source).  Phase Bleed-Fix-1."""
+        key = (market_id, self._signal_source_name(rec))
+        if exit_reason == "stop_loss":
+            self._consecutive_stop_losses[key] = (
+                self._consecutive_stop_losses.get(key, 0) + 1
+            )
+        else:
+            self._consecutive_stop_losses.pop(key, None)
+
+    def _check_stop_loss_perm_skip(
+        self, market_id: str, source_name: str, platform: str,
+    ) -> bool:
+        """Return True (and emit gate event) if the (market_id, source) pair
+        has hit _STOP_LOSS_PERM_SKIP_THRESHOLD consecutive stop_losses this
+        session.  Phase Bleed-Fix-1."""
+        count = self._consecutive_stop_losses.get((market_id, source_name), 0)
+        if count < _STOP_LOSS_PERM_SKIP_THRESHOLD:
+            return False
+        log_gate_event(
+            ticker=market_id,
+            gate=gn.GATE_EXECUTOR_PRETRADE,
+            decision="skip",
+            reason=gn.REASON_PERM_SKIP_STOP_LOSSES,
+            platform=platform,
+            extra={
+                "signal_source": source_name,
+                "consecutive_stop_losses": count,
+                "threshold": _STOP_LOSS_PERM_SKIP_THRESHOLD,
+            },
+        )
+        logger.info(
+            "ResolutionBot: perm-skipping %s on source=%s after %d "
+            "consecutive stop_losses (threshold=%d)",
+            market_id, source_name, count, _STOP_LOSS_PERM_SKIP_THRESHOLD,
+        )
+        return True
+
     def _try_execute(self, signal: GapSignal) -> Optional[dict]:
         """
         Run confidence check and execute the trade if it passes.
@@ -2319,6 +2383,15 @@ class ResolutionBot:
         # Use the ground truth result carried on the signal (info signals) or
         # re-fetch it (cross-platform signals that didn't go through the router).
         gt = signal.ground_truth_result or self._ground_truth.fetch(market)
+
+        # Phase Bleed-Fix-1: perm-skip after 2 consecutive stop_losses for the
+        # same (ticker, signal_source) pair.  Catches bleed patterns the existing
+        # confidence-failure perm-skip misses (decay_monitor stop-losses don't
+        # increment _confidence_fail_count).  In-memory only; restart resets.
+        if gt is not None and self._check_stop_loss_perm_skip(
+            mid, gt.source_name, market.platform,
+        ):
+            return None
 
         # Fetch the live order book before the confidence gate so we can:
         #   a) populate depth_ratio on cross-platform signals (liquidity penalty)
@@ -3702,6 +3775,10 @@ class ResolutionBot:
                 hold_duration_minutes=hold_min,
             )
 
+        # Phase Bleed-Fix-1: treat partial as a stop_loss for counter purposes —
+        # the bleed pattern is the same whether the exit is full or partial.
+        self._update_stop_loss_counter(mid, rec, exit_reason)
+
         logger.info(
             "ResolutionBot: PARTIAL_EXIT %s reason=%s filled=$%.2f at vwap=%.4f "
             "pnl=$%.2f remaining=$%.2f%s",
@@ -4259,6 +4336,11 @@ class ResolutionBot:
             dynamic_exit_threshold=dynamic_exit_threshold,
             exit_was_decisive_gt=exit_was_decisive_gt,
         ))
+
+        # Phase Bleed-Fix-1: update consecutive stop_loss counter for the
+        # (market_id, signal_source) pair.  Increments on stop_loss exits,
+        # resets on any other exit.
+        self._update_stop_loss_counter(market_id, rec, exit_reason)
 
         if self._paper_log is not None:
             _hold_min = (time.time() - rec.entry_time) / 60.0
