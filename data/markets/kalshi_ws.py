@@ -661,7 +661,7 @@ class KalshiWebSocket:
         with self._lock:
             self._books[market_id] = _BookEntry(book=book)
 
-        logger.info(
+        logger.debug(
             "Received orderbook_snapshot for %s (%d bids, %d asks)",
             market_id, len(yes_bids), len(yes_asks),
         )

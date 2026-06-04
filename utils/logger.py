@@ -26,8 +26,8 @@ except ImportError:
 _PST = ZoneInfo("America/Los_Angeles")
 
 _DEFAULT_LOG_FILE = "logs/bot.log"
-_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
-_BACKUP_COUNT = 3
+_MAX_BYTES = 150 * 1024 * 1024  # 150 MB
+_BACKUP_COUNT = 20
 
 
 def setup_logging(
