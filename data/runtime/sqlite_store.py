@@ -303,3 +303,96 @@ def reset_perm_skip(ticker: str, signal_source: str) -> None:
     except Exception:
         conn.execute("ROLLBACK")
         raise
+
+
+def get_all_perm_skip_counts() -> list[tuple[str, str, int]]:
+    """Return every (ticker, signal_source, count) row from perm_skip_counters.
+
+    Used by the executor at init time to repopulate the in-memory
+    _consecutive_stop_losses dict from SQLite.  Phase SQLite-3a.
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT ticker, signal_source, count FROM perm_skip_counters"
+    ).fetchall()
+    return [(r["ticker"], r["signal_source"], int(r["count"])) for r in rows]
+
+
+# ── Logical-transaction helpers (Q3) ───────────────────────────────────────
+#
+# Each of these wraps a position-table mutation together with the paired
+# ghost_state bankroll update in a single BEGIN / COMMIT.  They exist so a
+# caller can persist "position close + realized P&L" or "partial fill +
+# remaining size + realized P&L" atomically — either both rows commit or
+# neither does.  Added in Phase SQLite-3a; not all are wired in yet.
+
+def close_position_atomic(ticker: str, new_bankroll_state: dict) -> None:
+    """DELETE a ghost position and UPSERT ghost_state in one transaction.
+
+    new_bankroll_state requires 'total_usd' and 'realized_pnl_usd' keys
+    (matches Bankroll.summary()).
+    """
+    conn = get_connection()
+    conn.execute("BEGIN")
+    try:
+        conn.execute("DELETE FROM ghost_positions WHERE ticker = ?", (ticker,))
+        conn.execute(
+            "INSERT OR REPLACE INTO ghost_state ("
+            "id, total_usd, realized_pnl_usd, last_updated"
+            ") VALUES (1, ?, ?, datetime('now'))",
+            (
+                float(new_bankroll_state["total_usd"]),
+                float(new_bankroll_state.get("realized_pnl_usd", 0.0)),
+            ),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def partial_exit_atomic(
+    ticker: str, new_size_usd: float, new_bankroll_state: dict,
+) -> None:
+    """UPDATE a ghost position's size_usd and UPSERT ghost_state in one transaction."""
+    conn = get_connection()
+    conn.execute("BEGIN")
+    try:
+        conn.execute(
+            "UPDATE ghost_positions SET size_usd = ? WHERE ticker = ?",
+            (float(new_size_usd), ticker),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO ghost_state ("
+            "id, total_usd, realized_pnl_usd, last_updated"
+            ") VALUES (1, ?, ?, datetime('now'))",
+            (
+                float(new_bankroll_state["total_usd"]),
+                float(new_bankroll_state.get("realized_pnl_usd", 0.0)),
+            ),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def clear_all_ghost_positions_atomic(bankroll_state_after: dict) -> None:
+    """DELETE every ghost_positions row and UPSERT ghost_state in one transaction."""
+    conn = get_connection()
+    conn.execute("BEGIN")
+    try:
+        conn.execute("DELETE FROM ghost_positions")
+        conn.execute(
+            "INSERT OR REPLACE INTO ghost_state ("
+            "id, total_usd, realized_pnl_usd, last_updated"
+            ") VALUES (1, ?, ?, datetime('now'))",
+            (
+                float(bankroll_state_after["total_usd"]),
+                float(bankroll_state_after.get("realized_pnl_usd", 0.0)),
+            ),
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise

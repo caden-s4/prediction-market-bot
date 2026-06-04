@@ -675,9 +675,21 @@ class ResolutionBot:
         # Incremented on stop_loss / stop_loss_partial exits, reset on any
         # non-stop_loss exit.  At _STOP_LOSS_PERM_SKIP_THRESHOLD the (ticker,
         # source) pair is rejected at entry pre-trade for the process lifetime.
-        # In-memory only; restart resets.  Durability deferred to upcoming
-        # SQLite migration phase.  Phase Bleed-Fix-1.
+        # In-memory dict remains the runtime source of truth.  Phase
+        # Bleed-Fix-1; Phase SQLite-3a adds optional SQLite write-through.
         self._consecutive_stop_losses: Dict[Tuple[str, str], int] = {}
+        # Phase SQLite-3a: when (dry_run AND SQLite DB exists), hydrate the
+        # in-memory dict from the perm_skip_counters table so counts persist
+        # across bot restarts.  Per Q1 a SQLite read failure here propagates
+        # and crashes startup rather than degrading to an empty dict.
+        if self._dry_run:
+            from data.runtime.sqlite_store import get_db_path  # noqa: PLC0415
+            if get_db_path().exists():
+                from data.runtime.sqlite_store import (  # noqa: PLC0415
+                    get_all_perm_skip_counts,
+                )
+                for _ticker, _source, _count in get_all_perm_skip_counts():
+                    self._consecutive_stop_losses[(_ticker, _source)] = _count
         # Consecutive financial hard-stop counter per market_id.  After 3 hard stops
         # the market is perm-skipped this session.  A 30-minute orderbook cooldown is
         # also set on each hard stop so the same market cannot be re-entered immediately.
@@ -2310,14 +2322,35 @@ class ResolutionBot:
         self, market_id: str, rec: "TradeRecord", exit_reason: str,
     ) -> None:
         """Increment counter on stop_loss exits, reset on any other exit.
-        Keyed on (market_id, signal_source).  Phase Bleed-Fix-1."""
-        key = (market_id, self._signal_source_name(rec))
+        Keyed on (market_id, signal_source).  Phase Bleed-Fix-1.
+
+        Phase SQLite-3a: when (dry_run AND SQLite DB exists), the in-memory
+        mutation is mirrored to perm_skip_counters via increment_perm_skip /
+        reset_perm_skip.  The in-memory dict remains the runtime source of
+        truth; SQLite is parallel write-through.
+        """
+        source_name = self._signal_source_name(rec)
+        key = (market_id, source_name)
+        had_entry = key in self._consecutive_stop_losses
         if exit_reason == "stop_loss":
             self._consecutive_stop_losses[key] = (
                 self._consecutive_stop_losses.get(key, 0) + 1
             )
         else:
             self._consecutive_stop_losses.pop(key, None)
+
+        # SQLite write-through — parallel call path, does not alter the dict.
+        if not self._dry_run:
+            return
+        from data.runtime.sqlite_store import get_db_path  # noqa: PLC0415
+        if not get_db_path().exists():
+            return
+        if exit_reason == "stop_loss":
+            from data.runtime.sqlite_store import increment_perm_skip  # noqa: PLC0415
+            increment_perm_skip(market_id, source_name)
+        elif had_entry:
+            from data.runtime.sqlite_store import reset_perm_skip  # noqa: PLC0415
+            reset_perm_skip(market_id, source_name)
 
     def _check_stop_loss_perm_skip(
         self, market_id: str, source_name: str, platform: str,
@@ -4616,10 +4649,30 @@ class ResolutionBot:
             return None
 
     # ── Position persistence ───────────────────────────────────────────────────
+    #
+    # Two code paths share the same public method names.  The dispatchers
+    # below route to the SQLite-backed variant only when dry_run is True AND
+    # the production SQLite DB exists; otherwise the JSON / StateStore variant
+    # runs and behaviour is byte-for-byte identical to pre-Phase-SQLite-3a.
+    # Selection by DB-file existence (no flag / env var) is intentional: the
+    # file is only present after Phase SQLite-3b's --apply, so 3a ships
+    # dormant.  Live mode is never routed to SQLite at 3a.
 
     _GHOST_POSITIONS_FILE = "data/runtime/ghost_positions.json"
 
     def _save_positions(self) -> None:
+        """Persist open positions to the active state backend.
+
+        Dispatches to _save_positions_sqlite when (dry_run AND SQLite DB
+        present), otherwise _save_positions_json.  Phase SQLite-3a.
+        """
+        from data.runtime.sqlite_store import get_db_path  # noqa: PLC0415
+        if self._dry_run and get_db_path().exists():
+            self._save_positions_sqlite()
+            return
+        self._save_positions_json()
+
+    def _save_positions_json(self) -> None:
         """Persist all open positions to disk.
 
         Live mode  → state store ("open_positions" key).
@@ -4668,7 +4721,84 @@ class ResolutionBot:
             return
         self._state.set("open_positions", data)
 
+    def _save_positions_sqlite(self) -> None:
+        """Full-sync snapshot of self._positions + bankroll into SQLite.
+
+        Wraps DELETE-all + INSERT-all + UPSERT ghost_state in one BEGIN/COMMIT
+        so Q3 logical-transaction atomicity holds at every existing call site
+        (open, close, partial, clear) without context-specific routing.
+        Phase SQLite-3a.
+        """
+        import json as _json  # noqa: PLC0415
+        from data.runtime.sqlite_store import get_connection  # noqa: PLC0415
+
+        rows: list = []
+        for _, rec in self._positions.items():
+            rd = rec.market.resolution_date
+            if rd.tzinfo is None:
+                rd = rd.replace(tzinfo=timezone.utc)
+            tags = rec.market.tags or []
+            rows.append((
+                rec.market_id,                              # ticker (PK)
+                rec.market_id,
+                rec.platform,
+                rec.action,
+                float(rec.entry_price),
+                float(rec.size_usd),
+                float(rec.ground_truth_prob),
+                float(rec.source_confidence),
+                float(rec.entry_time),
+                rec.order_id,
+                rd.isoformat(),
+                rec.market.question,
+                rec.market.category,
+                _json.dumps(tags) if tags else None,
+                rec.fill_status,
+                rec.limit_price_used,
+            ))
+
+        summary = self._bankroll.summary()
+        conn = get_connection()
+        conn.execute("BEGIN")
+        try:
+            conn.execute("DELETE FROM ghost_positions")
+            if rows:
+                conn.executemany(
+                    "INSERT INTO ghost_positions ("
+                    "ticker, market_id, platform, action, entry_price, size_usd, "
+                    "ground_truth_prob, source_confidence, entry_time, order_id, "
+                    "resolution_date_iso, question, category, tags_json, "
+                    "fill_status, limit_price_used"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+            conn.execute(
+                "INSERT OR REPLACE INTO ghost_state ("
+                "id, total_usd, realized_pnl_usd, last_updated"
+                ") VALUES (1, ?, ?, datetime('now'))",
+                (
+                    float(summary["total_usd"]),
+                    float(summary["realized_pnl_usd"]),
+                ),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
     def _load_positions(self) -> None:
+        """Load open positions from the active state backend.
+
+        Dispatches to _load_positions_sqlite when (dry_run AND SQLite DB
+        present), otherwise _load_positions_json.  Phase SQLite-3a.
+        """
+        from data.runtime.sqlite_store import get_db_path  # noqa: PLC0415
+        if self._dry_run and get_db_path().exists():
+            self._load_positions_sqlite()
+            return
+        self._load_positions_json()
+
+    def _load_positions_json(self) -> None:
         """Reload open positions from disk on startup.
 
         Ghost mode → load from data/runtime/ghost_positions.json (separate from live).
@@ -4788,6 +4918,99 @@ class ResolutionBot:
         if loaded or skipped:
             logger.info(
                 "ResolutionBot: restored %d open position(s) from disk "
+                "(%d skipped/expired)", loaded, skipped,
+            )
+        if skipped:
+            # Rewrite state without the entries we couldn't load
+            self._save_positions()
+
+    def _load_positions_sqlite(self) -> None:
+        """Reload open positions from SQLite on startup (dry_run only).
+
+        Reads every row from ghost_positions and reconstructs TradeRecord
+        objects in self._positions, re-reserving capital via self._bankroll.
+        Per Q1, any exception raised during the SQLite read propagates so the
+        bot crashes at startup rather than degrading to an empty state.
+        Phase SQLite-3a.
+        """
+        from data.runtime.sqlite_store import get_all_positions, get_db_path  # noqa: PLC0415
+
+        positions_list = get_all_positions()
+        if not positions_list:
+            return
+
+        logger.info(
+            "ResolutionBot: loading %d ghost position(s) from SQLite %s",
+            len(positions_list), get_db_path(),
+        )
+
+        loaded = 0
+        skipped = 0
+        expired_count = 0
+        for saved in positions_list:
+            mid = saved["ticker"]
+            try:
+                rd = datetime.fromisoformat(saved["resolution_date_iso"])
+
+                market = Market(
+                    market_id=saved["market_id"],
+                    platform=saved["platform"],
+                    question=saved["question"],
+                    category=saved["category"],
+                    tags=saved["tags"],
+                    resolution_date=rd,
+                    yes_price=saved["entry_price"],
+                    no_price=round(1.0 - saved["entry_price"], 4),
+                )
+
+                if market.hours_to_resolution <= 0:
+                    logger.info(
+                        "ResolutionBot: skipping expired position %s "
+                        "(market already resolved)", mid,
+                    )
+                    expired_count += 1
+                    continue
+
+                if not self._bankroll.reserve(mid, saved["size_usd"]):
+                    logger.warning(
+                        "ResolutionBot: cannot re-reserve $%.2f for %s "
+                        "(bankroll too low – position ignored)", saved["size_usd"], mid,
+                    )
+                    skipped += 1
+                    continue
+
+                self._positions[mid] = TradeRecord(
+                    market_id=saved["market_id"],
+                    platform=saved["platform"],
+                    market=market,
+                    signal=None,          # not needed for monitoring
+                    action=saved["action"],
+                    entry_price=saved["entry_price"],
+                    size_usd=saved["size_usd"],
+                    ground_truth_prob=saved["ground_truth_prob"],
+                    source_confidence=saved["source_confidence"],
+                    entry_time=saved.get("entry_time", time.time()),
+                    order_id=saved.get("order_id"),
+                    fill_status=saved.get("fill_status", "filled"),
+                    limit_price_used=saved.get("limit_price_used"),
+                )
+                loaded += 1
+
+            except Exception as exc:
+                logger.warning(
+                    "ResolutionBot: failed to restore position %s: %s", mid, exc,
+                )
+                skipped += 1
+
+        if expired_count:
+            logger.info(
+                "ResolutionBot: expired %d stale ghost position(s) on load "
+                "(resolution date already passed)", expired_count,
+            )
+            skipped += expired_count
+        if loaded or skipped:
+            logger.info(
+                "ResolutionBot: restored %d open position(s) from SQLite "
                 "(%d skipped/expired)", loaded, skipped,
             )
         if skipped:

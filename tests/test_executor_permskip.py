@@ -30,7 +30,10 @@ def _make_rec(source_name: str = "FRED/GASREGCOVW", signal_type: str = "informat
 
 def _make_bot() -> types.SimpleNamespace:
     """Build a stub bot with the perm-skip dict and helper methods bound."""
-    bot = types.SimpleNamespace(_consecutive_stop_losses={})
+    # _dry_run=False keeps the Phase SQLite-3a write-through branch dormant
+    # in these in-memory-only counter tests (it's exercised separately in
+    # test_sqlite_state_integration.py).
+    bot = types.SimpleNamespace(_consecutive_stop_losses={}, _dry_run=False)
     bot._signal_source_name = lambda rec: ResolutionBot._signal_source_name(rec)
     bot._update_stop_loss_counter = lambda mid, rec, reason: (
         ResolutionBot._update_stop_loss_counter(bot, mid, rec, reason)

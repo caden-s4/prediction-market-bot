@@ -435,7 +435,38 @@ class BotCoordinator:
                 self._state.set("platform_balances", self._platform_balances)
         logger.debug("BotCoordinator: state persisted %s", summary)
 
+    # ── ghost_state persistence ──────────────────────────────────────────
+    # Two code paths share the same public method names.  The dispatchers
+    # below route to the SQLite-backed variant only when dry_run is True AND
+    # the production SQLite DB exists; otherwise the JSON variant runs and
+    # behaviour is byte-for-byte identical to pre-Phase-SQLite-3a.  Selection
+    # by DB-file existence (no flag / env var) is intentional: the file is
+    # only present after Phase SQLite-3b's --apply, so 3a ships dormant.
+
     def _save_ghost_state(self) -> None:
+        """Persist virtual bankroll to the active state backend.
+
+        Dispatches to _save_ghost_state_sqlite when (dry_run AND SQLite DB
+        present), otherwise _save_ghost_state_json.  Phase SQLite-3a.
+        """
+        from data.runtime.sqlite_store import get_db_path  # noqa: PLC0415
+        if self._cfg.bot.dry_run and get_db_path().exists():
+            self._save_ghost_state_sqlite()
+            return
+        self._save_ghost_state_json()
+
+    def _load_ghost_state(self) -> Optional[float]:
+        """Load virtual bankroll from the active state backend.
+
+        Dispatches to _load_ghost_state_sqlite when (dry_run AND SQLite DB
+        present), otherwise _load_ghost_state_json.  Phase SQLite-3a.
+        """
+        from data.runtime.sqlite_store import get_db_path  # noqa: PLC0415
+        if self._cfg.bot.dry_run and get_db_path().exists():
+            return self._load_ghost_state_sqlite()
+        return self._load_ghost_state_json()
+
+    def _save_ghost_state_json(self) -> None:
         """Write current virtual bankroll to data/runtime/ghost_state.json."""
         try:
             summary = self._bankroll.summary()
@@ -450,7 +481,7 @@ class BotCoordinator:
         except Exception as exc:
             logger.warning("BotCoordinator: failed to save %s: %s", _GHOST_STATE_FILE, exc)
 
-    def _load_ghost_state(self) -> Optional[float]:
+    def _load_ghost_state_json(self) -> Optional[float]:
         """Load virtual bankroll from data/runtime/ghost_state.json. Returns total_usd or None."""
         path = Path(_GHOST_STATE_FILE)
         if not path.exists():
@@ -469,6 +500,43 @@ class BotCoordinator:
                 _GHOST_STATE_FILE, exc,
             )
             return None
+
+    def _save_ghost_state_sqlite(self) -> None:
+        """Write current virtual bankroll to the ghost_state row in SQLite.
+
+        Phase SQLite-3a.  Failures are logged at WARNING (matching JSON
+        behaviour for the write path).  Q1 crash-on-failure applies to the
+        startup READ path only.
+        """
+        from data.runtime.sqlite_store import set_bankroll  # noqa: PLC0415
+        try:
+            summary = self._bankroll.summary()
+            set_bankroll({
+                "total_usd": summary["total_usd"],
+                "realized_pnl_usd": summary["realized_pnl_usd"],
+            })
+        except Exception as exc:
+            logger.warning(
+                "BotCoordinator: failed to save ghost_state to SQLite: %s", exc,
+            )
+
+    def _load_ghost_state_sqlite(self) -> Optional[float]:
+        """Load virtual bankroll from the ghost_state row in SQLite.
+
+        Returns total_usd or None if no row exists yet.  Per Q1, any
+        exception during read propagates so the bot crashes at startup
+        rather than degrading to an empty state.  Phase SQLite-3a.
+        """
+        from data.runtime.sqlite_store import get_bankroll, get_db_path  # noqa: PLC0415
+        data = get_bankroll()
+        if data is None:
+            return None
+        total = float(data["total_usd"])
+        logger.info(
+            "Ghost mode: restored bankroll $%.2f from %s (last_updated=%s)",
+            total, get_db_path(), data.get("last_updated", "?"),
+        )
+        return total
 
     def _compute_disabled_features(self) -> List[str]:
         disabled: List[str] = [
