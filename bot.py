@@ -13,10 +13,8 @@ Shared infrastructure:
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import List, Optional
 
 import requests
@@ -39,7 +37,6 @@ from utils.storage import StateStore
 
 logger = logging.getLogger(__name__)
 
-_GHOST_STATE_FILE = "data/runtime/ghost_state.json"
 _GHOST_DEFAULT_BANKROLL = 500.0
 
 
@@ -295,7 +292,7 @@ class BotCoordinator:
         return self._resolution.clear_positions()
 
     def ghost_clear_positions(self) -> int:
-        """Remove ghost positions from memory and delete data/runtime/ghost_positions.json."""
+        """Remove ghost positions from memory and persist the cleared state to SQLite."""
         return self._resolution.ghost_clear_positions()
 
     def get_resolved_positions(self) -> list:
@@ -314,8 +311,8 @@ class BotCoordinator:
         """
         Override the trading bankroll with a virtual amount.
 
-        Only valid in dry-run mode.  Persists to data/runtime/ghost_state.json so the
-        value survives restarts.
+        Only valid in dry-run mode.  Persists to SQLite (ghost_state table)
+        so the value survives restarts.
         """
         if not self._cfg.bot.dry_run:
             raise RuntimeError(
@@ -328,8 +325,8 @@ class BotCoordinator:
         self._platform_balances["virtual_usd"] = amount_usd
         self._save_ghost_state()
         logger.info(
-            "BotCoordinator: virtual bankroll set to $%.2f (persisted to %s)",
-            amount_usd, _GHOST_STATE_FILE,
+            "BotCoordinator: virtual bankroll set to $%.2f (persisted to SQLite)",
+            amount_usd,
         )
 
     def ghost_reset(self) -> int:
@@ -337,8 +334,8 @@ class BotCoordinator:
         Full ghost-mode reset: clear all simulated positions and reset the
         virtual bankroll to the configured default ($500).
 
-        Returns the number of positions cleared.  Writes a fresh
-        data/runtime/ghost_state.json so the reset survives the next restart.
+        Returns the number of positions cleared.  Persists the reset to
+        SQLite (ghost_state table) so it survives the next restart.
         """
         if not self._cfg.bot.dry_run:
             raise RuntimeError("ghost_reset() is only available in dry-run mode.")
@@ -436,76 +433,11 @@ class BotCoordinator:
         logger.debug("BotCoordinator: state persisted %s", summary)
 
     # ── ghost_state persistence ──────────────────────────────────────────
-    # Two code paths share the same public method names.  The dispatchers
-    # below route to the SQLite-backed variant only when dry_run is True AND
-    # the production SQLite DB exists; otherwise the JSON variant runs and
-    # behaviour is byte-for-byte identical to pre-Phase-SQLite-3a.  Selection
-    # by DB-file existence (no flag / env var) is intentional: the file is
-    # only present after Phase SQLite-3b's --apply, so 3a ships dormant.
 
     def _save_ghost_state(self) -> None:
-        """Persist virtual bankroll to the active state backend.
-
-        Dispatches to _save_ghost_state_sqlite when (dry_run AND SQLite DB
-        present), otherwise _save_ghost_state_json.  Phase SQLite-3a.
-        """
-        from data.runtime.sqlite_store import get_db_path  # noqa: PLC0415
-        if self._cfg.bot.dry_run and get_db_path().exists():
-            self._save_ghost_state_sqlite()
-            return
-        self._save_ghost_state_json()
-
-    def _load_ghost_state(self) -> Optional[float]:
-        """Load virtual bankroll from the active state backend.
-
-        Dispatches to _load_ghost_state_sqlite when (dry_run AND SQLite DB
-        present), otherwise _load_ghost_state_json.  Phase SQLite-3a.
-        """
-        from data.runtime.sqlite_store import get_db_path  # noqa: PLC0415
-        if self._cfg.bot.dry_run and get_db_path().exists():
-            return self._load_ghost_state_sqlite()
-        return self._load_ghost_state_json()
-
-    def _save_ghost_state_json(self) -> None:
-        """Write current virtual bankroll to data/runtime/ghost_state.json."""
-        try:
-            summary = self._bankroll.summary()
-            payload = {
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-                "total_usd": summary["total_usd"],
-                "realized_pnl_usd": summary["realized_pnl_usd"],
-            }
-            Path(_GHOST_STATE_FILE).write_text(
-                json.dumps(payload, indent=2), encoding="utf-8"
-            )
-        except Exception as exc:
-            logger.warning("BotCoordinator: failed to save %s: %s", _GHOST_STATE_FILE, exc)
-
-    def _load_ghost_state_json(self) -> Optional[float]:
-        """Load virtual bankroll from data/runtime/ghost_state.json. Returns total_usd or None."""
-        path = Path(_GHOST_STATE_FILE)
-        if not path.exists():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            total = float(data["total_usd"])
-            logger.info(
-                "Ghost mode: restored bankroll $%.2f from %s (saved_at=%s)",
-                total, _GHOST_STATE_FILE, data.get("saved_at", "?"),
-            )
-            return total
-        except Exception as exc:
-            logger.warning(
-                "BotCoordinator: failed to load %s (starting fresh): %s",
-                _GHOST_STATE_FILE, exc,
-            )
-            return None
-
-    def _save_ghost_state_sqlite(self) -> None:
         """Write current virtual bankroll to the ghost_state row in SQLite.
 
-        Phase SQLite-3a.  Failures are logged at WARNING (matching JSON
-        behaviour for the write path).  Q1 crash-on-failure applies to the
+        Failures are logged at WARNING.  Q1 crash-on-failure applies to the
         startup READ path only.
         """
         from data.runtime.sqlite_store import set_bankroll  # noqa: PLC0415
@@ -520,12 +452,12 @@ class BotCoordinator:
                 "BotCoordinator: failed to save ghost_state to SQLite: %s", exc,
             )
 
-    def _load_ghost_state_sqlite(self) -> Optional[float]:
+    def _load_ghost_state(self) -> Optional[float]:
         """Load virtual bankroll from the ghost_state row in SQLite.
 
         Returns total_usd or None if no row exists yet.  Per Q1, any
         exception during read propagates so the bot crashes at startup
-        rather than degrading to an empty state.  Phase SQLite-3a.
+        rather than degrading to an empty state.
         """
         from data.runtime.sqlite_store import get_bankroll, get_db_path  # noqa: PLC0415
         data = get_bankroll()

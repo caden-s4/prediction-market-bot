@@ -4427,13 +4427,12 @@ class ResolutionBot:
 
     def ghost_clear_positions(self) -> int:
         """
-        Remove all ghost positions from memory and delete data/runtime/ghost_positions.json.
+        Remove all ghost positions from memory and persist the cleared state to SQLite.
 
         Only removes positions whose order_id starts with "ghost_" or "dry_"
         (i.e. positions that were never real orders).  Live positions are untouched.
         Returns the number of ghost positions cleared.
         """
-        import os as _os
         ghost_ids = [
             mid for mid, rec in self._positions.items()
             if rec.order_id is not None and (
@@ -4443,14 +4442,6 @@ class ResolutionBot:
         for mid in ghost_ids:
             self._bankroll.release(mid, realized_pnl_usd=0.0)
             del self._positions[mid]
-        # Delete the on-disk ghost file so it can't reload on next startup.
-        gf = self._GHOST_POSITIONS_FILE
-        if _os.path.exists(gf):
-            try:
-                _os.remove(gf)
-                logger.info("ResolutionBot: deleted %s", gf)
-            except OSError as exc:
-                logger.warning("ResolutionBot: failed to delete %s: %s", gf, exc)
         if ghost_ids:
             self._save_positions()
         logger.info("ResolutionBot: ghost-clear removed %d ghost position(s)", len(ghost_ids))
@@ -4649,85 +4640,13 @@ class ResolutionBot:
             return None
 
     # ── Position persistence ───────────────────────────────────────────────────
-    #
-    # Two code paths share the same public method names.  The dispatchers
-    # below route to the SQLite-backed variant only when dry_run is True AND
-    # the production SQLite DB exists; otherwise the JSON / StateStore variant
-    # runs and behaviour is byte-for-byte identical to pre-Phase-SQLite-3a.
-    # Selection by DB-file existence (no flag / env var) is intentional: the
-    # file is only present after Phase SQLite-3b's --apply, so 3a ships
-    # dormant.  Live mode is never routed to SQLite at 3a.
-
-    _GHOST_POSITIONS_FILE = "data/runtime/ghost_positions.json"
 
     def _save_positions(self) -> None:
-        """Persist open positions to the active state backend.
-
-        Dispatches to _save_positions_sqlite when (dry_run AND SQLite DB
-        present), otherwise _save_positions_json.  Phase SQLite-3a.
-        """
-        from data.runtime.sqlite_store import get_db_path  # noqa: PLC0415
-        if self._dry_run and get_db_path().exists():
-            self._save_positions_sqlite()
-            return
-        self._save_positions_json()
-
-    def _save_positions_json(self) -> None:
-        """Persist all open positions to disk.
-
-        Live mode  → state store ("open_positions" key).
-        Ghost mode → data/runtime/ghost_positions.json
-        """
-        import json as _json
-        from pathlib import Path as _Path
-
-        data: dict = {}
-        for mid, rec in self._positions.items():
-            rd = rec.market.resolution_date
-            if rd.tzinfo is None:
-                rd = rd.replace(tzinfo=timezone.utc)
-            data[mid] = {
-                "market_id": rec.market_id,
-                "platform": rec.platform,
-                "action": rec.action,
-                "entry_price": rec.entry_price,
-                "size_usd": rec.size_usd,
-                "ground_truth_prob": rec.ground_truth_prob,
-                "source_confidence": rec.source_confidence,
-                "entry_time": rec.entry_time,
-                "order_id": rec.order_id,
-                "resolution_date_iso": rd.isoformat(),
-                "question": rec.market.question,
-                "category": rec.market.category,
-                "tags": rec.market.tags,
-                "fill_status": rec.fill_status,
-                "limit_price_used": rec.limit_price_used,
-            }
-
-        if self._dry_run:
-            payload = {
-                "saved_at": datetime.now(timezone.utc).isoformat(),
-                "positions": data,
-            }
-            try:
-                _Path(self._GHOST_POSITIONS_FILE).write_text(
-                    _json.dumps(payload, indent=2), encoding="utf-8"
-                )
-            except Exception as exc:
-                logger.warning("ResolutionBot: failed to save ghost positions: %s", exc)
-            return
-
-        if not self._state:
-            return
-        self._state.set("open_positions", data)
-
-    def _save_positions_sqlite(self) -> None:
         """Full-sync snapshot of self._positions + bankroll into SQLite.
 
         Wraps DELETE-all + INSERT-all + UPSERT ghost_state in one BEGIN/COMMIT
         so Q3 logical-transaction atomicity holds at every existing call site
         (open, close, partial, clear) without context-specific routing.
-        Phase SQLite-3a.
         """
         import json as _json  # noqa: PLC0415
         from data.runtime.sqlite_store import get_connection  # noqa: PLC0415
@@ -4787,151 +4706,12 @@ class ResolutionBot:
             raise
 
     def _load_positions(self) -> None:
-        """Load open positions from the active state backend.
-
-        Dispatches to _load_positions_sqlite when (dry_run AND SQLite DB
-        present), otherwise _load_positions_json.  Phase SQLite-3a.
-        """
-        from data.runtime.sqlite_store import get_db_path  # noqa: PLC0415
-        if self._dry_run and get_db_path().exists():
-            self._load_positions_sqlite()
-            return
-        self._load_positions_json()
-
-    def _load_positions_json(self) -> None:
-        """Reload open positions from disk on startup.
-
-        Ghost mode → load from data/runtime/ghost_positions.json (separate from live).
-        Live mode  → load from state store ("open_positions" key).
-        """
-        import json as _json
-        from pathlib import Path as _Path
-
-        if self._dry_run:
-            gf = _Path(self._GHOST_POSITIONS_FILE)
-            if not gf.exists():
-                return
-            try:
-                payload = _json.loads(gf.read_text(encoding="utf-8"))
-                data = payload.get("positions", {})
-                saved_at = payload.get("saved_at", "unknown")
-                logger.info(
-                    "ResolutionBot: loading ghost positions from %s (saved_at=%s)",
-                    self._GHOST_POSITIONS_FILE, saved_at,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "ResolutionBot: failed to load ghost positions: %s", exc
-                )
-                return
-        elif not self._state:
-            return
-        else:
-            data: dict = self._state.get("open_positions", {})
-        if not data:
-            return
-
-        loaded = 0
-        skipped = 0
-        expired_count = 0
-        for mid, saved in data.items():
-            try:
-                # Drop positions that were placed in a dry-run session when we are
-                # now running live.  Dry-run order IDs are prefixed with "dry_";
-                # they were never real orders on any exchange.
-                order_id = saved.get("order_id", "")
-                if not self._dry_run and isinstance(order_id, str) and (
-                    order_id.startswith("dry_") or order_id.startswith("ghost_")
-                ):
-                    logger.info(
-                        "ResolutionBot: skipping phantom position %s "
-                        "(saved from a ghost-trade/dry-run session, now running live)", mid,
-                    )
-                    skipped += 1
-                    continue
-
-                rd = datetime.fromisoformat(saved["resolution_date_iso"])
-
-                # Reconstruct a minimal Market object from saved fields.
-                # yes_price is approximate (entry price); the decay monitor
-                # fetches a fresh live price from the order book every cycle.
-                market = Market(
-                    market_id=saved["market_id"],
-                    platform=saved["platform"],
-                    question=saved["question"],
-                    category=saved["category"],
-                    tags=saved["tags"],
-                    resolution_date=rd,
-                    yes_price=saved["entry_price"],
-                    no_price=round(1.0 - saved["entry_price"], 4),
-                )
-
-                if market.hours_to_resolution <= 0:
-                    logger.info(
-                        "ResolutionBot: skipping expired position %s "
-                        "(market already resolved)", mid,
-                    )
-                    if self._dry_run:
-                        expired_count += 1
-                    else:
-                        skipped += 1
-                    continue
-
-                # Re-reserve capital so the bankroll accounting stays correct.
-                if not self._bankroll.reserve(mid, saved["size_usd"]):
-                    logger.warning(
-                        "ResolutionBot: cannot re-reserve $%.2f for %s "
-                        "(bankroll too low – position ignored)", saved["size_usd"], mid,
-                    )
-                    skipped += 1
-                    continue
-
-                self._positions[mid] = TradeRecord(
-                    market_id=saved["market_id"],
-                    platform=saved["platform"],
-                    market=market,
-                    signal=None,          # not needed for monitoring
-                    action=saved["action"],
-                    entry_price=saved["entry_price"],
-                    size_usd=saved["size_usd"],
-                    ground_truth_prob=saved["ground_truth_prob"],
-                    source_confidence=saved["source_confidence"],
-                    entry_time=saved.get("entry_time", time.time()),
-                    order_id=saved.get("order_id"),
-                    fill_status=saved.get("fill_status", "filled"),
-                    limit_price_used=saved.get("limit_price_used"),
-                )
-                loaded += 1
-
-            except Exception as exc:
-                logger.warning(
-                    "ResolutionBot: failed to restore position %s: %s", mid, exc,
-                )
-                skipped += 1
-
-        if expired_count:
-            logger.info(
-                "ResolutionBot: expired %d stale ghost position(s) on load "
-                "(resolution date already passed)", expired_count,
-            )
-            skipped += expired_count
-        if loaded or skipped:
-            logger.info(
-                "ResolutionBot: restored %d open position(s) from disk "
-                "(%d skipped/expired)", loaded, skipped,
-            )
-        if skipped:
-            # Rewrite state without the entries we couldn't load
-            self._save_positions()
-
-    def _load_positions_sqlite(self) -> None:
         """Reload open positions from SQLite on startup (dry_run only).
 
         Reads every row from ghost_positions and reconstructs TradeRecord
         objects in self._positions, re-reserving capital via self._bankroll.
         Per Q1, any exception raised during the SQLite read propagates so the
         bot crashes at startup rather than degrading to an empty state.
-        Phase SQLite-3a.
         """
         from data.runtime.sqlite_store import get_all_positions, get_db_path  # noqa: PLC0415
 

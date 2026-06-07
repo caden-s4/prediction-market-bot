@@ -1,8 +1,6 @@
-"""Integration tests for the SQLite-backed state code path (Phase SQLite-3a).
+"""Integration tests for the SQLite-backed state code path.
 
 Covers:
-- dispatcher routing in _load_positions / _save_positions / _load_ghost_state /
-  _save_ghost_state — SQLite when (dry_run AND DB present), JSON otherwise
 - Q3 atomicity: position open and close transactions write the position row
   and the ghost_state row in a single BEGIN/COMMIT
 - perm-skip counter SQLite write-through on increment and reset
@@ -10,20 +8,19 @@ Covers:
 - Q1 crash-on-failure: a corrupt-DB read at load propagates rather than
   degrading to empty state
 
-Stubs ResolutionBot and BotCoordinator via SimpleNamespace where possible to
-avoid the full constructor chain (network clients, scanners, GT router).
-Uses a real on-disk temp DB so Path.exists() dispatcher checks behave the
+Stubs ResolutionBot via SimpleNamespace where possible to avoid the full
+constructor chain (network clients, scanners, GT router).  Uses a real
+on-disk temp DB so the perm-skip guards' Path.exists() checks behave the
 same as in production.
 """
 from __future__ import annotations
 
-import json
 import sqlite3
 import time
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import pytest
 
@@ -111,69 +108,13 @@ def _make_executor_stub(
         _positions=positions if positions is not None else {},
         _bankroll=_make_bankroll_stub(total, realized),
         _state=None,
-        _GHOST_POSITIONS_FILE="data/runtime/ghost_positions.json",
-        sqlite_calls=0,
-        json_calls=0,
     )
-    # Bind the four position methods to the stub.
     bot._save_positions = lambda: ResolutionBot._save_positions(bot)
-    bot._save_positions_json = lambda: setattr(
-        bot, "json_calls", bot.json_calls + 1
-    )
-    bot._save_positions_sqlite_real = (
-        lambda: ResolutionBot._save_positions_sqlite(bot)
-    )
-    bot._save_positions_sqlite = lambda: setattr(
-        bot, "sqlite_calls", bot.sqlite_calls + 1
-    )
     bot._load_positions = lambda: ResolutionBot._load_positions(bot)
-    bot._load_positions_json = lambda: setattr(
-        bot, "json_calls", bot.json_calls + 1
-    )
-    bot._load_positions_sqlite_real = (
-        lambda: ResolutionBot._load_positions_sqlite(bot)
-    )
-    bot._load_positions_sqlite = lambda: setattr(
-        bot, "sqlite_calls", bot.sqlite_calls + 1
-    )
     return bot
 
 
-# ── Test 1: dispatcher routes to SQLite when (dry_run AND DB present) ──────
-
-def test_load_positions_dispatches_to_sqlite_when_db_exists(sqlite_db):
-    bot = _make_executor_stub(dry_run=True)
-    bot._load_positions()
-    assert bot.sqlite_calls == 1
-    assert bot.json_calls == 0
-
-
-def test_save_positions_dispatches_to_sqlite_when_db_exists(sqlite_db):
-    bot = _make_executor_stub(dry_run=True)
-    bot._save_positions()
-    assert bot.sqlite_calls == 1
-    assert bot.json_calls == 0
-
-
-# ── Test 2: dispatcher routes to JSON when DB absent ───────────────────────
-
-def test_load_positions_dispatches_to_json_when_db_absent(no_sqlite_db):
-    bot = _make_executor_stub(dry_run=True)
-    bot._load_positions()
-    assert bot.sqlite_calls == 0
-    assert bot.json_calls == 1
-
-
-def test_save_positions_dispatches_to_json_when_live_mode(sqlite_db):
-    """SQLite is dry_run-only at Phase 3a; live mode must stay on JSON/StateStore
-    even when the DB file exists."""
-    bot = _make_executor_stub(dry_run=False)
-    bot._save_positions()
-    assert bot.sqlite_calls == 0
-    assert bot.json_calls == 1
-
-
-# ── Test 3: position-open writes position row + ghost_state atomically ─────
+# ── Test 1: position-open writes position row + ghost_state atomically ─────
 
 def test_position_open_writes_position_and_bankroll_atomically(sqlite_db):
     market = _make_market("KXOPEN-26JUN01-T100.00")
@@ -184,7 +125,7 @@ def test_position_open_writes_position_and_bankroll_atomically(sqlite_db):
         total=487.5,  # post-reserve bankroll snapshot
         realized=0.0,
     )
-    bot._save_positions_sqlite_real()
+    bot._save_positions()
 
     rows = sqlite_store.get_all_positions()
     assert len(rows) == 1
@@ -197,7 +138,7 @@ def test_position_open_writes_position_and_bankroll_atomically(sqlite_db):
     assert state["realized_pnl_usd"] == pytest.approx(0.0)
 
 
-# ── Test 4: position-close writes deletion + ghost_state atomically ────────
+# ── Test 2: position-close writes deletion + ghost_state atomically ────────
 
 def test_position_close_writes_deletion_and_bankroll_atomically(sqlite_db):
     # First write an "open" snapshot.
@@ -208,7 +149,7 @@ def test_position_close_writes_deletion_and_bankroll_atomically(sqlite_db):
         positions={market.market_id: rec},
         total=490.0,
     )
-    bot_open._save_positions_sqlite_real()
+    bot_open._save_positions()
     assert len(sqlite_store.get_all_positions()) == 1
 
     # Now simulate the close: position popped from dict, bankroll reflects +pnl.
@@ -218,7 +159,7 @@ def test_position_close_writes_deletion_and_bankroll_atomically(sqlite_db):
         total=503.5,                  # 490.0 (reserve released) + 13.5 pnl
         realized=13.5,
     )
-    bot_close._save_positions_sqlite_real()
+    bot_close._save_positions()
 
     assert sqlite_store.get_all_positions() == []
     state = sqlite_store.get_bankroll()
@@ -226,14 +167,14 @@ def test_position_close_writes_deletion_and_bankroll_atomically(sqlite_db):
     assert state["realized_pnl_usd"] == pytest.approx(13.5)
 
 
-def test_save_positions_sqlite_rolls_back_on_failure(sqlite_db, monkeypatch):
+def test_save_positions_rolls_back_on_failure(sqlite_db, monkeypatch):
     """If the ghost_state UPSERT fails after the positions INSERT succeeds,
     the BEGIN/COMMIT block must roll back so neither row mutates.
 
     Wraps the real connection in a proxy that raises sqlite3.OperationalError
     on the ghost_state UPSERT.  sqlite3.Connection.execute itself is a C-level
     attribute and can't be monkeypatched, so we monkeypatch the module-level
-    get_connection() helper instead — _save_positions_sqlite resolves it via
+    get_connection() helper instead — _save_positions resolves it via
     `from data.runtime.sqlite_store import get_connection` at call time, so
     the proxy is picked up.
     """
@@ -269,7 +210,7 @@ def test_save_positions_sqlite_rolls_back_on_failure(sqlite_db, monkeypatch):
     monkeypatch.setattr(sqlite_store, "get_connection", lambda: proxy)
 
     with pytest.raises(sqlite3.OperationalError):
-        bot._save_positions_sqlite_real()
+        bot._save_positions()
 
     # Restore the real get_connection for verification reads.
     monkeypatch.undo()
@@ -281,7 +222,7 @@ def test_save_positions_sqlite_rolls_back_on_failure(sqlite_db, monkeypatch):
     assert state["realized_pnl_usd"] == pytest.approx(-50.0)
 
 
-# ── Test 5/6: perm-skip increments / resets persist when DB present ────────
+# ── Test 3/4: perm-skip increments / resets persist when DB present ────────
 
 def _make_permskip_bot(dry_run: bool) -> Any:
     bot = types.SimpleNamespace(
@@ -348,13 +289,13 @@ def test_permskip_does_not_touch_sqlite_when_db_absent(no_sqlite_db):
     assert bot._consecutive_stop_losses[(mid, "FRED/CPIAUCSL")] == 1
 
 
-# ── Test 7: load failure propagates (no fallback to JSON or empty) ─────────
+# ── Test 5: load failure propagates (no silent fallback to empty) ──────────
 
-def test_load_positions_sqlite_failure_propagates(tmp_path: Path):
+def test_load_positions_failure_propagates(tmp_path: Path):
     """Q1: if the SQLite DB is corrupt at startup, the load raises instead of
     silently returning an empty state.  Simulated by writing garbage bytes to
     the DB path and verifying that get_all_positions() (and therefore
-    _load_positions_sqlite) surfaces the sqlite3 error."""
+    _load_positions) surfaces the sqlite3 error."""
     corrupt_path = tmp_path / "corrupt.db"
     corrupt_path.write_bytes(b"this is not a valid sqlite database file at all")
 
@@ -362,12 +303,12 @@ def test_load_positions_sqlite_failure_propagates(tmp_path: Path):
     try:
         bot = _make_executor_stub(dry_run=True)
         with pytest.raises(sqlite3.DatabaseError):
-            bot._load_positions_sqlite_real()
+            bot._load_positions()
     finally:
         sqlite_store.close_thread_connection()
 
 
-# ── Test 8: in-memory perm-skip dict hydrated from SQLite at init ──────────
+# ── Test 6: in-memory perm-skip dict hydrated from SQLite at init ──────────
 
 def test_permskip_dict_hydrated_from_sqlite(sqlite_db):
     """Mirrors the hydration block in ResolutionBot.__init__: when dry_run AND
@@ -392,63 +333,3 @@ def test_permskip_dict_hydrated_from_sqlite(sqlite_db):
         ("KX1-T1.00", "FRED/CPIAUCSL"): 2,
         ("KX2-T2.00", "FRED/PAYEMS"): 1,
     }
-
-
-# ── Bonus: ghost_state dispatcher round-trip on bot.py path ────────────────
-
-def test_ghost_state_dispatcher_routes_to_sqlite(sqlite_db):
-    """BotCoordinator._save_ghost_state / _load_ghost_state should route to
-    the SQLite variants when (dry_run AND DB present)."""
-    from bot import BotCoordinator
-
-    cfg_bot = types.SimpleNamespace(dry_run=True)
-    cfg = types.SimpleNamespace(bot=cfg_bot)
-    bot = types.SimpleNamespace(
-        _cfg=cfg,
-        _bankroll=_make_bankroll_stub(525.0, realized=25.0),
-        sqlite_calls=0,
-        json_calls=0,
-    )
-    bot._save_ghost_state = lambda: BotCoordinator._save_ghost_state(bot)
-    bot._load_ghost_state = lambda: BotCoordinator._load_ghost_state(bot)
-    bot._save_ghost_state_json = lambda: setattr(bot, "json_calls", bot.json_calls + 1)
-    bot._save_ghost_state_sqlite = lambda: setattr(bot, "sqlite_calls", bot.sqlite_calls + 1)
-    bot._load_ghost_state_json = lambda: (
-        setattr(bot, "json_calls", bot.json_calls + 1) or None
-    )
-    bot._load_ghost_state_sqlite = lambda: (
-        setattr(bot, "sqlite_calls", bot.sqlite_calls + 1) or None
-    )
-
-    bot._save_ghost_state()
-    bot._load_ghost_state()
-    assert bot.sqlite_calls == 2
-    assert bot.json_calls == 0
-
-
-def test_ghost_state_dispatcher_routes_to_json_when_live(sqlite_db):
-    from bot import BotCoordinator
-
-    cfg_bot = types.SimpleNamespace(dry_run=False)
-    cfg = types.SimpleNamespace(bot=cfg_bot)
-    bot = types.SimpleNamespace(
-        _cfg=cfg,
-        _bankroll=_make_bankroll_stub(525.0),
-        sqlite_calls=0,
-        json_calls=0,
-    )
-    bot._save_ghost_state = lambda: BotCoordinator._save_ghost_state(bot)
-    bot._load_ghost_state = lambda: BotCoordinator._load_ghost_state(bot)
-    bot._save_ghost_state_json = lambda: setattr(bot, "json_calls", bot.json_calls + 1)
-    bot._save_ghost_state_sqlite = lambda: setattr(bot, "sqlite_calls", bot.sqlite_calls + 1)
-    bot._load_ghost_state_json = lambda: (
-        setattr(bot, "json_calls", bot.json_calls + 1) or None
-    )
-    bot._load_ghost_state_sqlite = lambda: (
-        setattr(bot, "sqlite_calls", bot.sqlite_calls + 1) or None
-    )
-
-    bot._save_ghost_state()
-    bot._load_ghost_state()
-    assert bot.sqlite_calls == 0
-    assert bot.json_calls == 2
