@@ -1,0 +1,22 @@
+market_id,yes_team_returned,yes_team_type,csv_gt_prob,csv_action,csv_result,csv_correct
+KXNCAAWBGAME-26MAR23UKWVU-WVU,west virginia mountaineers,str,0.0,buy_no,no,True
+KXNCAAWBGAME-26MAR23USCSCAR-USC,usc trojans,str,1.0,buy_yes,no,False
+KXNBAGAME-26MAR23TORUTA-UTA,utah jazz,str,0.0,buy_no,no,True
+KXNBAGAME-26MAR25ATLDET-DET,detroit pistons,str,0.0,buy_no,no,True
+KXNBAGAME-26MAR25OKCBOS-OKC,oklahoma city thunder,str,1.0,buy_yes,no,False
+KXNBAGAME-26MAR26NOPDET-NOP,new orleans pelicans,str,1.0,buy_yes,no,False
+KXNBAGAME-26MAR26NYKCHA-NYK,new york knicks,str,1.0,buy_yes,no,False
+KXNCAAMBGAME-26MAR26IOWANEB-NEB,(None),NoneType,0.0,buy_no,no,True
+KXNBAGAME-26MAR26SACORL-SAC,sacramento kings,str,1.0,buy_yes,no,False
+KXNCAAMBGAME-26MAR26TEXPUR-TEX,(None),NoneType,1.0,buy_yes,no,False
+KXNCAAMBGAME-26MAR26ILLHOU-ILL,(None),NoneType,0.0,buy_no,yes,False
+KXNCAAMBGAME-26MAR26ARKARIZ-ARK,(None),NoneType,1.0,buy_yes,no,False
+KXNBAGAME-26MAR27WASGSW-WAS,washington wizards,str,1.0,buy_yes,no,False
+KXNBAGAME-26MAR27DALPOR-POR,portland trail blazers,str,0.0,buy_no,no,True
+KXNCAAWBGAME-26MAR28UKTEX-UK,kentucky wildcats,str,1.0,buy_yes,no,False
+KXNCAAMBGAME-26MAR28IOWAILL-IOWA,iowa hawkeyes,str,1.0,buy_yes,no,False
+KXNCAAMBGAME-26MAR29TENNMICH-TENN,tennessee volunteers,str,1.0,buy_yes,no,False
+KXNBAGAME-26APR14MIACHA-MIA,miami heat,str,1.0,buy_yes,no,False
+KXNBAGAME-26APR21PORSAS-SAS,san antonio spurs,str,0.0,buy_no,no,True
+KXNBAGAME-26APR22ORLDET-ORL,orlando magic,str,0.0,buy_no,no,True
+KXNBAGAME-26APR23NYKATL-NYK,new york knicks,str,0.0,buy_no,no,True

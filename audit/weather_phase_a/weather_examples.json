@@ -1,0 +1,754 @@
+{
+  "KXATPCHALLENGERMATCH": [
+    {
+      "ticker": "KXATPCHALLENGERMATCH-26FEB12COLDAM-DAM",
+      "event_ticker": "KXATPCHALLENGERMATCH-26FEB12COLDAM",
+      "open_time": "2026-02-12T04:11:00Z",
+      "close_time": "2026-02-12T17:40:54Z",
+      "subtitle": "Martin Damm Jr"
+    },
+    {
+      "ticker": "KXATPCHALLENGERMATCH-26FEB12COLDAM-COL",
+      "event_ticker": "KXATPCHALLENGERMATCH-26FEB12COLDAM",
+      "open_time": "2026-02-12T04:11:00Z",
+      "close_time": "2026-02-12T17:40:54Z",
+      "subtitle": "Raphael Collignon"
+    }
+  ],
+  "KXHIGHTHOU": [
+    {
+      "ticker": "KXHIGHTHOU-26FEB12-T82",
+      "event_ticker": "KXHIGHTHOU-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "83\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTHOU-26FEB12-T75",
+      "event_ticker": "KXHIGHTHOU-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "74\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTHOU-26FEB12-B81.5",
+      "event_ticker": "KXHIGHTHOU-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "81\u00b0 to 82\u00b0"
+    }
+  ],
+  "KXHIGHTBOS": [
+    {
+      "ticker": "KXHIGHTBOS-26FEB12-T39",
+      "event_ticker": "KXHIGHTBOS-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "40\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTBOS-26FEB12-T32",
+      "event_ticker": "KXHIGHTBOS-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "31\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTBOS-26FEB12-B38.5",
+      "event_ticker": "KXHIGHTBOS-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "38\u00b0 to 39\u00b0"
+    }
+  ],
+  "KXHIGHTDC": [
+    {
+      "ticker": "KXHIGHTDC-26FEB12-T44",
+      "event_ticker": "KXHIGHTDC-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "45\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTDC-26FEB12-T37",
+      "event_ticker": "KXHIGHTDC-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "36\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTDC-26FEB12-B43.5",
+      "event_ticker": "KXHIGHTDC-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "43\u00b0 to 44\u00b0"
+    }
+  ],
+  "KXHIGHTATL": [
+    {
+      "ticker": "KXHIGHTATL-26FEB12-T66",
+      "event_ticker": "KXHIGHTATL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "67\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTATL-26FEB12-T59",
+      "event_ticker": "KXHIGHTATL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "58\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTATL-26FEB12-B65.5",
+      "event_ticker": "KXHIGHTATL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "65\u00b0 to 66\u00b0"
+    }
+  ],
+  "KXHIGHTPHX": [
+    {
+      "ticker": "KXHIGHTPHX-26FEB12-T84",
+      "event_ticker": "KXHIGHTPHX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T07:00:00Z",
+      "subtitle": "85\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTPHX-26FEB12-T77",
+      "event_ticker": "KXHIGHTPHX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T07:00:00Z",
+      "subtitle": "76\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTPHX-26FEB12-B83.5",
+      "event_ticker": "KXHIGHTPHX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T07:00:00Z",
+      "subtitle": "83\u00b0 to 84\u00b0"
+    }
+  ],
+  "KXHIGHTMIN": [
+    {
+      "ticker": "KXHIGHTMIN-26FEB12-T48",
+      "event_ticker": "KXHIGHTMIN-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "49\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTMIN-26FEB12-T41",
+      "event_ticker": "KXHIGHTMIN-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "40\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTMIN-26FEB12-B47.5",
+      "event_ticker": "KXHIGHTMIN-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "47\u00b0 to 48\u00b0"
+    }
+  ],
+  "KXHIGHTNOLA": [
+    {
+      "ticker": "KXHIGHTNOLA-26FEB12-T75",
+      "event_ticker": "KXHIGHTNOLA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "76\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTNOLA-26FEB12-T68",
+      "event_ticker": "KXHIGHTNOLA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "67\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTNOLA-26FEB12-B74.5",
+      "event_ticker": "KXHIGHTNOLA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "74\u00b0 to 75\u00b0"
+    }
+  ],
+  "KXHIGHTSFO": [
+    {
+      "ticker": "KXHIGHTSFO-26FEB12-T65",
+      "event_ticker": "KXHIGHTSFO-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "66\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTSFO-26FEB12-T58",
+      "event_ticker": "KXHIGHTSFO-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "57\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTSFO-26FEB12-B64.5",
+      "event_ticker": "KXHIGHTSFO-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "64\u00b0 to 65\u00b0"
+    }
+  ],
+  "KXHIGHTOKC": [
+    {
+      "ticker": "KXHIGHTOKC-26FEB12-T73",
+      "event_ticker": "KXHIGHTOKC-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "74\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTOKC-26FEB12-T66",
+      "event_ticker": "KXHIGHTOKC-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "65\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTOKC-26FEB12-B72.5",
+      "event_ticker": "KXHIGHTOKC-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "72\u00b0 to 73\u00b0"
+    }
+  ],
+  "KXHIGHTLV": [
+    {
+      "ticker": "KXHIGHTLV-26FEB12-T70",
+      "event_ticker": "KXHIGHTLV-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "71\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTLV-26FEB12-T63",
+      "event_ticker": "KXHIGHTLV-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "62\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTLV-26FEB12-B69.5",
+      "event_ticker": "KXHIGHTLV-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "69\u00b0 to 70\u00b0"
+    }
+  ],
+  "KXHIGHTDAL": [
+    {
+      "ticker": "KXHIGHTDAL-26FEB12-T80",
+      "event_ticker": "KXHIGHTDAL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "81\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTDAL-26FEB12-T73",
+      "event_ticker": "KXHIGHTDAL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "72\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTDAL-26FEB12-B79.5",
+      "event_ticker": "KXHIGHTDAL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "79\u00b0 to 80\u00b0"
+    }
+  ],
+  "KXHIGHTSEA": [
+    {
+      "ticker": "KXHIGHTSEA-26FEB12-T55",
+      "event_ticker": "KXHIGHTSEA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "56\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTSEA-26FEB12-T48",
+      "event_ticker": "KXHIGHTSEA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "47\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTSEA-26FEB12-B54.5",
+      "event_ticker": "KXHIGHTSEA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "54\u00b0 to 55\u00b0"
+    }
+  ],
+  "KXHIGHTSATX": [
+    {
+      "ticker": "KXHIGHTSATX-26FEB12-T84",
+      "event_ticker": "KXHIGHTSATX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "85\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHTSATX-26FEB12-T77",
+      "event_ticker": "KXHIGHTSATX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "76\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHTSATX-26FEB12-B83.5",
+      "event_ticker": "KXHIGHTSATX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "83\u00b0 to 84\u00b0"
+    }
+  ],
+  "KXHIGHDEN": [
+    {
+      "ticker": "KXHIGHDEN-26FEB12-T62",
+      "event_ticker": "KXHIGHDEN-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:59:00Z",
+      "subtitle": "63\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHDEN-26FEB12-T55",
+      "event_ticker": "KXHIGHDEN-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:59:00Z",
+      "subtitle": "54\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHDEN-26FEB12-B61.5",
+      "event_ticker": "KXHIGHDEN-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:59:00Z",
+      "subtitle": "61\u00b0 to 62\u00b0"
+    }
+  ],
+  "KXHIGHNY": [
+    {
+      "ticker": "KXHIGHNY-26FEB12-T39",
+      "event_ticker": "KXHIGHNY-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T04:59:00Z",
+      "subtitle": "40\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHNY-26FEB12-T32",
+      "event_ticker": "KXHIGHNY-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T04:59:00Z",
+      "subtitle": "31\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHNY-26FEB12-B38.5",
+      "event_ticker": "KXHIGHNY-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T04:59:00Z",
+      "subtitle": "38\u00b0 to 39\u00b0"
+    }
+  ],
+  "KXHIGHMIA": [
+    {
+      "ticker": "KXHIGHMIA-26FEB12-T80",
+      "event_ticker": "KXHIGHMIA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T04:59:00Z",
+      "subtitle": "81\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHMIA-26FEB12-T73",
+      "event_ticker": "KXHIGHMIA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T04:59:00Z",
+      "subtitle": "72\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHMIA-26FEB12-B79.5",
+      "event_ticker": "KXHIGHMIA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T04:59:00Z",
+      "subtitle": "79\u00b0 to 80\u00b0"
+    }
+  ],
+  "KXHIGHAUS": [
+    {
+      "ticker": "KXHIGHAUS-26FEB12-T85",
+      "event_ticker": "KXHIGHAUS-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:59:00Z",
+      "subtitle": "86\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHAUS-26FEB12-T78",
+      "event_ticker": "KXHIGHAUS-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:59:00Z",
+      "subtitle": "77\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHAUS-26FEB12-B84.5",
+      "event_ticker": "KXHIGHAUS-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:59:00Z",
+      "subtitle": "84\u00b0 to 85\u00b0"
+    }
+  ],
+  "KXHIGHLAX": [
+    {
+      "ticker": "KXHIGHLAX-26FEB12-T71",
+      "event_ticker": "KXHIGHLAX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T07:59:00Z",
+      "subtitle": "72\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHLAX-26FEB12-T64",
+      "event_ticker": "KXHIGHLAX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T07:59:00Z",
+      "subtitle": "63\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHLAX-26FEB12-B70.5",
+      "event_ticker": "KXHIGHLAX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T07:59:00Z",
+      "subtitle": "70\u00b0 to 71\u00b0"
+    }
+  ],
+  "KXHIGHPHIL": [
+    {
+      "ticker": "KXHIGHPHIL-26FEB12-T40",
+      "event_ticker": "KXHIGHPHIL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T04:59:00Z",
+      "subtitle": "41\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHPHIL-26FEB12-T33",
+      "event_ticker": "KXHIGHPHIL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T04:59:00Z",
+      "subtitle": "32\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHPHIL-26FEB12-B39.5",
+      "event_ticker": "KXHIGHPHIL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T04:59:00Z",
+      "subtitle": "39\u00b0 to 40\u00b0"
+    }
+  ],
+  "KXHIGHCHI": [
+    {
+      "ticker": "KXHIGHCHI-26FEB12-T45",
+      "event_ticker": "KXHIGHCHI-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:59:00Z",
+      "subtitle": "46\u00b0 or above"
+    },
+    {
+      "ticker": "KXHIGHCHI-26FEB12-T38",
+      "event_ticker": "KXHIGHCHI-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:59:00Z",
+      "subtitle": "37\u00b0 or below"
+    },
+    {
+      "ticker": "KXHIGHCHI-26FEB12-B44.5",
+      "event_ticker": "KXHIGHCHI-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:59:00Z",
+      "subtitle": "44\u00b0 to 45\u00b0"
+    }
+  ],
+  "KXLOWTMIA": [
+    {
+      "ticker": "KXLOWTMIA-26FEB12-T61",
+      "event_ticker": "KXLOWTMIA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "62\u00b0 or above"
+    },
+    {
+      "ticker": "KXLOWTMIA-26FEB12-T54",
+      "event_ticker": "KXLOWTMIA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "53\u00b0 or below"
+    },
+    {
+      "ticker": "KXLOWTMIA-26FEB12-B60.5",
+      "event_ticker": "KXLOWTMIA-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "60\u00b0 to 61\u00b0"
+    }
+  ],
+  "KXLOWTDEN": [
+    {
+      "ticker": "KXLOWTDEN-26FEB12-T36",
+      "event_ticker": "KXLOWTDEN-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T07:00:00Z",
+      "subtitle": "37\u00b0 or above"
+    },
+    {
+      "ticker": "KXLOWTDEN-26FEB12-T29",
+      "event_ticker": "KXLOWTDEN-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T07:00:00Z",
+      "subtitle": "28\u00b0 or below"
+    },
+    {
+      "ticker": "KXLOWTDEN-26FEB12-B35.5",
+      "event_ticker": "KXLOWTDEN-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T07:00:00Z",
+      "subtitle": "35\u00b0 to 36\u00b0"
+    }
+  ],
+  "KXLOWTAUS": [
+    {
+      "ticker": "KXLOWTAUS-26FEB12-T52",
+      "event_ticker": "KXLOWTAUS-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "53\u00b0 or above"
+    },
+    {
+      "ticker": "KXLOWTAUS-26FEB12-T45",
+      "event_ticker": "KXLOWTAUS-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "44\u00b0 or below"
+    },
+    {
+      "ticker": "KXLOWTAUS-26FEB12-B51.5",
+      "event_ticker": "KXLOWTAUS-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "51\u00b0 to 52\u00b0"
+    }
+  ],
+  "KXLOWTPHIL": [
+    {
+      "ticker": "KXLOWTPHIL-26FEB12-T28",
+      "event_ticker": "KXLOWTPHIL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "29\u00b0 or above"
+    },
+    {
+      "ticker": "KXLOWTPHIL-26FEB12-T21",
+      "event_ticker": "KXLOWTPHIL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "20\u00b0 or below"
+    },
+    {
+      "ticker": "KXLOWTPHIL-26FEB12-B27.5",
+      "event_ticker": "KXLOWTPHIL-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "27\u00b0 to 28\u00b0"
+    }
+  ],
+  "KXLOWTLAX": [
+    {
+      "ticker": "KXLOWTLAX-26FEB12-T51",
+      "event_ticker": "KXLOWTLAX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "52\u00b0 or above"
+    },
+    {
+      "ticker": "KXLOWTLAX-26FEB12-T44",
+      "event_ticker": "KXLOWTLAX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "43\u00b0 or below"
+    },
+    {
+      "ticker": "KXLOWTLAX-26FEB12-B50.5",
+      "event_ticker": "KXLOWTLAX-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T08:00:00Z",
+      "subtitle": "50\u00b0 to 51\u00b0"
+    }
+  ],
+  "KXLOWTNYC": [
+    {
+      "ticker": "KXLOWTNYC-26FEB12-T28",
+      "event_ticker": "KXLOWTNYC-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "29\u00b0 or above"
+    },
+    {
+      "ticker": "KXLOWTNYC-26FEB12-T21",
+      "event_ticker": "KXLOWTNYC-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "20\u00b0 or below"
+    },
+    {
+      "ticker": "KXLOWTNYC-26FEB12-B27.5",
+      "event_ticker": "KXLOWTNYC-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T05:00:00Z",
+      "subtitle": "27\u00b0 to 28\u00b0"
+    }
+  ],
+  "KXLOWTCHI": [
+    {
+      "ticker": "KXLOWTCHI-26FEB12-T27",
+      "event_ticker": "KXLOWTCHI-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "28\u00b0 or above"
+    },
+    {
+      "ticker": "KXLOWTCHI-26FEB12-T20",
+      "event_ticker": "KXLOWTCHI-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "19\u00b0 or below"
+    },
+    {
+      "ticker": "KXLOWTCHI-26FEB12-B26.5",
+      "event_ticker": "KXLOWTCHI-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T06:00:00Z",
+      "subtitle": "26\u00b0 to 27\u00b0"
+    }
+  ],
+  "KXRAINNYC": [
+    {
+      "ticker": "KXRAINNYC-26FEB12-T0",
+      "event_ticker": "KXRAINNYC-26FEB12",
+      "open_time": "2026-02-11T15:00:00Z",
+      "close_time": "2026-02-13T04:59:00Z",
+      "subtitle": "Rain in NYC"
+    },
+    {
+      "ticker": "KXRAINNYC-26FEB11-T0",
+      "event_ticker": "KXRAINNYC-26FEB11",
+      "open_time": "2026-02-10T15:00:00Z",
+      "close_time": "2026-02-12T04:59:00Z",
+      "subtitle": "Rain in NYC"
+    },
+    {
+      "ticker": "KXRAINNYC-26FEB10-T0",
+      "event_ticker": "KXRAINNYC-26FEB10",
+      "open_time": "2026-02-09T15:00:00Z",
+      "close_time": "2026-02-11T04:59:00Z",
+      "subtitle": "Rain in NYC"
+    }
+  ],
+  "KXNHLFIRSTGOAL": [
+    {
+      "ticker": "KXNHLFIRSTGOAL-26JAN31COLDET-DETPKANE88",
+      "event_ticker": "KXNHLFIRSTGOAL-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:03:08Z",
+      "subtitle": "Patrick Kane"
+    },
+    {
+      "ticker": "KXNHLFIRSTGOAL-26JAN31COLDET-DETMSEIDER53",
+      "event_ticker": "KXNHLFIRSTGOAL-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:03:04Z",
+      "subtitle": "Moritz Seider"
+    },
+    {
+      "ticker": "KXNHLFIRSTGOAL-26JAN31COLDET-DETMKASPER92",
+      "event_ticker": "KXNHLFIRSTGOAL-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:03:10Z",
+      "subtitle": "Marco Kasper"
+    }
+  ],
+  "KXNHLPTS": [
+    {
+      "ticker": "KXNHLPTS-26JAN31COLDET-DETPKANE88-3",
+      "event_ticker": "KXNHLPTS-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:03:00Z",
+      "subtitle": "Patrick Kane: 3+"
+    },
+    {
+      "ticker": "KXNHLPTS-26JAN31COLDET-DETPKANE88-2",
+      "event_ticker": "KXNHLPTS-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:02:59Z",
+      "subtitle": "Patrick Kane: 2+"
+    },
+    {
+      "ticker": "KXNHLPTS-26JAN31COLDET-DETPKANE88-1",
+      "event_ticker": "KXNHLPTS-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:02:58Z",
+      "subtitle": "Patrick Kane: 1+"
+    }
+  ],
+  "KXNHLAST": [
+    {
+      "ticker": "KXNHLAST-26JAN31COLDET-DETPKANE88-2",
+      "event_ticker": "KXNHLAST-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:03:31Z",
+      "subtitle": "Patrick Kane: 2+"
+    },
+    {
+      "ticker": "KXNHLAST-26JAN31COLDET-DETPKANE88-1",
+      "event_ticker": "KXNHLAST-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:03:31Z",
+      "subtitle": "Patrick Kane: 1+"
+    },
+    {
+      "ticker": "KXNHLAST-26JAN31COLDET-DETMSEIDER53-2",
+      "event_ticker": "KXNHLAST-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:03:27Z",
+      "subtitle": "Moritz Seider: 2+"
+    }
+  ],
+  "KXNHLGOAL": [
+    {
+      "ticker": "KXNHLGOAL-26JAN31COLDET-DETPKANE88",
+      "event_ticker": "KXNHLGOAL-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:33:04Z",
+      "subtitle": "Patrick Kane"
+    },
+    {
+      "ticker": "KXNHLGOAL-26JAN31COLDET-DETMSEIDER53",
+      "event_ticker": "KXNHLGOAL-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:33:02Z",
+      "subtitle": "Moritz Seider"
+    },
+    {
+      "ticker": "KXNHLGOAL-26JAN31COLDET-DETMKASPER92",
+      "event_ticker": "KXNHLGOAL-26JAN31COLDET",
+      "open_time": "2026-01-31T15:06:00Z",
+      "close_time": "2026-01-31T21:33:06Z",
+      "subtitle": "Marco Kasper"
+    }
+  ]
+}

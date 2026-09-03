@@ -1,0 +1,157 @@
+58 unparseable line(s) skipped
+
+Gate funnel — last 168h (2026-05-03T03:29:01Z to 2026-05-10T03:29:01Z)
+
+scanner_reject                1,257,982 events
+  category                            1,162,165 (92.4%)
+    KXUSDJPY-26MAY0710-T157.499                         142x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026F4E50CC4ECA-F0B4A6F43DC  142x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026F4E50CC4ECA-C937227E976  142x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026F4E50CC4ECA-8F076EF5802  142x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026F4E50CC4ECA-834D00329E6  142x
+    ... and 119607 more ticker(s)
+  financial_bracket_disabled          54,704 (4.3%)
+    KXNASDAQ100U-26MAY07H1600-T30799.99                 141x
+    KXNASDAQ100U-26MAY07H1600-T30699.99                 141x
+    KXNASDAQ100U-26MAY07H1600-T30599.99                 141x
+    KXNASDAQ100U-26MAY07H1600-T30399.99                 141x
+    KXNASDAQ100U-26MAY07H1600-T30299.99                 141x
+    ... and 5975 more ticker(s)
+  hours                               41,113 (3.3%)
+    KXNBA-26-SAS                                        375x
+    KXNBA-26-OKC                                        375x
+    KXNBA-26-LAL                                        375x
+    KXNBA-26-DET                                        375x
+    KXNBA-26-CLE                                        375x
+    ... and 690 more ticker(s)
+
+gt_routing                    30,395 events
+  source_returned_none                23,935 (78.7%)
+    KXNBAGAME-26MAY08NYKPHI-NYK                         457x
+    KXNBAGAME-26MAY08SASMIN-SAS                         455x
+    KXNBAGAME-26MAY08SASMIN-MIN                         425x
+    KXNBAGAME-26MAY08NYKPHI-PHI                         416x
+    KXNBAGAME-26MAY09OKCLAL-LAL                         365x
+    ... and 3397 more ticker(s)
+    sample extra: none_reasons=['SportsLiveSource: returned None (no relevant data found)'
+                  'SportsDataSource: returned None (no relevant data found)']
+  source_not_tradeable                 6,460 (21.3%)
+    KXINX-26MAY07H1600-T6900                            665x
+    KXINX-26MAY08H1600-T6850                            607x
+    KXTNOTEW-26MAY08-T4.22                              520x
+    KXMVECROSSCATEGORY-S2026094B2066F27-73A7647311C     440x
+    KXMVECROSSCATEGORY-S2026771B13DCDB1-DF0B8E729CB     381x
+    ... and 134 more ticker(s)
+    sample extra: source_name=Federal Register API, confidence=0.5
+
+confidence                    287 events
+  source_below_gate                      285 (99.3%)
+    KXTNOTEW-26MAY08-T4.22                              192x
+    KXINX-26MAY08H1600-T6850                            32x
+    KXNATGASD-26MAY0717-T3                              24x
+    KXGOLDW-26MAY0817-T4213.99                          21x
+    KXINX-26MAY07H1600-T6900                            6x
+    ... and 3 more ticker(s)
+    sample extra: source_confidence=0.4875, clarity=0.85, freshness=0.75, gate_threshold=0.65
+                  has_hard_dispute=False, has_soft_dispute=False
+  direction_ambiguous                      2 (0.7%)
+    TEST-MKT                                            2x
+    sample extra: gt_source=TestSource
+
+executor_pretrade             1,294 events
+  gt_stale_at_entry                      942 (72.8%)
+    KXINX-26MAY07H1600-T6900                            538x
+    KXWTI-26MAY07-T97.99                                178x
+    KXINX-26MAY08H1600-T6850                            62x
+    KXINX-26MAY06H1600-T6850                            49x
+    KXWTI-26MAY07-T92.99                                45x
+    ... and 13 more ticker(s)
+    sample extra: gt_age_seconds=619.972034, threshold_seconds=300, gt_source=Yahoo Finance/CL=F
+  large_divergence_extreme_market        314 (24.3%)
+    KXAAAGASD-26MAY09-4.520                             134x
+    KXAAAGASD-26MAY08-4.590                             77x
+    KXAAAGASD-26MAY09-4.510                             36x
+    KXAAAGASD-26MAY09-4.515                             23x
+    KXAAAGASD-26MAY08-4.585                             11x
+    ... and 10 more ticker(s)
+    sample extra: gap_pct=93.0, market_price=0.95, gt_prob=0.02
+  series_cap                              29 (2.2%)
+    KXAAAGASD-26MAY07-4.575                             9x
+    KXAAAGASD-26MAY07-4.560                             8x
+    KXAAAGASD-26MAY07-4.540                             6x
+    KXAAAGASD-26MAY07-4.585                             1x
+    KXAAAGASD-26MAY07-4.545                             1x
+    ... and 4 more ticker(s)
+    sample extra: series_root=KXAAAGASD, existing_pct=49.681999999999995, cap_pct=50
+  perm_skip_confidence_failures            8 (0.6%)
+    KXNATGASD-26MAY0717-T3                              2x
+    KXTNOTEW-26MAY08-T4.22                              2x
+    KXINX-26MAY07H1600-T6900                            1x
+    KXWTI-26MAY07-T92.99                                1x
+    KXINX-26MAY08H1600-T6850                            1x
+    ... and 1 more ticker(s)
+    sample extra: source_confidence=0.4875, confidence_gate=0.65, consecutive_failures=3
+  empty_book_ghost                         1 (0.1%)
+    KXNBAGAME-26MAY09DETCLE-DET                         1x
+
+snipe                         8,597 events
+  no_signal                            8,534 (99.3%)
+    KXLOWTSATX-26MAY06-T75                              21x
+    KXLOWTSATX-26MAY06-T68                              21x
+    KXLOWTSATX-26MAY06-B74.5                            21x
+    KXLOWTSATX-26MAY06-B72.5                            21x
+    KXLOWTSATX-26MAY06-B70.5                            21x
+    ... and 733 more ticker(s)
+    sample extra: shadow=True, minutes_to_close=93
+  dedup                                   31 (0.4%)
+    KXHIGHTPHX-26APR30-T80                              4x
+    KXLOWTPHIL-26MAY07-T52                              1x
+    KXLOWTPHIL-26MAY07-B51.5                            1x
+    KXLOWTBOS-26MAY07-B51.5                             1x
+    KXLOWTBOS-26MAY07-B49.5                             1x
+    ... and 23 more ticker(s)
+    sample extra: signal_class=weather_snipe
+  bankroll                                18 (0.2%)
+    KXHIGHTPHX-26APR30-T80                              4x
+    KXLOWTSEA-26MAY07-B50.5                             2x
+    KXHIGHTSFO-26MAY07-T62                              2x
+    KXHIGHTSFO-26MAY07-B62.5                            2x
+    KXLOWTSEA-26MAY07-T51                               1x
+    ... and 7 more ticker(s)
+    sample extra: signal_class=weather_snipe
+  empty_book_snipe                        10 (0.1%)
+    KXHIGHTPHX-26APR30-T80                              8x
+    KXLOWTDC-26MAY06-T59                                1x
+    KXLOWTOKC-26MAY06-B45.5                             1x
+    sample extra: signal_class=weather_snipe
+  series_cap                               4 (0.0%)
+    KXHIGHTPHX-26APR30-T80                              4x
+    sample extra: series_root=KXHIGHTPHX, signal_class=weather_snipe
+
+smoke                         6 events
+  (none)                                   2 (33.3%)
+    KXTEST-1                                            2x
+  test_reject                              2 (33.3%)
+    KXTEST-2                                            2x
+    sample extra: foo=42
+  test_unserializable                      2 (33.3%)
+    KXTEST-3                                            2x
+
+invariant_violation           6,515 events
+  ws_rest_mid_disagreement             5,321 (81.7%)
+    KXWTI-26MAY08-T92.99                                124x
+    KXWTI-26MAY08-T97.99                                90x
+    KXGOLDW-26MAY0817-T4713.99                          80x
+    KXSILVERW-26MAY0817-T79.99                          78x
+    KXWTI-26MAY08-T93.99                                76x
+    ... and 1408 more ticker(s)
+    sample extra: ws_mid=0.6399999999999999, rest_mid=0.6950000000000001, delta=-0.055
+  implausible_gap                      1,194 (18.3%)
+    KXMVECROSSCATEGORY-S20268E149EBD55B-6180587743F     314x
+    KXMVECROSSCATEGORY-S20268E149EBD55B-6FC96D978D3     312x
+    KXMVECROSSCATEGORY-S2026B1EAC50197B-96DDA2AFAE3     293x
+    KXAAAGASD-26MAY09-4.520                             163x
+    KXAAAGASD-26MAY09-4.510                             50x
+    ... and 9 more ticker(s)
+    sample extra: market_price=0.75, gt_prob=0.02, gap=0.73
+

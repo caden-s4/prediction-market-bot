@@ -1,0 +1,90 @@
+57 unparseable line(s) skipped
+
+Gate funnel — last 168h (2026-04-30T03:00:43Z to 2026-05-07T03:00:43Z)
+
+scanner_reject                268,201 events
+  category                            241,302 (90.0%)
+    KXUSDJPY-26MAY0710-T157.499                         91x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026F4E50CC4ECA-F0B4A6F43DC  91x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026F4E50CC4ECA-C937227E976  91x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026F4E50CC4ECA-8F076EF5802  91x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026F4E50CC4ECA-834D00329E6  91x
+    ... and 16170 more ticker(s)
+  financial_bracket_disabled          16,714 (6.2%)
+    KXNASDAQ100U-26MAY07H1600-T30799.99                 67x
+    KXNASDAQ100U-26MAY07H1600-T30699.99                 67x
+    KXNASDAQ100U-26MAY07H1600-T30599.99                 67x
+    KXNASDAQ100U-26MAY07H1600-T30399.99                 67x
+    KXNASDAQ100U-26MAY07H1600-T30299.99                 67x
+    ... and 1085 more ticker(s)
+  hours                               10,185 (3.8%)
+    KXNBA-26-SAS                                        91x
+    KXNBA-26-OKC                                        91x
+    KXNBA-26-LAL                                        91x
+    KXNBA-26-DET                                        91x
+    KXNBA-26-CLE                                        91x
+    ... and 115 more ticker(s)
+
+gt_routing                    1,192 events
+  source_returned_none                   921 (77.3%)
+    KXSPOTIFY2D-26MAY06-BEA                             5x
+    KXSPOTIFY2D-26MAY06-BIL                             5x
+    KXSPOTIFYGLOBALD-26MAY06-BEAT                       5x
+    KXEURUSD-26MAY0710-B1.171                           5x
+    KXEURUSD-26MAY0710-B1.173                           5x
+    ... and 219 more ticker(s)
+    sample extra: none_reasons=['SportsDataSource: returned None (no relevant data found)']
+  source_not_tradeable                   271 (22.7%)
+    KXMVECROSSCATEGORY-S20260BFD1C701CF-9008F01735C     17x
+    KXMVECROSSCATEGORY-S202610A8567B1CC-6C91C16EEBA     17x
+    KXMVECROSSCATEGORY-S20267F227E605FD-D0AFDFAE67C     17x
+    KXMVECROSSCATEGORY-S2026F6440352B8B-5D4AB10E90C     17x
+    KXMVECROSSCATEGORY-S2026FBCD6B44755-CA8DD0727FC     17x
+    ... and 24 more ticker(s)
+    sample extra: source_name=Federal Register API, confidence=0.5
+
+executor_pretrade             132 events
+  gt_stale_at_entry                       96 (72.7%)
+    KXINX-26MAY06H1600-T6850                            49x
+    KXWTI-26MAY07-T92.99                                23x
+    KXWTI-26MAY07-T97.99                                16x
+    KXINX-26MAY07H1600-T6900                            2x
+    KXWTI-26MAY07-T88.99                                1x
+    ... and 5 more ticker(s)
+    sample extra: gt_age_seconds=608.538176, threshold_seconds=300, gt_source=Yahoo Finance/CL=F
+  series_cap                              29 (22.0%)
+    KXAAAGASD-26MAY07-4.575                             9x
+    KXAAAGASD-26MAY07-4.560                             8x
+    KXAAAGASD-26MAY07-4.540                             6x
+    KXAAAGASD-26MAY07-4.585                             1x
+    KXAAAGASD-26MAY07-4.545                             1x
+    ... and 4 more ticker(s)
+    sample extra: series_root=KXAAAGASD, existing_pct=49.681999999999995, cap_pct=50
+  large_divergence_extreme_market          6 (4.5%)
+    KXAAAGASD-26MAY07-4.545                             4x
+    KXAAAGASD-26MAY07-4.605                             1x
+    KXAAAGASD-26MAY07-4.610                             1x
+    sample extra: gap_pct=95.0, market_price=0.97, gt_prob=0.02
+  perm_skip_confidence_failures            1 (0.8%)
+    KXNATGASD-26MAY0717-T3                              1x
+    sample extra: source_confidence=0.6375, confidence_gate=0.65, consecutive_failures=3
+
+snipe                         930 events
+  no_signal                              930 (100.0%)
+    KXLOWTPHIL-26MAY06-T65                              10x
+    KXLOWTNYC-26MAY06-T63                               10x
+    KXLOWTMIA-26MAY06-T75                               10x
+    KXLOWTMIA-26MAY06-T68                               10x
+    KXLOWTMIA-26MAY06-B74.5                             10x
+    ... and 114 more ticker(s)
+    sample extra: shadow=True, minutes_to_close=120
+
+smoke                         6 events
+  (none)                                   2 (33.3%)
+    KXTEST-1                                            2x
+  test_reject                              2 (33.3%)
+    KXTEST-2                                            2x
+    sample extra: foo=42
+  test_unserializable                      2 (33.3%)
+    KXTEST-3                                            2x
+

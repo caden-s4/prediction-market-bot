@@ -1,0 +1,48 @@
+Loading entries from ghost_trades.jsonl...
+  263 unique entry tickers found
+  254 tickers already cached as finalized
+
+Fetching 9 tickers (skipping 254 cached)...
+  Done. Cache saved to C:\Users\caden\Desktop\prediction_market_bot\data\runtime\settlement_cache.json
+
+======================================================================
+REPORT A — OVERALL
+======================================================================
+  Total unique entry tickers : 263
+  Finalized (settled)        : 255
+  Still open / not finalized : 8
+  Fetch failures             : 0
+
+  Directional accuracy : 72.2%  (184/255)
+  95% Wilson CI        : [66.4%, 77.3%]
+
+======================================================================
+REPORT B — PER SERIES
+======================================================================
+
+Series breakdown
+----------------------------------------------------------------------
+  KXBRENTD                                 N=54    acc=44.4%  95%CI [32.0%, 57.6%]
+  KXNASDAQ100U                             N=47    acc=97.9%  95%CI [88.9%, 99.6%]
+  KXNBAGAME                                N=45    acc=57.8%  95%CI [43.3%, 71.0%]
+  KXWTI                                    N=41    acc=80.5%  95%CI [66.0%, 89.8%]
+  KXNCAAMBGAME                             N=14    acc=57.1%  95%CI [32.6%, 78.6%]
+  KXNCAAWBGAME                             N=13    acc=76.9%  95%CI [49.7%, 91.8%]
+  KXGOLDD                                  N=11    acc=90.9%  95%CI [62.3%, 98.4%]
+  LOW_VOLUME (<10 trades, 8 series)        N=30    acc=90.0%  95%CI [74.4%, 96.5%]
+
+======================================================================
+REPORT C — PER GT SOURCE
+======================================================================
+
+Source breakdown
+----------------------------------------------------------------------
+  Yahoo Finance/CL=F                       N=97    acc=60.8%  95%CI [50.9%, 69.9%]
+  Yahoo Finance/NQ=F                       N=51    acc=98.0%  95%CI [89.7%, 99.7%]
+  ESPN/basketball/nba                      N=22    acc=72.7%  95%CI [51.8%, 86.8%]
+  ResolutionDetector/ConfirmedFinal        N=21    acc=38.1%  95%CI [20.8%, 59.1%]
+  Yahoo Finance/GC=F                       N=19    acc=89.5%  95%CI [68.6%, 97.1%]
+  SportsLiveSource/Shock                   N=15    acc=53.3%  95%CI [30.1%, 75.2%]
+  LOW_VOLUME (<10 trades, 6 series)        N=30    acc=86.7%  95%CI [70.3%, 94.7%]
+
+CSV saved: C:\Users\caden\Desktop\prediction_market_bot\data\runtime\phase0_accuracy_results.csv  (255 rows)

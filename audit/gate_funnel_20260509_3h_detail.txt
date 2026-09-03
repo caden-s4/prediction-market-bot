@@ -1,0 +1,64 @@
+58 unparseable line(s) skipped
+
+Gate funnel — last 3h (2026-05-09T23:07:51Z to 2026-05-10T02:07:51Z)
+
+scanner_reject                42,180 events
+  category                            40,849 (96.8%)
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026FCB504658E9-568DD187A29  13x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026FC2AD916034-ED7BC2A247F  13x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026E6EB8BE681C-CBC92B5B65A  13x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026DE73FF37B10-71398703D85  13x
+    KXMVESPORTSMULTIGAMEEXTENDED-S2026DBC35111055-76997DF6CDE  13x
+    ... and 6047 more ticker(s)
+  hours                                1,331 (3.2%)
+    KXNBA-26-SAS                                        13x
+    KXNBA-26-PHI                                        13x
+    KXNBA-26-OKC                                        13x
+    KXNBA-26-NYK                                        13x
+    KXNBA-26-MIN                                        13x
+    ... and 99 more ticker(s)
+
+gt_routing                    1,558 events
+  source_returned_none                 1,299 (83.4%)
+    KXMVECROSSCATEGORY-S202605F954E4918-86EB6A0462B     10x
+    KXMVECROSSCATEGORY-S202610C4FC73366-25289BAB181     10x
+    KXMVECROSSCATEGORY-S202617493F2DA49-274EF2E5EF9     10x
+    KXMVECROSSCATEGORY-S20261A7AD6E3AD2-E5842925B31     10x
+    KXMVECROSSCATEGORY-S20262122D4F0104-D7CAD0AAFFD     10x
+    ... and 232 more ticker(s)
+    sample extra: none_reasons=['SportsLiveSource: returned None (no relevant data found)'
+                  'SportsDataSource: returned None (no relevant data found)']
+  source_not_tradeable                   259 (16.6%)
+    KXMVECROSSCATEGORY-S2026A0C9FD4C5D4-D5ECE78FE1A     21x
+    KXMVECROSSCATEGORY-S2026A2CA89B47A8-E81D81CDCD3     21x
+    KXMVECROSSCATEGORY-S2026BCF3CFBD26B-FA0FC612B73     21x
+    KXMAMDANIEO-26MAY09-T0                              21x
+    KXMVECROSSCATEGORY-S202650BBC4E5713-6637AC420B9     21x
+    ... and 8 more ticker(s)
+    sample extra: source_name=Federal Register API, confidence=0.5
+
+snipe                         199 events
+  no_signal                              199 (100.0%)
+    KXLOWTPHIL-26MAY09-T52                              4x
+    KXLOWTPHIL-26MAY09-T45                              4x
+    KXLOWTPHIL-26MAY09-B51.5                            4x
+    KXLOWTPHIL-26MAY09-B49.5                            4x
+    KXLOWTPHIL-26MAY09-B47.5                            4x
+    ... and 47 more ticker(s)
+    sample extra: shadow=True, minutes_to_close=184
+
+invariant_violation           265 events
+  ws_rest_mid_disagreement               196 (74.0%)
+    KXTRUTHSOCIAL-26MAY09-B169                          12x
+    KXTRUTHSOCIAL-26MAY09-B149                          7x
+    KXPUREALBUMS-CHO26MAY07-1K                          6x
+    KXAAAGASD-26MAY10-4.555                             6x
+    KXAAAGASD-26MAY10-4.560                             6x
+    ... and 82 more ticker(s)
+    sample extra: ws_mid=0.62, rest_mid=0.85, delta=-0.23
+  implausible_gap                         69 (26.0%)
+    KXMVECROSSCATEGORY-S2026B1EAC50197B-96DDA2AFAE3     29x
+    KXMVECROSSCATEGORY-S20268E149EBD55B-6180587743F     20x
+    KXMVECROSSCATEGORY-S20268E149EBD55B-6FC96D978D3     20x
+    sample extra: market_price=0.75, gt_prob=0.02, gap=0.73
+

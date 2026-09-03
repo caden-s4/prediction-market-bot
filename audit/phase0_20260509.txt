@@ -1,0 +1,52 @@
+Loading entries from ghost_trades.jsonl...
+  339 unique entry tickers found
+  255 tickers already cached as finalized
+
+Fetching 84 tickers (skipping 255 cached)...
+  Fetched 50/84 tickers
+  Done. Cache saved to C:\Users\caden\Desktop\prediction_market_bot\data\runtime\settlement_cache.json
+
+======================================================================
+REPORT A — OVERALL
+======================================================================
+  Total unique entry tickers : 339
+  Finalized (settled)        : 330
+  Still open / not finalized : 9
+  Fetch failures             : 0
+
+  Directional accuracy : 59.1%  (195/330)
+  95% Wilson CI        : [53.7%, 64.3%]
+
+======================================================================
+REPORT B — PER SERIES
+======================================================================
+
+Series breakdown
+----------------------------------------------------------------------
+  KXBRENTD                                 N=54    acc=44.4%  95%CI [32.0%, 57.6%]
+  KXNASDAQ100U                             N=47    acc=97.9%  95%CI [88.9%, 99.6%]
+  KXNBAGAME                                N=46    acc=58.7%  95%CI [44.3%, 71.7%]
+  KXWTI                                    N=41    acc=80.5%  95%CI [66.0%, 89.8%]
+  KXAAAGASD                                N=16    acc=62.5%  95%CI [38.6%, 81.5%]
+  KXNCAAMBGAME                             N=14    acc=57.1%  95%CI [32.6%, 78.6%]
+  KXNCAAWBGAME                             N=13    acc=76.9%  95%CI [49.7%, 91.8%]
+  KXGOLDD                                  N=11    acc=90.9%  95%CI [62.3%, 98.4%]
+  LOW_VOLUME (<10 trades, 31 series)       N=88    acc=30.7%  95%CI [22.0%, 41.0%]
+
+======================================================================
+REPORT C — PER GT SOURCE
+======================================================================
+  (excluded 18 pre-fix ResolutionDetector rows; use --include-pre-fix to include)
+
+Source breakdown
+----------------------------------------------------------------------
+  Yahoo Finance/CL=F                       N=97    acc=60.8%  95%CI [50.9%, 69.9%]
+  WeatherSnipe                             N=58    acc=0.0%  95%CI [0.0%, 6.2%]
+  Yahoo Finance/NQ=F                       N=51    acc=98.0%  95%CI [89.7%, 99.7%]
+  ESPN/basketball/nba                      N=22    acc=72.7%  95%CI [51.8%, 86.8%]
+  FRED/GASREGCOVW                          N=21    acc=61.9%  95%CI [40.9%, 79.2%]
+  Yahoo Finance/GC=F                       N=19    acc=89.5%  95%CI [68.6%, 97.1%]
+  SportsLiveSource/Shock                   N=15    acc=53.3%  95%CI [30.1%, 75.2%]
+  LOW_VOLUME (<10 trades, 6 series)        N=29    acc=93.1%  95%CI [78.0%, 98.1%]
+
+CSV saved: C:\Users\caden\Desktop\prediction_market_bot\data\runtime\phase0_accuracy_results.csv  (330 rows)

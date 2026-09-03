@@ -1,0 +1,19 @@
+58 unparseable line(s) skipped
+
+Gate funnel — last 3h (2026-05-09T23:07:44Z to 2026-05-10T02:07:44Z)
+
+scanner_reject                42,180 events
+  category                            40,849 (96.8%)
+  hours                                1,331 (3.2%)
+
+gt_routing                    1,556 events
+  source_returned_none                 1,298 (83.4%)
+  source_not_tradeable                   258 (16.6%)
+
+snipe                         199 events
+  no_signal                              199 (100.0%)
+
+invariant_violation           265 events
+  ws_rest_mid_disagreement               196 (74.0%)
+  implausible_gap                         69 (26.0%)
+

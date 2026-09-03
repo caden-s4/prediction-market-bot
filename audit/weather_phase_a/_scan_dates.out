@@ -1,0 +1,128 @@
+
+PER-SERIES DATE WINDOW + STATS:
+
+  KXHIGHTNOLA
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T06:00:00Z last=2026-02-13T06:00:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['50° or above', '73° or below', '46° to 47°', '59° to 60°']
+
+  KXHIGHTSFO
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T08:00:00Z last=2026-02-13T08:00:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['56° to 57°', '73° or above', '62° or below', '59° to 60°']
+
+  KXHIGHTLV
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T08:00:00Z last=2026-02-13T08:00:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['62° or below', '68° or below', '76° or above', '71° or above']
+
+  KXHIGHTSEA
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T08:00:00Z last=2026-02-13T08:00:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['58° or above', '50° to 51°', '46° to 47°', '56° to 57°']
+
+  KXHIGHDEN
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T06:59:00Z last=2026-02-13T06:59:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['56° to 57°', '62° or below', '49° to 50°', '59° to 60°']
+
+  KXHIGHNY
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T04:59:00Z last=2026-02-13T04:59:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['44° or above', '18° or below', '42° to 43°', '34° or above']
+
+  KXHIGHMIA
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T04:59:00Z last=2026-02-13T04:59:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['56° to 57°', '62° or below', '49° to 50°', '68° or below']
+
+  KXHIGHAUS
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T05:59:00Z last=2026-02-13T05:59:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['49° or above', '73° or above', '83° to 84°', '59° to 60°']
+
+  KXHIGHLAX
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T07:59:00Z last=2026-02-13T07:59:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['73° or below', '62° or below', '83° to 84°', '68° or below']
+
+  KXHIGHPHIL
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T04:59:00Z last=2026-02-13T04:59:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['41° or above', '43° or above', '26° or below', '39° or above']
+
+  KXHIGHCHI
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T05:59:00Z last=2026-02-13T05:59:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['44° or above', '46° to 47°', '43° or above', '22° or below']
+
+  KXLOWTMIA
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T05:00:00Z last=2026-02-13T05:00:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['56° to 57°', '50° to 51°', '46° to 47°', '49° to 50°']
+
+  KXLOWTDEN
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T07:00:00Z last=2026-02-13T07:00:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['22° or below', '39° or above', '27° to 28°', '17° to 18°']
+
+  KXLOWTAUS
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T06:00:00Z last=2026-02-13T06:00:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['50° or above', '49° or above', '50° to 51°', '46° to 47°']
+
+  KXLOWTPHIL
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T05:00:00Z last=2026-02-13T05:00:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['9° to 10°', '12° to 13°', '16° or above', '11° to 12°']
+
+  KXLOWTLAX
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T08:00:00Z last=2026-02-13T08:00:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['58° or above', '50° to 51°', '46° to 47°', '56° to 57°']
+
+  KXLOWTNYC
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T05:00:00Z last=2026-02-13T05:00:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['9° to 10°', '12° to 13°', '2° to 3°', '11° to 12°']
+
+  KXLOWTCHI
+    distinct event dates: 13 | first: 26FEB01 | last: 26JAN31
+    close_time samples: first=2026-02-01T06:00:00Z last=2026-02-13T06:00:00Z
+    total volume_24h sum: 0
+    total open_interest sum: 0
+    bracket subtitle samples: ['9° to 10°', '12° to 13°', '16° or above', '11° to 12°']

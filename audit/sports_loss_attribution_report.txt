@@ -1,0 +1,183 @@
+==============================================================================
+SPORTS LOSS ATTRIBUTION — diagnostic only
+==============================================================================
+
+# Section 1 — Data quality sanity check
+
+Total records in ghost_trades.jsonl: see all prefix counter below
+
+Sports prefixes seen:
+  KXNBAGAME            340
+  KXNCAAWBGAME         230
+  KXNCAAMBGAME         53
+  KXMLBSTGAME          1
+
+Sports entry records: 278
+Sports exit  records: 244
+Sports other records: 102
+
+Distinct sports market_ids touched: 74
+  strict clean pairs (1e, 1x):           17
+  per-entry pairs (TRADE rows):          245
+  markets w/ multi entries:              29
+  markets w/ multi exits:                28
+  orphan exits (no entry):               0
+  open entries (no exit yet):            33 in 28 mids
+
+  sample multi-exit mids: ['KXNCAAWBGAME-26MAR23ILLVAN-VAN', 'KXNBAGAME-26MAR23MEMATL-MEM', 'KXNBAGAME-26MAR27MIACLE-MIA', 'KXNCAAMBGAME-26MAR26ILLHOU-ILL', 'KXNCAAWBGAME-26MAR23SYRCONN-SYR']
+
+Pairing strategy comparison:
+  strict clean pairs (1e,1x):  N=  17  wins=   3  WR= 17.65%
+  per-entry trade rows:        N= 245  wins=   5  WR=  2.04%
+  user reported: ~2.1% WR on 243 paired sports trades
+
+  -> per-entry pairing matches user's count (245 ~ 243). Using this set.
+
+PNL distribution on per-entry trade rows:
+  pnl > 0  (true wins):               5  (  2.0%)
+  pnl < 0  (true losses):             7  (  2.9%)
+  pnl == 0 (unfilled/no-fill):      233  ( 95.1%)
+
+Exit-reason distribution among pnl==0 rows:
+  unfilled_timeout          233
+
+Exit-reason distribution among FILLED rows (pnl != 0):
+  game_final                12
+
+INTERPRETATION:
+  Majority of trade rows (233/245 = 95%) are pnl==0 unfilled.
+  The headline '~2% win rate' counts these as non-wins.
+  Among rows that ACTUALLY FILLED (pnl != 0):
+    filled trades = 12, wins = 5, losses = 7, fill-only WR = 41.7%
+
+==============================================================================
+# Section 2 - Source-bucketed breakdown (per-entry trade rows)
+==============================================================================
+
+source                                  N  wins     WR%    sum_pnl   mean_pnl
+--------------------------------------------------------------------------------
+ESPN/basketball/nba                    98     0    0.0%    -273.86      -2.79
+ESPN/basketball/womens-college-basketball    83     0    0.0%       0.00       0.00
+ResolutionDetector                     51     0    0.0%       0.00       0.00
+SportsLiveSource                       13     5   38.5%   57658.25    4435.25
+
+Exit reason distribution per source:
+  ESPN/basketball/nba:
+     unfilled_timeout          93
+     game_final                5
+  ESPN/basketball/womens-college-basketball:
+     unfilled_timeout          83
+  ResolutionDetector:
+     unfilled_timeout          51
+  SportsLiveSource:
+     game_final                7
+     unfilled_timeout          6
+
+Raw source string distribution (per-entry trade rows):
+  'ESPN/basketball/nba'                                        98
+  'ESPN/basketball/womens-college-basketball'                  83
+  'ResolutionDetector/ConfirmedFinal'                          51
+  'SportsLiveSource/Shock'                                     12
+  'SportsLiveSource/LateGame'                                  1
+
+==============================================================================
+# Section 3 - Wrong-side test (per-entry trade rows)
+==============================================================================
+
+Settlement side derivation: using exit_price from ghost trade log.
+  exit_price == 1.0  -> YES side resolved (YES team won)
+  exit_price == 0.0  -> NO side resolved (NO team won)
+  other              -> treat as unsettled / unclear
+
+Verifying derivation against kalshi.get_market() on a sample...
+  (could not verify via kalshi: KalshiClient.__init__() missing 2 required positional arguments: 'api_key' and 'api_secret')
+
+Losing trade rows: 7
+
+Classification of 7 losing per-entry trade rows:
+  INVERTED                      7  (100.0%)
+  CORRECT-SIDE-LOST             0  (0.0%)
+  UNSETTLED                     0  (0.0%)
+  GET_YES_TEAM_FAILED           0  (0.0%)
+
+Per-source breakdown of classification:
+  source                                INVERTED CORRECT-SIDE-LOST  UNSETTLED GET_YES_TEAM_FAILED    total
+  ESPN/basketball/nba                          5          0          0          0        5
+  SportsLiveSource                             2          0          0          0        2
+
+==============================================================================
+# Section 4 — Layer attribution sample for INVERTED trades
+==============================================================================
+
+Inverted samples (up to 10 per source). For each, we record:
+  entry_ts, market_id, source, action, gt_prob (entry), exit_price (settled side),
+  yes_team (per team_resolver). The fact pattern shows where inversion lives:
+
+  If gt_prob ~= 1.0 AND action=buy_no AND yes_team won (exit_price=1.0):
+     -> GT said 'YES will win' but bot bet NO -- Layer B (signal inversion)
+  If gt_prob ~= 0.0 AND action=buy_yes AND yes_team lost (exit_price=0.0):
+     -> GT said 'NO will win' but bot bet YES -- Layer B
+  If gt_prob ~= 1.0 AND action=buy_yes AND yes_team lost:
+     -> GT was inverted (Layer A) OR team_resolver wrong (Layer D)
+
+--- Source: ESPN/basketball/nba  (5 inverted total)
+  2026-03-22T23:12:52.345888+00:00  KXNBAGAME-26MAR22PORDEN-POR
+     action=buy_no    gt_prob=0.0  confidence=0.95
+     yes_team='portland trail blazers'  settled=yes  exit_price=1.0
+     pnl=-57.0  layer_diagnosis: Layer A - GT/source direction disagreed with settlement
+  2026-03-25T02:43:07.923293+00:00  KXNBAGAME-26MAR24ORLCLE-ORL
+     action=buy_no    gt_prob=0.02  confidence=0.95
+     yes_team='orlando magic'  settled=yes  exit_price=1.0
+     pnl=-48.58  layer_diagnosis: Layer A - GT/source direction disagreed with settlement
+  2026-03-25T01:13:57.016031+00:00  KXNBAGAME-26MAR24SACCHA-SAC
+     action=buy_no    gt_prob=0.02  confidence=0.95
+     yes_team='sacramento kings'  settled=yes  exit_price=1.0
+     pnl=-54.28  layer_diagnosis: Layer A - GT/source direction disagreed with settlement
+  2026-03-23T01:50:28.063409+00:00  KXNBAGAME-26MAR22WASNYK-WAS
+     action=buy_no    gt_prob=0.0  confidence=0.95
+     yes_team='washington wizards'  settled=yes  exit_price=1.0
+     pnl=-57.0  layer_diagnosis: Layer A - GT/source direction disagreed with settlement
+  2026-03-23T01:52:06.686719+00:00  KXNBAGAME-26MAR22WASNYK-WAS
+     action=buy_no    gt_prob=0.0  confidence=0.95
+     yes_team='washington wizards'  settled=yes  exit_price=1.0
+     pnl=-57.0  layer_diagnosis: Layer A - GT/source direction disagreed with settlement
+
+--- Source: SportsLiveSource  (2 inverted total)
+  2026-03-26T04:25:32.305101+00:00  KXNBAGAME-26MAR25HOUMIN-MIN
+     action=buy_no    gt_prob=0.05  confidence=0.92
+     yes_team='minnesota timberwolves'  settled=yes  exit_price=1.0
+     pnl=-43.93  layer_diagnosis: Layer A - GT/source direction disagreed with settlement
+  2026-03-26T04:26:30.946045+00:00  KXNBAGAME-26MAR25HOUMIN-MIN
+     action=buy_no    gt_prob=0.05  confidence=0.92
+     yes_team='minnesota timberwolves'  settled=yes  exit_price=1.0
+     pnl=-43.93  layer_diagnosis: Layer A - GT/source direction disagreed with settlement
+
+Aggregate layer breakdown across ALL inverted losses (not just sample):
+      7  Layer A - GT/source direction disagreed with settlement
+
+==============================================================================
+# Section 5 — Verdict
+==============================================================================
+
+(i)   Total per-entry sports losses (pnl<0): 7
+(ii)  INVERTED:                            7  (100.0%)
+(iii) CORRECT-SIDE-LOST:                   0  (0.0%)
+(iv)  UNSETTLED / data-incomplete:         0  (0.0%)
+      GET_YES_TEAM_FAILED:                 0  (0.0%)
+
+(v) Per-source breakdown reported in Section 3.
+(vi) Layer breakdown reported in Section 4.
+
+(a) INVERTED dominates and Layer A - GT/source direction disagreed with settlement dominates (100%) — targeted fault locus.
+
+ESPN/basketball/nba entry breakdown by (gt_prob, action):
+  gt_prob=0.02  action=buy_no  count=92
+  gt_prob=0.0  action=buy_no  count=9
+  gt_prob=0.98  action=buy_yes  count=4
+  gt_prob=0.852  action=buy_yes  count=1
+  buy_no_p02           entries= 91  filled=  2  wins=  0  losses=  2
+      exit_price dist: {1.0: 2}
+  buy_no_p0            entries=  3  filled=  3  wins=  0  losses=  3
+      exit_price dist: {1.0: 3}
+  buy_yes_p98          entries=  3  filled=  0  wins=  0  losses=  0
+  buy_yes_p85          entries=  1  filled=  0  wins=  0  losses=  0

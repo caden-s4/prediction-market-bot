@@ -432,10 +432,15 @@ class KalshiWebSocket:
                         await self._send_subscribe(ws, cmd.tickers[i:i + 100])
                         await asyncio.sleep(0.05)
                 elif cmd.action == "unsubscribe":
-                    # Batch unsubscribes 100/frame to mirror subscribe batching
-                    # (audit §8.4); v2 sids payload supports a list per frame.
-                    for i in range(0, len(cmd.tickers), 100):
-                        await self._send_unsubscribe(ws, cmd.tickers[i:i + 100])
+                    # Resolve tickers → unique sids ONCE, then chunk the sid
+                    # list 100/frame. Slicing tickers and resolving per-chunk
+                    # (the previous design) sent the same sid in multiple
+                    # frames whenever a sid covered tickers spanning chunk
+                    # boundaries — first frame removed the sid server-side,
+                    # later frames produced code=7 "Unknown subscription ID".
+                    sids = self._resolve_unsubscribe_sids(cmd.tickers)
+                    for i in range(0, len(sids), 100):
+                        await self._send_unsubscribe(ws, sids[i:i + 100])
                         await asyncio.sleep(0.05)
 
     # ── WS frame helpers ─────────────────────────────────────────────────────
@@ -453,12 +458,13 @@ class KalshiWebSocket:
         await ws.send(json.dumps(msg))
         logger.debug("WS subscribe sent: %d tickers", len(tickers))
 
-    async def _send_unsubscribe(self, ws: Any, tickers: List[str]) -> None:
-        """Send one unsubscribe frame for a chunk of *tickers* via Kalshi v2 sids.
+    def _resolve_unsubscribe_sids(self, tickers: List[str]) -> List[Any]:
+        """Resolve *tickers* to unique sids for an unsubscribe batch.
 
-        v2 requires ``params.sids`` (array of subscription IDs), not
-        ``market_ticker``. Tickers without a known sid are skipped — the next
-        sync cycle will retry them once an ack maps the sid.
+        Dedupes globally across the whole batch (not per-frame) so that a sid
+        the server bound to tickers spanning multiple 100-chunks is sent
+        exactly once. Tickers without a known sid are skipped — the next sync
+        cycle will retry them once an ack maps the sid.
         """
         sids: List[Any] = []
         seen_sids: set = set()
@@ -470,12 +476,17 @@ class KalshiWebSocket:
                         "WS unsubscribe skipped: no sid known for ticker %s", t,
                     )
                     continue
-                # De-dupe: if the server bound several tickers to one sid,
-                # send the sid once.
                 if sid in seen_sids:
                     continue
                 seen_sids.add(sid)
                 sids.append(sid)
+        return sids
+
+    async def _send_unsubscribe(self, ws: Any, sids: List[Any]) -> None:
+        """Send one unsubscribe frame for a chunk of *sids* (up to 100).
+
+        v2 requires ``params.sids`` (array of subscription IDs).
+        """
         if not sids:
             return
         msg = {

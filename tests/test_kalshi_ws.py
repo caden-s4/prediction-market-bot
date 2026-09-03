@@ -94,61 +94,57 @@ def test_sub_ack_only_confirms_inflight_tickers():
 
 def test_send_unsubscribe_uses_sids_array():
     ws = _make_ws()
-    with ws._sub_lock:
-        ws._subscribed.update({"A", "B"})
-        ws._ticker_to_sid.update({"A": 11, "B": 22})
-        ws._sid_to_tickers[11] = {"A"}
-        ws._sid_to_tickers[22] = {"B"}
     fake = _FakeWebSocket()
 
-    asyncio.run(ws._send_unsubscribe(fake, ["A", "B"]))
+    asyncio.run(ws._send_unsubscribe(fake, [11, 22]))
 
     assert len(fake.sent) == 1
     frame = fake.sent[0]
     assert frame["cmd"] == "unsubscribe"
     assert "sids" in frame["params"]
     assert "market_ticker" not in frame["params"]
-    assert sorted(frame["params"]["sids"]) == [11, 22]
+    assert frame["params"]["sids"] == [11, 22]
 
 
-def test_send_unsubscribe_skips_unknown_sid(caplog):
+def test_send_unsubscribe_empty_sends_nothing():
+    ws = _make_ws()
+    fake = _FakeWebSocket()
+
+    asyncio.run(ws._send_unsubscribe(fake, []))
+
+    assert fake.sent == []
+
+
+def test_resolve_unsubscribe_sids_skips_unknown(caplog):
     ws = _make_ws()
     with ws._sub_lock:
         ws._subscribed.add("A")
         ws._ticker_to_sid["A"] = 11
         ws._sid_to_tickers[11] = {"A"}
-    fake = _FakeWebSocket()
 
     with caplog.at_level(logging.DEBUG, logger="data.markets.kalshi_ws"):
-        asyncio.run(ws._send_unsubscribe(fake, ["A", "UNKNOWN"]))
+        sids = ws._resolve_unsubscribe_sids(["A", "UNKNOWN"])
 
-    assert len(fake.sent) == 1
-    assert fake.sent[0]["params"]["sids"] == [11]
+    assert sids == [11]
     assert "no sid known" in caplog.text
 
 
-def test_send_unsubscribe_all_unknown_sends_nothing():
+def test_resolve_unsubscribe_sids_all_unknown_returns_empty():
     ws = _make_ws()
-    fake = _FakeWebSocket()
 
-    asyncio.run(ws._send_unsubscribe(fake, ["UNKNOWN1", "UNKNOWN2"]))
-
-    assert fake.sent == []
+    assert ws._resolve_unsubscribe_sids(["UNKNOWN1", "UNKNOWN2"]) == []
 
 
-def test_send_unsubscribe_dedupes_shared_sids():
+def test_resolve_unsubscribe_sids_dedupes_shared_sids():
     # If the server bound multiple tickers to one sid (per-batch semantics),
-    # unsubscribe should send that sid exactly once per frame.
+    # the resolver should yield that sid exactly once.
     ws = _make_ws()
     with ws._sub_lock:
         ws._subscribed.update({"A", "B"})
         ws._ticker_to_sid.update({"A": 5, "B": 5})
         ws._sid_to_tickers[5] = {"A", "B"}
-    fake = _FakeWebSocket()
 
-    asyncio.run(ws._send_unsubscribe(fake, ["A", "B"]))
-
-    assert fake.sent[0]["params"]["sids"] == [5]
+    assert ws._resolve_unsubscribe_sids(["A", "B"]) == [5]
 
 
 # ── Batched unsubscribe (Part 3) ────────────────────────────────────────────
@@ -164,14 +160,35 @@ def test_unsubscribe_batches_100_per_frame():
     fake = _FakeWebSocket()
 
     async def drive():
-        for i in range(0, len(tickers), 100):
-            await ws._send_unsubscribe(fake, tickers[i:i + 100])
+        sids = ws._resolve_unsubscribe_sids(tickers)
+        for i in range(0, len(sids), 100):
+            await ws._send_unsubscribe(fake, sids[i:i + 100])
     asyncio.run(drive())
 
     assert len(fake.sent) == 3
     assert len(fake.sent[0]["params"]["sids"]) == 100
     assert len(fake.sent[1]["params"]["sids"]) == 100
     assert len(fake.sent[2]["params"]["sids"]) == 50
+
+
+def test_resolve_unsubscribe_sids_dedupes_across_chunks():
+    # Regression for the code=7 burst: a sid bound to tickers spanning
+    # multiple 100-chunks must be sent exactly once across the whole batch.
+    # 250 tickers, all sharing 3 sids whose ticker groupings straddle the
+    # 100-ticker boundaries.
+    ws = _make_ws()
+    tickers = [f"T{i}" for i in range(250)]
+    with ws._sub_lock:
+        ws._subscribed.update(tickers)
+        for i, t in enumerate(tickers):
+            sid = 100 + (i // 90)  # sids 100, 101, 102; groups of 90 → cross 100-boundaries
+            ws._ticker_to_sid[t] = sid
+            ws._sid_to_tickers.setdefault(sid, set()).add(t)
+
+    sids = ws._resolve_unsubscribe_sids(tickers)
+
+    assert sorted(sids) == [100, 101, 102]
+    assert len(sids) == len(set(sids))
 
 
 # ── Ack-driven _subscribed mutation (Part 4) ────────────────────────────────

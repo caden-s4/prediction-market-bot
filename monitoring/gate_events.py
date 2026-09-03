@@ -16,9 +16,35 @@ logger = logging.getLogger(__name__)
 
 GATE_EVENTS_PATH = Path("data/runtime/gate_events.jsonl")
 SCHEMA_VERSION = 1
+MAX_BYTES = 150 * 1024 * 1024
+BACKUP_COUNT = 20
 _write_lock = threading.Lock()
 
 GATE_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _backup_path(index: int) -> Path:
+    return GATE_EVENTS_PATH.with_name(GATE_EVENTS_PATH.name + f".{index}")
+
+
+def _rotate_if_needed() -> None:
+    """Rotate the events file once it exceeds MAX_BYTES. Caller must hold _write_lock."""
+    try:
+        if GATE_EVENTS_PATH.stat().st_size < MAX_BYTES:
+            return
+    except OSError:
+        return
+    try:
+        oldest = _backup_path(BACKUP_COUNT)
+        if oldest.exists():
+            oldest.unlink()
+        for i in range(BACKUP_COUNT - 1, 0, -1):
+            src = _backup_path(i)
+            if src.exists():
+                src.replace(_backup_path(i + 1))
+        GATE_EVENTS_PATH.replace(_backup_path(1))
+    except Exception as exc:
+        logger.warning("gate_events: rotation failed: %s", exc)
 
 
 def log_gate_event(
@@ -61,6 +87,7 @@ def log_gate_event(
     try:
         line = json.dumps(record) + "\n"
         with _write_lock:
+            _rotate_if_needed()
             with GATE_EVENTS_PATH.open("a", encoding="utf-8") as f:
                 f.write(line)
     except Exception as exc:

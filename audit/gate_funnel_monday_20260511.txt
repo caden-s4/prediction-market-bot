@@ -1,0 +1,35 @@
+58 unparseable line(s) skipped
+
+Gate funnel — last 45h (2026-05-09T23:06:42Z to 2026-05-11T20:06:42Z)
+
+scanner_reject                519,122 events
+  category                            461,079 (88.8%)
+  financial_bracket_disabled          40,900 (7.9%)
+  hours                               17,143 (3.3%)
+
+gt_routing                    13,156 events
+  source_returned_none                10,610 (80.6%)
+  source_not_tradeable                 2,546 (19.4%)
+
+confidence                    183 events
+  source_below_gate                      181 (98.9%)
+  direction_ambiguous                      2 (1.1%)
+
+executor_pretrade             922 events
+  large_divergence_extreme_market        918 (99.6%)
+  empty_book_ghost                         2 (0.2%)
+  perm_skip_confidence_failures            2 (0.2%)
+
+snipe                         4,416 events
+  no_signal                            4,259 (96.4%)
+  bankroll                                48 (1.1%)
+  (none)                                  47 (1.1%)
+  price_gate                              30 (0.7%)
+  dedup                                   17 (0.4%)
+  empty_book_snipe                        10 (0.2%)
+  series_cap                               5 (0.1%)
+
+invariant_violation           8,449 events
+  ws_rest_mid_disagreement             5,276 (62.4%)
+  implausible_gap                      3,173 (37.6%)
+

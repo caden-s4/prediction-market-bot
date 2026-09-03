@@ -1,83 +1,74 @@
-# Phase 7 — Yahoo CL=F Freshness Profile
-**Status: PENDING PIT-HOUR DATA** — sampler scheduled for 2026-05-08 06:00 local (09:00 ET)
-**Mode:** Diagnostic only. No code changes.
+# Phase 7 � Yahoo CL=F Freshness Profile
+**Sampler file:** `audit/yahoo_clf_samples.csv`
+**Total rows:** 254  |  **Successful fetches:** 254
+**Window:** 2026-05-07 22:56 EDT � 13:00 EDT
 
----
-
-## Setup
-
-**Sampler:** `scripts/scratch/yahoo_clf_sampler.py` — fetches `regularMarketTime` every 60s
-**Analysis:** `scripts/scratch/analyze_clf_samples.py` — produces table + Phase 0b cross-reference
-**Output CSV:** `audit/yahoo_clf_samples.csv` (append mode; survives restarts)
-**Task Scheduler entry:** `YahooCLFSampler_Phase7` — fires 2026-05-08 06:00 local (09:00 ET),
-runs for 240 min (10:00 local / 13:00 ET). Logon required.
-
----
-
-## Overnight baseline (2026-05-07 22:56–22:59 ET, 14 samples)
-
-These are samples from the test runs during script setup. Overnight session, low volume.
+## Step 2 � Lag by ET hour
 
 | ET hour bucket | N | min lag | median | p75 | p95 | max | <300s | <600s |
 |---|---|---|---|---|---|---|---|---|
-| 22:00–23:00 ET | 14 | 602s | 606s | 612s | 616s | 616s | 0% | 0% |
+| 09:00-10:00 ET | 60 | 600s | 604s | 607s | 614s | 618s | 0% | 0% |
+| 10:00-11:00 ET | 60 | 600s | 604s | 607s | 612s | 614s | 0% | 0% |
+| 11:00-12:00 ET | 60 | 600s | 604s | 607s | 611s | 612s | 0% | 2% |
+| 12:00-13:00 ET | 59 | 601s | 605s | 608s | 613s | 615s | 0% | 0% |
+| 13:00-14:00 ET | 1 | 612s | 612s | 612s | 612s | 612s | 0% | 0% |
+| 22:00-23:00 ET | 14 | 602s | 606s | 612s | 616s | 616s | 0% | 0% |
+| **OVERALL** | 254 | 600s | 604s | 608s | 612s | 618s | 0% | 0% |
 
-**Interpretation:** Yahoo consistently delivers CL=F data ~10 minutes behind wall-clock during
-the overnight session (10pm ET). Zero samples cleared the 300s gate, zero cleared 600s.
-This aligns with Phase 6's single-point measurement of 605s at 22:49 ET.
+## Step 3 � Phase 0b KXWTI trade-hour cross-reference
 
----
+Phase 0b KXWTI trades: 41
 
-## Step 2 — Pit-hour lag table (PENDING)
+| entry_ts (ET) | ET hour | correct | median lag at hour | pass 300s gate? |
+|---|---|---|---|---|
+| 2026-03-22 18:17 | 18h | True | no data | unknown |
+| 2026-03-22 18:19 | 18h | True | no data | unknown |
+| 2026-03-23 19:27 | 19h | False | no data | unknown |
+| 2026-03-23 19:38 | 19h | False | no data | unknown |
+| 2026-03-24 14:40 | 14h | True | no data | unknown |
+| 2026-03-24 14:45 | 14h | True | no data | unknown |
+| 2026-03-24 14:47 | 14h | True | no data | unknown |
+| 2026-03-24 14:51 | 14h | True | no data | unknown |
+| 2026-03-25 14:44 | 14h | False | no data | unknown |
+| 2026-03-25 14:49 | 14h | True | no data | unknown |
+| 2026-03-26 14:38 | 14h | False | no data | unknown |
+| 2026-03-26 14:42 | 14h | True | no data | unknown |
+| 2026-03-28 19:06 | 19h | True | no data | unknown |
+| 2026-03-28 20:48 | 20h | True | no data | unknown |
+| 2026-03-28 20:50 | 20h | True | no data | unknown |
+| 2026-03-28 21:18 | 21h | True | no data | unknown |
+| 2026-03-29 17:19 | 17h | False | no data | unknown |
+| 2026-03-29 19:54 | 19h | True | no data | unknown |
+| 2026-03-29 23:12 | 23h | True | no data | unknown |
+| 2026-03-30 01:08 | 01h | True | no data | unknown |
+| 2026-03-31 22:43 | 22h | False | 606s | NO |
+| 2026-04-01 02:10 | 02h | False | no data | unknown |
+| 2026-04-01 02:36 | 02h | False | no data | unknown |
+| 2026-04-01 21:07 | 21h | True | no data | unknown |
+| 2026-04-01 21:17 | 21h | True | no data | unknown |
+| 2026-04-01 21:34 | 21h | True | no data | unknown |
+| 2026-04-02 00:42 | 00h | True | no data | unknown |
+| 2026-04-02 07:27 | 07h | True | no data | unknown |
+| 2026-04-02 16:33 | 16h | True | no data | unknown |
+| 2026-04-02 18:44 | 18h | True | no data | unknown |
+| 2026-04-04 15:32 | 15h | True | no data | unknown |
+| 2026-04-04 17:23 | 17h | True | no data | unknown |
+| 2026-04-06 02:39 | 02h | True | no data | unknown |
+| 2026-04-06 03:47 | 03h | True | no data | unknown |
+| 2026-04-06 04:53 | 04h | True | no data | unknown |
+| 2026-04-07 18:51 | 18h | True | no data | unknown |
+| 2026-04-07 19:33 | 19h | True | no data | unknown |
+| 2026-04-07 23:37 | 23h | True | no data | unknown |
+| 2026-04-07 23:40 | 23h | True | no data | unknown |
+| 2026-04-08 16:30 | 16h | True | no data | unknown |
+| 2026-04-08 18:16 | 18h | True | no data | unknown |
 
-To be populated after sampler run on 2026-05-08 09:00–13:00 ET.
+**Of 41 Phase 0b KXWTI trades: 0 would pass 300s gate (at median lag for that hour). 0 trades at hours with no sampler data.**
 
-Run the analysis script after 1pm ET:
-```
-python scripts/scratch/analyze_clf_samples.py > audit/yahoo_clf_freshness_profile_20260507.md
-```
+The 8 incorrect trades were at hours with median lag: 19h=no data, 19h=no data, 14h=no data, 14h=no data, 17h=no data, 22h=606s, 02h=no data, 02h=no data.
 
-Expected columns: ET hour | N | min | median | p75 | p95 | max | <300s | <600s
+## Step 4 � Conclusion
 
----
+Pit-hours (9am-1pm ET) median lag: 604s  |  <300s: 0% of 240 samples
 
-## Step 3 — Phase 0b KXWTI cross-reference (PENDING)
-
-41 KXWTI trades in Phase 0b. Hour distribution:
-- 14h ET (2pm): 6 trades (all daytime, highest liquidity)
-- 18h ET (6pm): 5 trades (post-pit, electronic)
-- 19h ET (7pm): 3 trades (electronic)
-- 20h ET (8pm): 2 trades
-- 21h ET (9pm): 1 trade
-- 23h ET (11pm): 1 trade
-- 01h ET (1am): 1 trade
-- 02h ET (2am): 3 trades
-- 03h–07h ET: 3 trades
-- 15h–17h ET: 3 trades
-- 22h ET: 1 trade (this hour sampled: median 606s → would NOT pass 300s gate)
-
-Cross-reference pending pit-hour sampling. The 22h trade already confirmed blocked.
-
----
-
-## Step 4 — Conclusion (PENDING)
-
-Will be resolved to (a), (b), or (c) after pit-hour data is collected:
-
-- **(a)** Yahoo serves CL=F fresh enough during pit hours to clear 300s → per-source/hour-aware gating
-- **(b)** Yahoo is always >300s stale, even during pit hours → real-time source or kill CL=F
-- **(c)** Yahoo borderline during pit hours (median 200–450s) → wider gate or off-hours filter
-
----
-
-## Verification gates
-
-- [x] Sampler built and tested (14 overnight samples confirm CSV format correct)
-- [x] Task Scheduler entry created for 2026-05-08 06:00 local (09:00 ET)
-- [ ] Sampler ran ≥4 hours covering pit hours — **PENDING (fires 06:00 local tomorrow)**
-- [ ] Hour-bucketed lag table populated
-- [ ] Phase 0b trade hours cross-referenced
-- [ ] Conclusion identifies (a), (b), or (c) explicitly
-- [x] No source files modified
-- [x] No fix proposed
-- [x] `audit/yahoo_clf_samples.csv` saved
+**Verdict: (b) Yahoo is >300s stale even during pit hours.**

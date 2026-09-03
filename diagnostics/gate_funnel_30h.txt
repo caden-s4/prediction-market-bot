@@ -1,0 +1,32 @@
+58 unparseable line(s) skipped
+
+Gate funnel — last 30h (2026-05-31T12:35:42Z to 2026-06-01T18:35:42Z)
+
+scanner_reject                345,236 events
+  category                            289,743 (83.9%)
+  financial_bracket_disabled          39,060 (11.3%)
+  hours                               10,489 (3.0%)
+  legacy_weather_snipe_disabled        3,330 (1.0%)
+  economic_bracket_disabled            2,614 (0.8%)
+
+gt_routing                    3,101 events
+  source_returned_none                 1,614 (52.0%)
+  source_not_tradeable                 1,487 (48.0%)
+
+confidence                    296 events
+  source_below_gate                      296 (100.0%)
+
+executor_pretrade             1 events
+  perm_skip_confidence_failures            1 (100.0%)
+
+fill_cap                      29 events
+  (none)                                  29 (100.0%)
+
+snipe                         27 events
+  (none)                                  14 (51.9%)
+  price_gate                              13 (48.1%)
+
+invariant_violation           75 events
+  ws_rest_mid_disagreement                54 (72.0%)
+  implausible_gap                         21 (28.0%)
+

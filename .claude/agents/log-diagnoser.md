@@ -92,7 +92,19 @@ Stale data is the **#1 risk class** — always verify data freshness.
 
 ## Method
 
-1. **Scope the window first.** If the user gave a timestamp or time range, use it. Otherwise default to the last 30 minutes of `logs/bot.log`. If `logs/bot.log` is empty or truncated, check `bot.log.1`.
+1. **Scope the window first.** If the user gave a timestamp or time range, use it. Otherwise default to "since-last-commit". You MUST execute these steps in order before any other tool calls — do not skip any:
+
+   **Step 1a — Lower bound (Bash):** `git log -1 --format='%h %cd' --date=iso-strict`. Capture the short hash and committer timestamp. Convert to PST (`America/Los_Angeles`) if not already.
+
+   **Step 1b — File enumeration (Glob):** `logs/bot.log*`. List every rotated log file present, sorted by mtime. The set of files you will read is the full enumerated list — NOT just `bot.log` and `bot.log.1`. Past failures came from reading only the two newest files and missing 24h+ of available data.
+
+   **Step 1c — Upper bound (Bash):** read the last timestamp-bearing line of `logs/bot.log` (e.g. `tail -1 logs/bot.log`). If empty, fall back to the newest non-empty file from 1b.
+
+   **Step 1d — Oldest-available timestamp (Bash):** read the first timestamp-bearing line of the OLDEST file from 1b (e.g. `head -1 logs/bot.log.3`). This is your earliest reachable data point.
+
+   **Step 1e — Clamp + report:** If the lower bound from 1a is older than the oldest-available timestamp from 1d, clamp the lower bound to 1d's timestamp. In the WINDOW field of BASELINE, you MUST always print: (1) commit hash and commit timestamp, (2) resolved lower bound after clamping, (3) upper bound, (4) every file you read with line counts, (5) explicit note of any commit-to-log gap not covered by available logs (in days/hours).
+
+   **Step 1f — Read all files:** read EVERY file enumerated in 1b that falls within the clamped window. Do not silently drop files. If you only read a subset, the diagnosis is incomplete and must say so in NOT COVERED — but the default is read all of them.
 
 2. **Compile the BASELINE before searching for anomalies.** The baseline numbers (uptime, trades, bankroll, cycle p50/p90/p99, gate funnel top 5, GT outages, repeated-signal top 5) frame everything else. Anomaly-first reads tend to miss "nothing happened for 6 hours" as a finding.
 

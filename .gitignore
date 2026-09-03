@@ -65,3 +65,17 @@ scripts/scratch/
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 *.docx
+
+# large data
+data/historical/
+
+# scan output
+leaks.json
+
+# locks
+*.lock
+
+# scratch diagnostics
+diagnostics/_*
+scripts/_*
+audit/_*

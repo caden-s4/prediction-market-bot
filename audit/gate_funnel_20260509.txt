@@ -1,0 +1,40 @@
+58 unparseable line(s) skipped
+
+Gate funnel — last 168h (2026-05-03T03:28:50Z to 2026-05-10T03:28:50Z)
+
+scanner_reject                1,257,982 events
+  category                            1,162,165 (92.4%)
+  financial_bracket_disabled          54,704 (4.3%)
+  hours                               41,113 (3.3%)
+
+gt_routing                    30,395 events
+  source_returned_none                23,935 (78.7%)
+  source_not_tradeable                 6,460 (21.3%)
+
+confidence                    287 events
+  source_below_gate                      285 (99.3%)
+  direction_ambiguous                      2 (0.7%)
+
+executor_pretrade             1,294 events
+  gt_stale_at_entry                      942 (72.8%)
+  large_divergence_extreme_market        314 (24.3%)
+  series_cap                              29 (2.2%)
+  perm_skip_confidence_failures            8 (0.6%)
+  empty_book_ghost                         1 (0.1%)
+
+snipe                         8,597 events
+  no_signal                            8,534 (99.3%)
+  dedup                                   31 (0.4%)
+  bankroll                                18 (0.2%)
+  empty_book_snipe                        10 (0.1%)
+  series_cap                               4 (0.0%)
+
+smoke                         6 events
+  (none)                                   2 (33.3%)
+  test_reject                              2 (33.3%)
+  test_unserializable                      2 (33.3%)
+
+invariant_violation           6,515 events
+  ws_rest_mid_disagreement             5,321 (81.7%)
+  implausible_gap                      1,194 (18.3%)
+
